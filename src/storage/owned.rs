@@ -101,6 +101,11 @@ impl RecordReservation {
     pub(crate) fn into_json(self) -> JsonReservation {
         self.json
     }
+
+    pub(crate) fn into_workspace(self) -> WorkspaceReservation {
+        let Self { json, workspace } = self;
+        workspace.unwrap_or_else(|| json.context().workspace_reservation())
+    }
 }
 
 impl From<JsonReservation> for RecordReservation {

@@ -63,7 +63,22 @@ impl TokenizerConfig {
         value
             .validate_kind(crate::json::JsonInputKind::CollectionConfig)
             .map_err(|err| err.with_detail("field", "tokenizer"))?;
-        if value != &Self::default().to_json() {
+        Self::compare_identity(value, &Self::default().to_json())
+    }
+
+    pub(crate) fn from_validated_in(
+        value: &JsonValue,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<Self> {
+        let mut work = context.reservation();
+        let builder =
+            JsonBuilder::budgeted(&mut work, crate::json::JsonInputKind::CollectionConfig);
+        let expected = Self::default().build_json(&builder)?;
+        Self::compare_identity(value, &expected)
+    }
+
+    fn compare_identity(value: &JsonValue, expected: &JsonValue) -> Result<Self> {
+        if value != expected {
             return Err(Error::new(
                 ErrorCode::InvalidJsonlSchema,
                 "tokenizer must be the complete immutable default_en 0.1 object",

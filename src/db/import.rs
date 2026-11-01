@@ -133,6 +133,46 @@ impl Database {
         warnings: &mut crate::import::warnings::ImportWarnings,
         visit: impl FnOnce(&mut dyn FnMut(ImportRow, RecordReservation) -> Result<()>) -> Result<()>,
     ) -> Result<(InsertSummary, ImportBatchMetrics)> {
+        self.import_preprocessed_rows_in(options, None, context, warnings, visit)
+    }
+
+    pub(crate) fn write_preprocessed_batch(
+        &self,
+        collection_id: &str,
+        on_conflict: OnConflict,
+        context: JsonOperationContext,
+        warnings: &mut crate::import::warnings::ImportWarnings,
+        visit: impl FnOnce(&mut dyn FnMut(ImportRow, RecordReservation) -> Result<()>) -> Result<()>,
+    ) -> Result<InsertSummary> {
+        let (payload, _options_work) = self.lock()?.read_reclaiming(|inner| {
+            copy_collection_in(inner.catalog.collection_by_id(collection_id)?, &context)
+        })?;
+        let collection = payload;
+        let options = ManifestImportOptions {
+            tokenizer: collection.tokenizer,
+            collection_name: collection.name,
+            embedding_dim: collection.embedding_dim,
+            distance_metric: collection.distance_metric,
+            embedding_model: collection.embedding_model,
+            vectors_normalized: Some(collection.vectors_normalized),
+            document_path: PathBuf::from("documents"),
+            chunk_path: PathBuf::from("chunks"),
+            embedding_path: Some(PathBuf::from("embeddings")),
+            on_conflict,
+            index_build_mode: ImportIndexBuildMode::InlineFullCheckpoint,
+        };
+        self.import_preprocessed_rows_in(options, Some(collection_id), context, warnings, visit)
+            .map(|(summary, _)| summary)
+    }
+
+    fn import_preprocessed_rows_in(
+        &self,
+        options: ManifestImportOptions,
+        direct_collection: Option<&str>,
+        context: JsonOperationContext,
+        warnings: &mut crate::import::warnings::ImportWarnings,
+        visit: impl FnOnce(&mut dyn FnMut(ImportRow, RecordReservation) -> Result<()>) -> Result<()>,
+    ) -> Result<(InsertSummary, ImportBatchMetrics)> {
         let mut inner = self.lock()?;
         let millis = time::unix_millis_now();
         let now = inner.read_reclaiming(|_| {
@@ -141,8 +181,9 @@ impl Database {
             })
         })?;
         let mut collection_work = RecordReservation::from(context.reservation());
-        let (collection, work) = inner.read_reclaiming(|inner| {
-            import_collection(&inner.catalog, &options, &context, now.as_ref())
+        let (collection, work) = inner.read_reclaiming(|inner| match direct_collection {
+            Some(id) => copy_collection_in(inner.catalog.collection_by_id(id)?, &context),
+            None => import_collection(&inner.catalog, &options, &context, now.as_ref()),
         })?;
         collection_work.merge(work);
         let mut models = inner
@@ -184,6 +225,12 @@ impl Database {
         }
 
         let mut summary = InsertSummary::default();
+        // The direct path can append to a visible parent without replacing it.
+        // Hold only the new live ordinal keys; inspect old chunks after every
+        // replacement is known so an ordinal swap does not look like a clash.
+        let mut direct_ordinal_work = RecordReservation::from(context.reservation());
+        let mut direct_ordinals =
+            crate::json::ReservedVec::with_capacity(0, &context, "operation_scratch")?;
         let mut ordinal_keys: Option<ExternalUniqueKeys> = None;
         let mut ordinal_error = None;
         let mut embedding_keys: Option<ExternalUniqueKeys> = None;
@@ -336,8 +383,19 @@ impl Database {
                         chunks.insert(&chunk.chunk_external_id, line, 0)?;
                         return Ok(());
                     }
-                    let (_, planned_document) = match documents.get(&document_external_id)? {
-                        Some(reference) => reference,
+                    let planned_document = match documents.get(&document_external_id)? {
+                        Some((_, planned)) => Some(planned),
+                        None if direct_collection.is_some() => {
+                            if let Err(error) = inner.catalog.document_by_external_id(
+                                &collection.collection_id,
+                                &document_external_id,
+                            ) {
+                                chunks.insert(&chunk.chunk_external_id, line, 0)?;
+                                preflight_error = Some(error);
+                                return Ok(());
+                            }
+                            None
+                        }
                         None => {
                             chunks.insert(&chunk.chunk_external_id, line, 0)?;
                             preflight_error = Some(crate::import::with_jsonl_location(
@@ -349,7 +407,7 @@ impl Database {
                             return Ok(());
                         }
                     };
-                    if planned_document == 0 {
+                    if planned_document == Some(0) {
                         chunks.insert(&chunk.chunk_external_id, line, 0)?;
                         summary.chunks_skipped += 1;
                         return Ok(());
@@ -401,11 +459,23 @@ impl Database {
                             .next_id_in("chk_", summary.chunks_inserted as u64, &context)?
                             .into_parts();
                         work.merge_workspace(id_work);
-                        let (document_id, id_work) = inner
-                            .catalog
-                            .next_id_in("doc_", planned_document - 1, &context)?
-                            .into_parts();
-                        work.merge_workspace(id_work);
+                        let document_id = match planned_document {
+                            Some(number) => {
+                                let (id, id_work) = inner
+                                    .catalog
+                                    .next_id_in("doc_", number - 1, &context)?
+                                    .into_parts();
+                                work.merge_workspace(id_work);
+                                id
+                            }
+                            None => {
+                                let document = inner.catalog.document_by_external_id(
+                                    &collection.collection_id,
+                                    &document_external_id,
+                                )?;
+                                work.copy_string(&document.document_id, &context)?
+                            }
+                        };
                         let (text_hash, hash_work) =
                             ReservedString::build_exact(64, &context, "batch_prepare", |out| {
                                 crate::hash::write_digest_hex(
@@ -422,6 +492,15 @@ impl Database {
                             [chunk_id, document_id, collection_id, text_hash, created_at],
                         ))
                     })?;
+                    if direct_collection.is_some() {
+                        inner.read_reclaiming(|_| {
+                            let mut work = RecordReservation::from(context.reservation());
+                            let retained_id = work.copy_string(&document_id, &context)?;
+                            direct_ordinals.try_push((retained_id, chunk.ordinal, line))?;
+                            direct_ordinal_work.merge(work);
+                            Ok(())
+                        })?;
+                    }
                     chunks.insert(
                         &chunk.chunk_external_id,
                         line,
@@ -480,6 +559,33 @@ impl Database {
                     }
                     let (_, planned) = match chunks.get(&input.chunk_external_id)? {
                         Some(reference) => reference,
+                        None if direct_collection.is_some() => {
+                            let chunk = match inner.catalog.chunk_by_external_id(
+                                &collection.collection_id,
+                                &input.chunk_external_id,
+                            ) {
+                                Ok(chunk) => chunk,
+                                Err(error) => {
+                                    preflight_error = Some(error);
+                                    return Ok(());
+                                }
+                            };
+                            let document = inner.catalog.document_by_id_ref(
+                                &collection.collection_id,
+                                &chunk.document_id,
+                            )?;
+                            if documents
+                                .get(&document.external_id)?
+                                .is_some_and(|(_, planned)| planned > 0)
+                            {
+                                preflight_error = Some(Error::new(
+                                    ErrorCode::ChunkNotFound,
+                                    "embedding target is removed by this batch's document replacement",
+                                ));
+                                return Ok(());
+                            }
+                            (0, 0)
+                        }
                         None => {
                             let error = Error::new(ErrorCode::InvalidJsonlSchema,
                                 format!("embeddings reference chunk_external_id {} not present in this manifest; use import-embeddings for embedding-only updates", input.chunk_external_id));
@@ -609,7 +715,6 @@ impl Database {
         documents.finish()?;
         chunks.finish()?;
         drop(documents);
-        drop(chunks);
         finish_reference_keys(&mut embedding_keys, options.embedding_path.as_deref())?;
         finish_ordinal_keys(&mut ordinal_keys, &options.chunk_path, &mut ordinal_error)?;
         if let Some(error) = ordinal_error {
@@ -618,8 +723,48 @@ impl Database {
         if let Some(error) = preflight_error {
             return Err(error);
         }
-        let batches =
-            inner.append_import_batches(records.finish()?, options.index_build_mode, &context)?;
+        direct_ordinals
+            .as_mut_slice()
+            .sort_unstable_by(|left, right| (&left.0, left.1).cmp(&(&right.0, right.1)));
+        let ordinals = direct_ordinals.as_slice();
+        let mut start = 0;
+        while start < ordinals.len() {
+            let document_id = &ordinals[start].0;
+            let mut end = start + 1;
+            while end < ordinals.len() && ordinals[end].0 == *document_id {
+                end += 1;
+            }
+            let proposed = &ordinals[start..end];
+            for old in inner.catalog.live_document_chunks(document_id) {
+                let Ok(position) = proposed.binary_search_by_key(&old.ordinal, |key| key.1) else {
+                    continue;
+                };
+                if matches!(chunks.get(&old.chunk_external_id)?, Some((_, planned)) if planned > 0)
+                {
+                    // The old identity is removed by a replacement in this batch.
+                    continue;
+                }
+                return Err(crate::import::with_jsonl_location(
+                    Error::new(
+                        ErrorCode::InvalidJsonlSchema,
+                        "chunk ordinal must be unique within a document",
+                    )
+                    .with_detail("field", "ordinal"),
+                    &options.chunk_path,
+                    proposed[position].2,
+                ));
+            }
+            start = end;
+        }
+        drop(direct_ordinals);
+        drop(direct_ordinal_work);
+        drop(chunks);
+        let records = records.finish()?;
+        let batches = if direct_collection.is_some() {
+            inner.append_direct_batch(records, &context)?
+        } else {
+            inner.append_import_batches(records, options.index_build_mode, &context)?
+        };
         Ok((summary, batches))
     }
 }

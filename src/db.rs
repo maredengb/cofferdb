@@ -243,8 +243,10 @@ struct Inner {
     last_commit_sequence_no: u64,
     #[cfg(test)]
     fail_next_index_checkpoint_refresh: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-test-support"))]
     import_fail_after_batches: Option<usize>,
+    #[cfg(feature = "native-test-support")]
+    import_failure_guard_active: bool,
     #[cfg(test)]
     index_checkpoint_refreshes: usize,
     #[cfg(test)]
@@ -369,6 +371,18 @@ impl IndexChanges {
 
 impl Database {
     pub fn create(path: impl AsRef<Path>, config: DatabaseConfig) -> Result<Self> {
+        Self::create_in(
+            path.as_ref(),
+            config,
+            crate::json::JsonOperationContext::standalone(),
+        )
+    }
+
+    pub(crate) fn create_in(
+        path: &Path,
+        config: DatabaseConfig,
+        context: crate::json::JsonOperationContext,
+    ) -> Result<Self> {
         config.validate_json_policy()?;
         if config.background_compaction {
             return Err(Error::new(
@@ -376,10 +390,9 @@ impl Database {
                 "background compaction is not implemented; use manual compact",
             ));
         }
-        let json_work = Arc::new(crate::json::WorkLedger::default());
+        let json_work = context.ledger();
         let temporary_work = Arc::new(crate::temporary::TemporaryDiskBudget::default());
-        let context = crate::json::JsonOperationContext::new(Arc::clone(&json_work));
-        let storage = Storage::create_in(path.as_ref(), &context)?;
+        let storage = Storage::create_in(path, &context)?;
         let path = storage.path().to_path_buf();
         let lazy_text = config
             .cache_budget_mb
@@ -409,8 +422,10 @@ impl Database {
                 last_commit_sequence_no: 0,
                 #[cfg(test)]
                 fail_next_index_checkpoint_refresh: false,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "native-test-support"))]
                 import_fail_after_batches: None,
+                #[cfg(feature = "native-test-support")]
+                import_failure_guard_active: false,
                 #[cfg(test)]
                 index_checkpoint_refreshes: 0,
                 #[cfg(test)]
@@ -439,6 +454,18 @@ impl Database {
     }
 
     pub fn open_with_options(path: impl AsRef<Path>, options: DatabaseOpenOptions) -> Result<Self> {
+        Self::open_in(
+            path.as_ref(),
+            options,
+            crate::json::JsonOperationContext::standalone(),
+        )
+    }
+
+    pub(crate) fn open_in(
+        path: &Path,
+        options: DatabaseOpenOptions,
+        context: crate::json::JsonOperationContext,
+    ) -> Result<Self> {
         if options.background_compaction == Some(true) {
             return Err(Error::new(
                 ErrorCode::UnsupportedFeatureFlag,
@@ -464,12 +491,11 @@ impl Database {
             .unwrap_or_else(|| config.resource_profile.params().cache_budget_mb)
             .saturating_mul(1_048_576);
         let index_budget_bytes = cache_limit as u64 / 8;
-        let json_work = Arc::new(crate::json::WorkLedger::default());
+        let json_work = context.ledger();
         let temporary_work = Arc::new(crate::temporary::TemporaryDiskBudget::default());
-        let context = crate::json::JsonOperationContext::new(Arc::clone(&json_work));
         let mut catalog = Catalog::new_in(&context);
         let (storage, mut scan) = Storage::open_with_retained_records(
-            path.as_ref(),
+            path,
             options.read_only,
             index_budget_bytes,
             &context,
@@ -571,8 +597,10 @@ impl Database {
                 last_commit_sequence_no: scan.last_valid_commit_sequence_no,
                 #[cfg(test)]
                 fail_next_index_checkpoint_refresh: false,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "native-test-support"))]
                 import_fail_after_batches: None,
+                #[cfg(feature = "native-test-support")]
+                import_failure_guard_active: false,
                 #[cfg(test)]
                 index_checkpoint_refreshes: 0,
                 #[cfg(test)]
@@ -588,21 +616,51 @@ impl Database {
 
     pub fn create_collection(&self, config: CollectionConfig) -> Result<CollectionHandle> {
         let context = self.json_context();
-        let mut config_work = context.reservation();
-        let mut input_work = context.workspace_reservation();
+        self.create_collection_retained_in(config, &context, None)
+            .map(|(handle, _)| handle)
+    }
+
+    pub(crate) fn create_collection_retained_in(
+        &self,
+        config: CollectionConfig,
+        context: &crate::json::JsonOperationContext,
+        preprocessed: Option<RecordReservation>,
+    ) -> Result<(CollectionHandle, RecordReservation)> {
+        let mut preprocessed = preprocessed;
+        // Credit precedes its payload so every early return frees the payload
+        // before making the same capacity available to another admission.
+        let mut input_work;
         let config = config;
-        config_work.merge(self.admit_input_reclaiming(|| config.validate_in(&context))?);
-        // Typed config strings were already counted by the JSON validation view.
-        let strings =
-            config.name.capacity() + config.embedding_model.as_ref().map_or(0, String::capacity);
-        input_work.merge(config_work.take_workspace(strings));
-        config_work.retain(0);
+        self.attach_json_context(context, crate::json::JsonInputKind::CollectionConfig)?;
+        input_work = match preprocessed.as_ref() {
+            Some(_) => {
+                let validation =
+                    self.admit_input_reclaiming(|| config.validate_preprocessed_in(context))?;
+                drop(validation);
+                preprocessed
+                    .take()
+                    .expect("prepared input")
+                    .into_workspace()
+            }
+            None => {
+                let mut validation = self.admit_input_reclaiming(|| config.validate_in(context))?;
+                let strings = config.name.capacity()
+                    + config.embedding_model.as_ref().map_or(0, String::capacity);
+                let work = validation.take_workspace(strings);
+                drop(validation);
+                work
+            }
+        };
+        // Temporary parse buffers are gone; the typed config retains these strings.
+        input_work.retain(
+            config.name.capacity() + config.embedding_model.as_ref().map_or(0, String::capacity),
+        );
         let mut inner = self.lock()?;
-        let (catalog, mut records) = inner.prepare_write_batch(&context);
+        let (catalog, mut records) = inner.prepare_write_batch(context);
         catalog.check_collection_name_available(&config.name)?;
-        let collection_id = records.admit(|| catalog.next_id_in("col_", 0, &context))?;
+        let collection_id = records.admit(|| catalog.next_id_in("col_", 0, context))?;
         let handle_name = records.admit(|| {
-            crate::json::ReservedString::copy_in(&config.name, &context, "batch_prepare")
+            crate::json::ReservedString::copy_in(&config.name, context, "batch_prepare")
         })?;
         let collection = CollectionInfo {
             tokenizer: config.tokenizer,
@@ -618,24 +676,62 @@ impl Database {
         records.push(RecordPayload::CollectionCreate(collection))?;
         records.retain_workspace(input_work);
         let records = records.into_batch();
-        inner.append_and_apply(records, &context)?;
-        Ok(CollectionHandle::new(
-            self.clone(),
-            collection_id.into_parts().0,
-            handle_name.into_parts().0,
+        inner.append_and_apply(records, context)?;
+        let (collection_id, id_work) = collection_id.into_parts();
+        let (handle_name, name_work) = handle_name.into_parts();
+        let mut work = RecordReservation::from(context.reservation());
+        work.merge_workspace(id_work);
+        work.merge_workspace(name_work);
+        Ok((
+            CollectionHandle::new(self.clone(), collection_id, handle_name),
+            work,
         ))
     }
 
     pub fn collection(&self, name: &str) -> Result<CollectionHandle> {
         let context = self.json_context();
+        self.collection_retained_in(name, &context)
+            .map(|(handle, _)| handle)
+    }
+
+    pub(crate) fn collection_retained_in(
+        &self,
+        name: &str,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(CollectionHandle, RecordReservation)> {
+        self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
         self.lock()?.read_reclaiming(|inner| {
             let collection = inner.catalog.collection_by_name(name)?;
             let mut work = RecordReservation::from(context.reservation());
-            Ok(CollectionHandle::new(
+            let handle = CollectionHandle::new(
                 self.clone(),
-                work.copy_string(&collection.collection_id, &context)?,
-                work.copy_string(&collection.name, &context)?,
-            ))
+                work.copy_string(&collection.collection_id, context)?,
+                work.copy_string(&collection.name, context)?,
+            );
+            Ok((handle, work))
+        })
+    }
+
+    pub(crate) fn list_collections_json_in(
+        &self,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(JsonValue, RecordReservation)> {
+        self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
+        self.lock()?.read_reclaiming(|inner| {
+            let mut work = RecordReservation::from(context.reservation());
+            let builder = crate::json::JsonBuilder::budgeted(
+                &mut work.json,
+                crate::json::JsonInputKind::StoredJson,
+            );
+            let count = inner.catalog.live_collections().count();
+            let mut collections = inner.catalog.live_collections();
+            let value = builder.array((0..count).map(|_| {
+                collections
+                    .next()
+                    .expect("fixed catalog view")
+                    .build_json(&builder)
+            }))?;
+            Ok((value, work))
         })
     }
 
@@ -1455,11 +1551,21 @@ impl Database {
         external_id: &str,
     ) -> Result<Document> {
         let context = self.json_context();
+        self.get_document_by_external_id_retained_in(collection_id, external_id, &context)
+            .map(|(document, _)| document)
+    }
+
+    pub(crate) fn get_document_by_external_id_retained_in(
+        &self,
+        collection_id: &str,
+        external_id: &str,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(Document, RecordReservation)> {
         self.lock()?.read_reclaiming(|inner| {
             let document = inner
                 .catalog
                 .document_by_external_id(collection_id, external_id)?;
-            copy_document_in(document, &context).map(|(document, _)| document)
+            copy_document_in(document, context)
         })
     }
 
@@ -1518,18 +1624,67 @@ impl Database {
         })
     }
 
+    pub(crate) fn get_chunk_content_in_collection(
+        &self,
+        collection_id: &str,
+        id: &str,
+        external: bool,
+    ) -> Result<crate::model::ChunkContent> {
+        let context = self.json_context();
+        self.get_chunk_content_retained_in(collection_id, id, external, &context)
+            .map(|(content, _)| content)
+    }
+
+    pub(crate) fn get_chunk_content_retained_in(
+        &self,
+        collection_id: &str,
+        id: &str,
+        external: bool,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(crate::model::ChunkContent, RecordReservation)> {
+        self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
+        self.lock()?.read_reclaiming(|inner| {
+            let visible = if external {
+                inner.catalog.chunk_by_external_id(collection_id, id)?
+            } else {
+                inner.catalog.chunk_by_id(collection_id, id)?
+            };
+            let (payload, mut work) = inner.materialize_chunk_in(&visible.chunk_id, context)?;
+            // Drop the owned payload before its credit if a later read fails.
+            let chunk = payload;
+            let document = inner
+                .catalog
+                .document_by_id_ref(collection_id, &chunk.document_id)?;
+            let (payload, document_work) = copy_document_in(document, context)?;
+            let document = payload;
+            work.merge(document_work);
+            let result = crate::model::ChunkContent { chunk, document };
+            Ok((result, work))
+        })
+    }
+
     pub(crate) fn delete_document_in_collection(
         &self,
         collection_id: &str,
         document_id: &str,
     ) -> Result<()> {
         let context = self.json_context();
+        self.delete_document_in_collection_in(collection_id, document_id, &context)
+    }
+
+    pub(crate) fn delete_document_in_collection_in(
+        &self,
+        collection_id: &str,
+        document_id: &str,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<()> {
+        self.attach_json_context(context, crate::json::JsonInputKind::JsonlRecord)?;
         let mut inner = self.lock()?;
-        let (catalog, mut records) = inner.prepare_write_batch(&context);
+        let (catalog, mut records) = inner.prepare_write_batch(context);
         catalog.document_by_id_ref(collection_id, document_id)?;
         records.push_tombstone("document", document_id, "delete_document")?;
         let records = records.into_batch();
-        inner.append_and_apply(records, &context)
+        inner.append_and_apply(records, context)
     }
 
     pub(crate) fn delete_chunk_in_collection(
@@ -1538,12 +1693,22 @@ impl Database {
         chunk_id: &str,
     ) -> Result<()> {
         let context = self.json_context();
+        self.delete_chunk_in_collection_in(collection_id, chunk_id, &context)
+    }
+
+    pub(crate) fn delete_chunk_in_collection_in(
+        &self,
+        collection_id: &str,
+        chunk_id: &str,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<()> {
+        self.attach_json_context(context, crate::json::JsonInputKind::JsonlRecord)?;
         let mut inner = self.lock()?;
-        let (catalog, mut records) = inner.prepare_write_batch(&context);
+        let (catalog, mut records) = inner.prepare_write_batch(context);
         catalog.chunk_by_id(collection_id, chunk_id)?;
         records.push_tombstone("chunk", chunk_id, "delete_chunk")?;
         let records = records.into_batch();
-        inner.append_and_apply(records, &context)
+        inner.append_and_apply(records, context)
     }
 
     pub(crate) fn collection_stats_by_id(&self, collection_id: &str) -> Result<CollectionStats> {
@@ -1552,6 +1717,20 @@ impl Database {
             .lock()?
             .read_reclaiming(|inner| inner.collection_stats_retained(collection_id, &context))?;
         Ok(stats)
+    }
+
+    pub(crate) fn collection_stats_json_in(
+        &self,
+        collection_id: &str,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(JsonValue, RecordReservation)> {
+        self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
+        self.lock()?.read_reclaiming(|inner| {
+            let (stats, retained) = inner.collection_stats_retained(collection_id, context)?;
+            let mut work = RecordReservation::new(context.reservation(), retained);
+            let value = stats.into_json_retained(&mut work)?;
+            Ok((value, work))
+        })
     }
 
     pub(crate) fn with_read_snapshot<T>(
@@ -2539,6 +2718,28 @@ impl Database {
         diagnosis
     }
 
+    #[cfg(feature = "native-test-support")]
+    pub(crate) fn arm_import_batch_failure(&self, after_batches: Option<usize>) -> Result<()> {
+        let mut inner = self.lock()?;
+        if inner.import_failure_guard_active {
+            return Err(Error::new(
+                ErrorCode::LockContention,
+                "import failure guard already active",
+            ));
+        }
+        inner.import_failure_guard_active = true;
+        inner.import_fail_after_batches = after_batches;
+        Ok(())
+    }
+
+    #[cfg(feature = "native-test-support")]
+    pub(crate) fn clear_import_batch_failure(&self) {
+        if let Ok(mut inner) = self.lock() {
+            inner.import_fail_after_batches = None;
+            inner.import_failure_guard_active = false;
+        }
+    }
+
     fn lock(&self) -> Result<InnerGuard<'_>> {
         let guard = self
             .inner
@@ -3519,6 +3720,43 @@ impl Inner {
         }
     }
 
+    fn append_direct_batch(
+        &mut self,
+        mut prepared: crate::storage::PreparedRecords,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<ImportBatchMetrics> {
+        let count = prepared.remaining_records();
+        context.expect_write_records(count);
+        let mut metrics = ImportBatchMetrics::default();
+        if count != 0 {
+            let batch = prepared.take_atomic_batch_reclaiming(|| {
+                Self::release_optional_caches(
+                    &mut self.text_index,
+                    &mut self.persistent_vector_segments,
+                    &mut self.lazy_vector_segment,
+                    std::iter::empty(),
+                )
+            })?;
+            metrics.max_batch_chunks = batch
+                .records()
+                .filter(|record| matches!(record, RecordPayload::ChunkPut(_)))
+                .count();
+            let started = Instant::now();
+            let pending = self.commit_prepared_batch_tracking(batch, None)?;
+            metrics.commit_time = started.elapsed();
+            metrics.committed_batches = 1;
+            let started = Instant::now();
+            self.finish_index_update(pending, context)?;
+            metrics.checkpoint_time = started.elapsed();
+            metrics.checkpoint_cycles = 1;
+            metrics.checkpoint_ready_cycles =
+                usize::from(self.index_suffix_status == IndexSuffixState::PersistentCheckpoint);
+        }
+        metrics.final_checkpoint_ready =
+            self.index_suffix_status == IndexSuffixState::PersistentCheckpoint;
+        Ok(metrics)
+    }
+
     fn append_import_batches(
         &mut self,
         mut prepared: crate::storage::PreparedRecords,
@@ -3530,6 +3768,7 @@ impl Inner {
         // Validate every atomic group before writing, without retaining a manifest-wide plan.
         plan_record_batches(prepared.records()?, byte_limit, max_records)?
             .try_for_each(|count| count.map(|_| ()))?;
+        context.expect_write_records(prepared.remaining_records());
         let mut pending: Option<PendingIndexUpdate> = None;
         let mut metrics = ImportBatchMetrics::default();
         loop {
@@ -3541,7 +3780,7 @@ impl Inner {
             };
             let mut remaining = count;
             while remaining > 0 {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "native-test-support"))]
                 if let Some(remaining) = self.import_fail_after_batches.as_mut() {
                     if *remaining == 0 {
                         self.import_fail_after_batches = None;
@@ -12289,6 +12528,14 @@ mod tests {
             other.get_chunk_by_external_id("chunk-0").unwrap().metadata,
             chunk.metadata
         );
+        for content in [
+            other.get_chunk_content(&chunk.chunk_id).unwrap(),
+            other.get_chunk_content_by_external_id("chunk-0").unwrap(),
+        ] {
+            assert_eq!(content.chunk.metadata, chunk.metadata);
+            assert_eq!(content.document.metadata, document.metadata);
+            assert_eq!(content.chunk.document_id, content.document.document_id);
+        }
         let array_bytes =
             4 * (std::mem::size_of::<Chunk>() + std::mem::size_of::<(usize, &Chunk)>());
         for error in [
@@ -12316,6 +12563,22 @@ mod tests {
             other.get_document_by_external_id("document").unwrap_err(),
         ] {
             assert_eq!(error.code(), ErrorCode::RecoveryError);
+        }
+        // Chunk materialization first reserves non-JSON text/read workspace;
+        // refusal there keeps the existing memory error instead of pretending
+        // that an already stored JSON value could not be decoded.
+        for error in [
+            other.get_chunk(&chunk.chunk_id).unwrap_err(),
+            other.get_chunk_content(&chunk.chunk_id).unwrap_err(),
+            other
+                .get_chunk_content_by_external_id("chunk-0")
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+            assert!(error
+                .detail()
+                .iter()
+                .any(|(key, value)| key == "resource" && value == "memory"));
         }
         for error in [
             other.get_chunk(&chunk.chunk_id).unwrap_err(),
@@ -12349,6 +12612,96 @@ mod tests {
         drop(other);
         drop(collection);
         drop(db);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn chunk_content_document_copy_failure_releases_credit_and_read_lock() {
+        let path = temp_path("chunk-content-partial-copy-budget");
+        let db = Database::create(&path, DatabaseConfig::default()).unwrap();
+        let collection = db
+            .create_collection(CollectionConfig {
+                tokenizer: Default::default(),
+                name: "notes".into(),
+                embedding_dim: 2,
+                distance_metric: DistanceMetric::Cosine,
+                embedding_model: None,
+                vectors_normalized: false,
+                vector_index: crate::VectorIndexConfig::Exact,
+            })
+            .unwrap();
+        let title = "t".repeat(2 * 1024 * 1024);
+        let text = "bounded chunk text ".repeat(1024);
+        collection
+            .insert_document(DocumentInput {
+                external_id: "document".into(),
+                title: Some(title.clone()),
+                source_uri: None,
+                metadata: JsonValue::Object(Default::default()),
+                chunks: vec![crate::ChunkInput {
+                    chunk_external_id: "chunk".into(),
+                    text: text.clone(),
+                    ordinal: 0,
+                    metadata: JsonValue::Object(Default::default()),
+                    source_span: None,
+                }],
+            })
+            .unwrap();
+        let chunk_id = collection
+            .get_chunk_by_external_id("chunk")
+            .unwrap()
+            .chunk_id;
+        let before = fs::read(&path).unwrap();
+        let context = db.json_context();
+        let capacity = context.available_workspace_bytes();
+        let headroom = 512 * 1024;
+        let mut busy = context.workspace_reservation();
+        busy.grow_to(
+            capacity - headroom,
+            capacity - headroom,
+            "operation_scratch",
+        )
+        .unwrap();
+
+        // The first DTO fits; copying the associated large document does not.
+        assert_eq!(collection.get_chunk(&chunk_id).unwrap().text, text);
+        for _ in 0..3 {
+            for error in [
+                collection.get_chunk_content(&chunk_id).unwrap_err(),
+                collection
+                    .get_chunk_content_by_external_id("chunk")
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+                assert!(error
+                    .detail()
+                    .iter()
+                    .any(|(key, value)| { key == "resource" && value == "memory" }));
+                assert_eq!(context.available_workspace_bytes(), headroom);
+                assert!(db.inner.try_lock().is_ok());
+            }
+        }
+        drop(busy);
+        assert_eq!(context.available_workspace_bytes(), capacity);
+        let content = collection.get_chunk_content(&chunk_id).unwrap();
+        assert_eq!(content.chunk.text, text);
+        assert_eq!(content.document.title.as_deref(), Some(title.as_str()));
+        assert_eq!(content.chunk.document_id, content.document.document_id);
+        assert_eq!(context.available_workspace_bytes(), capacity);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        drop((collection, db));
+        let reader = Database::open_read_only(&path).unwrap();
+        assert_eq!(
+            reader
+                .collection("notes")
+                .unwrap()
+                .get_chunk_content_by_external_id("chunk")
+                .unwrap()
+                .chunk
+                .text,
+            text
+        );
+        drop(reader);
         fs::remove_file(path).unwrap();
     }
 
@@ -16441,13 +16794,36 @@ mod tests {
             )
             .unwrap();
             db.lock().unwrap().import_fail_after_batches = Some(fail_after);
+            let operation = crate::binding::Operation::new(&db);
+            let observation = operation.observation();
+            assert_eq!(observation.write_outcome().state, "not_started");
             assert_eq!(
-                db.import_manifest(&manifest, OnConflict::Error)
+                operation
+                    .import_jsonl(&db, &manifest, OnConflict::Error)
                     .unwrap_err()
                     .code(),
                 ErrorCode::IoError
             );
+            let outcome = observation.write_outcome();
+            assert_eq!(
+                outcome.state,
+                if fail_after == 0 {
+                    "not_committed"
+                } else {
+                    "partially_committed"
+                }
+            );
+            assert_eq!(outcome.confirmed_committed_batches, Some(fail_after));
+            assert_eq!(outcome.confirmed_committed_records, Some(fail_after * 250));
             let scan = scan_file(&path).unwrap();
+            assert_eq!(
+                outcome.last_confirmed_commit_id,
+                (fail_after > 0).then_some(scan.last_valid_commit)
+            );
+            assert_eq!(
+                outcome.last_confirmed_commit_sequence_no,
+                (fail_after > 0).then_some(scan.last_valid_commit_sequence_no)
+            );
             assert_eq!(scan.commits, fail_after);
             assert_eq!(db.temporary_disk_budget().used(), 0);
             assert_eq!(scan.records.len(), fail_after * 250);
@@ -16507,20 +16883,37 @@ mod tests {
                 format!("{embeddings}{tail}\n"),
             )
             .unwrap();
-            assert!(db.import_manifest(&manifest, OnConflict::Error).is_err());
+            let operation = crate::binding::Operation::new(&db);
+            let observation = operation.observation();
+            assert!(operation
+                .import_jsonl(&db, &manifest, OnConflict::Error)
+                .is_err());
+            assert_eq!(observation.write_outcome().state, "not_committed");
+            assert_eq!(
+                observation.write_outcome().confirmed_committed_batches,
+                Some(0)
+            );
+            assert_eq!(observation.write_outcome().last_confirmed_commit_id, None);
             assert_eq!(fs::read(&path).unwrap(), original);
             assert!(db.list_collections().unwrap().is_empty());
         }
         fs::write(dir.join("embeddings.jsonl"), embeddings).unwrap();
         db.lock().unwrap().fail_next_index_checkpoint_refresh = true;
+        let progress = crate::write_progress::WriteProgress::default();
+        progress.begin();
+        let context = db.json_context().with_write_progress(&progress);
         let measured = db
             .import_manifest_measured_in(
                 &manifest,
                 OnConflict::Error,
                 ImportIndexBuildMode::DeferredFullCheckpoint,
-                db.json_context(),
+                context,
             )
             .unwrap();
+        assert_eq!(progress.snapshot().state, "committed");
+        assert_eq!(progress.snapshot().confirmed_committed_batches, Some(3));
+        assert_eq!(progress.snapshot().confirmed_committed_records, Some(501));
+        assert_eq!(progress.snapshot().last_confirmed_commit_id, Some(3));
         assert_eq!(measured.batches.committed_batches, 3);
         assert_eq!(measured.batches.checkpoint_cycles, 1);
         assert_eq!(measured.batches.checkpoint_ready_cycles, 0);

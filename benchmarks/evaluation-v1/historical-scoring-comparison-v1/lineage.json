@@ -20,8 +20,8 @@
     },
     {
       "path": "REPORT.md",
-      "bytes": 4773,
-      "sha256": "64f619b73e7df2020d93b6d831b29f2107b305450a653ce6202a6c356520afcb"
+      "bytes": 4750,
+      "sha256": "2b8bd1f25210fe8c28701da5baead122446c9d264d93d9e0a2107eb3b4ce32b6"
     },
     {
       "path": "assets/quality-manifest.json",
@@ -1007,7 +1007,7 @@
       "bytes": 3876023,
       "sha256": "4c0d6cea0059dba48da1cfcd4cce3ecd04d22f3025d2581ee4e6797d8870fe36",
       "original_sha256": "d8e794343305796b21cfbf92216facf5e8360b2cfae4666f8493f1adfe0f35c1",
-      "projection": "Derived: private preparation/run path prefixes replaced; administrative execution-approval digest omitted. All observation/score/time/outcome records retained."
+      "projection": "Administrative fields omitted; measurements unchanged."
     },
     {
       "path": "prior-attempt/scale-window_scores-import-0.stderr",
@@ -1072,8 +1072,8 @@
     },
     {
       "path": "protocol-derived.json",
-      "bytes": 2959,
-      "sha256": "11b2bad6ce7b42edbea8a49da2b4b59a6f98d1b51be3e178468a2502d2238b03"
+      "bytes": 2901,
+      "sha256": "cf22c7b458bbbf1cf1674eda0e1b9a734360b1d005a68d8801731a5d04422a3a"
     },
     {
       "path": "recompute.py",
@@ -1100,15 +1100,15 @@
       "bytes": 4223768,
       "sha256": "9edb04b5b9b68dc23de8efb904bc5821025f779c8f69f21f1246256d48528389",
       "original_sha256": "8be92ba55755133b1427d0d6478185277009b70e12fc65cefb82e9180135261b",
-      "projection": "Derived: private preparation/run path prefixes replaced; administrative execution-approval digest omitted. All observation/score/time/outcome records retained.",
+      "projection": "Administrative fields omitted; measurements unchanged.",
       "storage": "gzip",
       "uncompressed_bytes": 162209566,
       "uncompressed_sha256": "eb4e5c23f57c20fdfc334db493ba8a69b6f8d71062baba8306a7cc523cdc7fb8"
     },
     {
       "path": "source-files.json",
-      "bytes": 89089,
-      "sha256": "71e7d8a5d9b3a94b73b627dc8579578928155ec43af4536de3162aafb5767266"
+      "bytes": 83347,
+      "sha256": "5483eafb9e0eb5d8a85d5e5de3b062525291fcd6542e70a2023757e4ae681b8a"
     },
     {
       "path": "sources/README.md",

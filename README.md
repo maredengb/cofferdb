@@ -3,7 +3,18 @@
 A single-file, embedded Rust retrieval database for explainable local search and
 RAG applications. Use the Rust library in your application or the `coffer` CLI to
 import documents, search with keywords and externally supplied vectors, and
-inspect how each result was ranked.
+inspect how each result was ranked. The experimental 0.1.1 sources also provide
+an in-process Python binding to the same engine.
+
+For version 0.1.1, start with the
+[Rust/Python programming guides and reference index](docs/README.md). Install
+Python from a matching wheel and verify its checksum. Consult the release
+record for artifact availability and the environments validated for that package.
+
+**Release status for 0.1.1:** Treat these sources and artifacts as **unreleased
+candidates** until the [matching published release record](https://github.com/maredengb/coffered/releases)
+identifies their exact source revision and artifact checksums. A source checkout
+alone does not establish publication or validation.
 
 **Status: experimental.** Check the [releases page](https://github.com/maredengb/coffered/releases)
 for published versions and downloadable artifacts. File-format compatibility across
@@ -61,6 +72,14 @@ types. Search builders accept text, a query embedding, filters, weights and a
 resource profile. See the complete [embedded Rust example](examples/embedded.rs)
 and [public exports](src/lib.rs).
 
+The [0.1.0 supplemental Rust guide](docs/rust-v0.1.0.md) describes the original
+published API. The [0.1.1 Rust guide](docs/rust-v0.1.1.md) also covers complete
+chunk/document reads from one view. The [Python guide](docs/python-v0.1.1.md)
+includes binary/offline installation, source-backed retrieval, input and error
+handling, thread/signal behavior and compatibility limits. Generated rustdoc and
+installed-package Sphinx references are delivered in a matching offline archive;
+their [source and build instructions](docs/reference.md) are included here.
+
 Run these from the same directory and shell as the quickstart:
 
 ```sh
@@ -82,7 +101,21 @@ snapshots and their MIT/Apache-2.0 notices are bundled. Rust snippets are retrie
 inputs; some intentionally illustrate compile errors or panics. These small
 examples do not measure representative application relevance.
 Example output demonstrates functionality, not general retrieval quality or
-performance. Generate local API documentation with `cargo doc --no-deps --open`.
+performance. Generate local Rust API documentation with `cargo doc --no-deps --open`.
+
+With a matching Python wheel installed, run the complete
+[offline code example](examples/code_retrieval.py):
+
+```console
+python examples/code_retrieval.py /a/new/path/code.coffer
+```
+
+It uses the same pinned sources and precomputed vectors, checks complete stored
+text and source spans after close/reopen, and needs no model provider or download.
+The Python target matrix is regular-GIL CPython 3.12/3.13/3.14 on macOS 15+
+arm64 and Linux x86_64/glibc 2.28+. macOS 11–14 is unsupported by this Python
+package. This declaration does not change the old Rust/CLI platform scope or
+claim that every minimum-platform test has passed.
 
 ## Search inputs and weights
 
@@ -183,7 +216,8 @@ SQLite FTS5 + sqlite-vec benchmark comparison uses separately installed tools;
 they are not core runtime dependencies.
 
 Source checkouts include representative quality and cost observations, per-query
-results, failures and replay materials in the [evaluation archive](benchmarks/evaluation-v1/README.md).
+results, failures and replay materials in the
+[0.1.0 evaluation archive](https://github.com/maredengb/coffered/tree/v0.1.0/benchmarks/evaluation-v1).
 The archive is excluded from Cargo packages; see the [benchmark guide](benchmarks/README.md)
 for its scope and replay instructions.
 These observations do not establish release readiness or certify a
@@ -191,11 +225,11 @@ model/configuration. CofferDB makes no fixed application Recall/MRR guarantee an
 claim that hybrid always wins. Quantitative claims require reproducible evidence
 including regressions and limitations.
 
-The current focus is a local Rust library and CLI. Python bindings, hosted
-embedding providers, approximate vector indexes and server-scale deployment are
-outside this v0.1 entry point. CofferDB does not claim to replace SQLite or
-PostgreSQL. Search, explain and export output may contain your source text and
-metadata; control where those outputs are shared.
+The current sources focus on an embedded engine with Rust, CLI and Python
+entry points. Hosted embedding providers, approximate vector indexes and
+server-scale deployment are outside the current scope. CofferDB does not claim
+to replace SQLite or PostgreSQL. Search, explain and export output may contain
+your source text and metadata; control where those outputs are shared.
 
 ## Documentation
 

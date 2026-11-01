@@ -109,7 +109,7 @@ query journal assertions, process cleanup, native macOS `time -l` capture and
 sample accounting. The first failed attempt, later complete execution, full
 plans, native stderr and supervisor outcomes are included. Private path aliases
 are archival references, not executable local paths. The original auditor binds
-original protocol/approval/input/source/binary hashes; running it directly against
+original method/input/source/binary hashes; running it directly against
 path-substituted archive JSON is not a supported replay shortcut.
 
 For a new measured execution, bind local paths, new hashes and host details in a

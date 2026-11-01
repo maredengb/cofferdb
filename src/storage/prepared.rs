@@ -140,6 +140,10 @@ fn can_split_batch(
 }
 
 impl PreparedRecords {
+    pub(crate) fn remaining_records(&self) -> usize {
+        self.remaining_records
+    }
+
     #[cfg(test)]
     pub(crate) fn create(
         records: Vec<RecordPayload>,
@@ -188,6 +192,22 @@ impl PreparedRecords {
     pub(crate) fn take_batch_reclaiming(
         &mut self,
         count: usize,
+        reclaim: impl FnOnce() -> bool,
+    ) -> Result<PreparedBatch<'_>> {
+        self.take_batch_with_split_reclaiming(count, true, reclaim)
+    }
+
+    pub(crate) fn take_atomic_batch_reclaiming(
+        &mut self,
+        reclaim: impl FnOnce() -> bool,
+    ) -> Result<PreparedBatch<'_>> {
+        self.take_batch_with_split_reclaiming(self.remaining_records, false, reclaim)
+    }
+
+    fn take_batch_with_split_reclaiming(
+        &mut self,
+        count: usize,
+        allow_split: bool,
         reclaim: impl FnOnce() -> bool,
     ) -> Result<PreparedBatch<'_>> {
         if count == 0 || count > self.remaining_records {
@@ -284,7 +304,7 @@ impl PreparedRecords {
                         // Keep the existing bounded-prefix fallback. If that
                         // cannot proceed, reclaim once without discarding the
                         // already decoded records or their reservations.
-                        if !can_split_batch(&records, staged.kind, &work, &error)
+                        if !(allow_split && can_split_batch(&records, staged.kind, &work, &error))
                             && crate::json::is_memory_budget_error(&error)
                             && reclaim.take().is_some_and(|reclaim| reclaim())
                         {
@@ -314,7 +334,7 @@ impl PreparedRecords {
                     let prefix = complete_prefix(&records, staged.kind);
                     // Neither workspace pressure nor JSON admission may split
                     // a replacement tombstone from its following Put.
-                    if can_split_batch(&records, staged.kind, &work, &error) {
+                    if allow_split && can_split_batch(&records, staged.kind, &work, &error) {
                         let removed_strings: usize = records[prefix..]
                             .iter()
                             .map(|record| record.string_bytes)
@@ -897,6 +917,56 @@ mod tests {
                 assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
             }
         }
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn explicit_atomic_batch_rejects_pressure_without_returning_a_committable_prefix() {
+        let dir = directory("explicit-atomic-no-prefix");
+        let limit = 512 * 1024;
+        let context = JsonOperationContext::new(Arc::new(crate::json::WorkLedger::with_limits(
+            limit, limit, limit,
+        )));
+        let mut builder = PreparedRecordsBuilder::new(&dir, 1_048_576, context.clone()).unwrap();
+        for record in [
+            large_document(1, 100),
+            replacement(),
+            large_document(2, 128 * 1024),
+        ] {
+            builder.push(record).unwrap();
+        }
+        let mut prepared = builder.finish().unwrap();
+        let cached = context
+            .cache_reservation((limit - 128 * 1024 - management_bytes(&dir)) as u128, limit)
+            .unwrap();
+        let available = context.available_workspace_bytes();
+        let mut reclaim_calls = 0;
+        let error = prepared
+            .take_atomic_batch_reclaiming(|| {
+                reclaim_calls += 1;
+                false
+            })
+            .err()
+            .unwrap();
+        assert!(crate::json::is_memory_budget_error(&error));
+        assert_eq!(reclaim_calls, 1);
+        assert_eq!(prepared.next_record, 0);
+        assert_eq!(prepared.remaining_records(), 3);
+        assert_eq!(context.available_workspace_bytes(), available);
+
+        // The existing manifest API can return this prefix; the atomic API did not.
+        let prefix = prepared.take_batch_reclaiming(3, || false).unwrap();
+        assert_eq!(prefix.len(), 1);
+        drop(prefix);
+        drop(cached);
+        let remainder = prepared.take_atomic_batch_reclaiming(|| false).unwrap();
+        assert_eq!(remainder.len(), 2);
+        assert!(BatchRecordKind::of(&remainder.records[0].payload)
+            .pairs_with(BatchRecordKind::of(&remainder.records[1].payload)));
+        drop(remainder);
+        drop(prepared);
+        assert_eq!(context.available_workspace_bytes(), limit);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir(dir).unwrap();
     }
 

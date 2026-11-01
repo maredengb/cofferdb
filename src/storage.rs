@@ -657,6 +657,9 @@ impl Storage {
             commit_timestamp,
         )?;
         writer.raw_encoding = encoding;
+        // All admission precedes this point. A failed append/flush may still
+        // have written a complete commit, so retain an uncertain outcome.
+        context.begin_append(record_count);
         let append = match (|| {
             if writer.batch_start > self.critical_end_offset {
                 writer.file.set_len(self.critical_end_offset)?;
@@ -674,6 +677,11 @@ impl Storage {
                 return Err(err.with_detail("reason", "writer_reopen_required"));
             }
         };
+        context.confirm_append(
+            record_count,
+            append.commit.batch_id,
+            append.commit_sequence_no,
+        );
         self.critical_end_offset = self.file.stream_position()?;
         Ok(append)
     }
@@ -6197,6 +6205,61 @@ mod tests {
         let mut file = OpenOptions::new().append(true).open(path).unwrap();
         file.write_all(b"COFFERIDX").unwrap();
         file.write_all(&[0xa5; 48]).unwrap();
+    }
+
+    #[test]
+    fn commit_observation_retains_confirmed_prefix_when_the_next_write_is_uncertain() {
+        let path = temp_path("observed-commit-io-failure");
+        let mut storage = Storage::create(&path).unwrap();
+        let progress = crate::write_progress::WriteProgress::default();
+        progress.begin();
+        progress.expect_records(2);
+        let context =
+            crate::json::JsonOperationContext::standalone().with_write_progress(&progress);
+        let batch = OwnedRecordBatch::single(collection_record("col_1", "first"), &context)
+            .unwrap()
+            .prepare_encoding(|| false)
+            .unwrap();
+        let (append, work) = storage
+            .append_owned_batch_in(batch, Durability::Commit, || false)
+            .unwrap();
+        let first_sequence = append.commit_sequence_no;
+        drop((append, work));
+        assert_eq!(progress.snapshot().state, "partially_committed");
+        let original = fs::read(&path).unwrap();
+
+        // A descriptor with no write permission injects a real write error,
+        // after admission but before a success receipt can confirm a commit.
+        *storage.file = File::open(&path).unwrap();
+        let batch = OwnedRecordBatch::single(collection_record("col_2", "second"), &context)
+            .unwrap()
+            .prepare_encoding(|| false)
+            .unwrap();
+        let error = storage
+            .append_owned_batch_in(batch, Durability::Commit, || false)
+            .err()
+            .unwrap();
+        assert!(error
+            .detail()
+            .iter()
+            .any(|(key, value)| { key == "reason" && value == "writer_reopen_required" }));
+        let outcome = progress.snapshot();
+        assert_eq!(outcome.state, "unknown");
+        assert_eq!(outcome.confirmed_committed_batches, Some(1));
+        assert_eq!(outcome.confirmed_committed_records, Some(1));
+        assert_eq!(outcome.last_confirmed_commit_id, Some(1));
+        assert_eq!(
+            outcome.last_confirmed_commit_sequence_no,
+            Some(first_sequence)
+        );
+        assert!(storage.write_failed);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(storage);
+        let scan = scan_file(&path).unwrap();
+        assert_eq!(scan.commits, 1);
+        assert_eq!(scan.records.len(), 1);
+        assert!(scan.findings.is_empty());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::physical_file::ManagedFile;
@@ -96,8 +96,15 @@ fn release_process_lock(path: &Path) {
 }
 
 fn held_locks() -> &'static Mutex<BTreeSet<PathBuf>> {
-    static LOCKS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
-    LOCKS.get_or_init(|| Mutex::new(BTreeSet::new()))
+    static LOCKS: crate::process_state::ProcessLocal<Mutex<BTreeSet<PathBuf>>> =
+        crate::process_state::ProcessLocal::new();
+    LOCKS.get()
+}
+
+#[cfg(test)]
+pub(crate) fn with_registry_locked_for_test(action: impl FnOnce()) {
+    let _held = held_locks().lock().unwrap();
+    action();
 }
 
 fn lock_contention(path: &Path) -> Error {

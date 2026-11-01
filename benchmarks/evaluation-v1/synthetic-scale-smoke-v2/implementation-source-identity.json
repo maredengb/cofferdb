@@ -1,6 +1,6 @@
 {
   "scope": "Exact product-source snapshot for protocol preparation, not a published commit, repository or official release package.",
-  "base_commit": "ce1393ef14d6fc03c05f036ed7e7fac6dad3348a",
+  "base_commit": "snapshot-10",
   "worktree_overlay_files": [
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "CONTRIBUTING.md",

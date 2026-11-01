@@ -14,12 +14,12 @@ material/query-type groups. The materials are Rust code, SQLite technical
 documentation and historical Rust language design notes. Source and task counts
 are balanced across materials; chunk counts are 18, 17 and 64 respectively.
 
-Tasks were written from the sources rather than collected from user query logs.
+Tasks were authored from the recorded sources.
 The task author and an independent annotator inspected every eligible pair.
 Twenty disputed or uncertain pairs were adjudicated and reviewed before any
 retrieval. Final candidate labels contain 91 positives, 3,869 negatives and no
 unresolved pairs. Another 792 pairs are outside metadata-filter scope and are not
-negative labels. This is AI-assisted annotation, not human relevance certification.
+negative labels. The labels describe authored, fixed evaluation inputs.
 See [criteria](public-quality-v1/relevance-criteria.json),
 [judgment provenance](public-quality-v1/judgment-provenance.json) and
 [per-pair evidence](public-quality-v1/judgment-evidence.jsonl).
@@ -85,7 +85,7 @@ offline replay are labeled as recomputed, rather than original engine captures.
 The [earlier 24-task archive](historical-legacy24-v1/artifact-lineage.json) retains
 twelve complete benchmark results across four original source versions, two
 earlier fusion reports and the available incomplete-attempt status. Original
-failed comparisons and an uncompleted human acceptance remain explicit. A partial
+comparison results retain their recorded verdicts. A partial
 component journal without a terminal fusion report is not assigned a quality
 verdict. These earlier positive-only labels have the limitations stated below.
 

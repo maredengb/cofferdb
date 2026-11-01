@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use crate::json::{object_from_pairs, JsonValue};
+use crate::json::{JsonBuilder, JsonValue};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -173,28 +173,27 @@ impl Error {
     }
 
     pub fn to_json(&self) -> JsonValue {
-        object_from_pairs([
-            ("code", JsonValue::String(self.code_str().into())),
-            ("message", JsonValue::String(self.message.clone())),
-            ("recoverable", JsonValue::Bool(self.recoverable())),
-            (
-                "suggested_action",
-                self.suggested_action()
-                    .map(|action| JsonValue::String(action.into()))
-                    .unwrap_or(JsonValue::Null),
-            ),
-            (
-                "detail",
-                object_from_pairs(self.detail.iter().enumerate().map(|(index, (key, value))| {
-                    let value = if self.numeric_details.contains(&index) {
-                        JsonValue::Number(value.parse::<u64>().expect("numeric detail") as f64)
-                    } else {
-                        JsonValue::String(value.clone())
-                    };
-                    (key.clone(), value)
-                })),
-            ),
-        ])
+        ErrorProjection::of(self)
+            .build(
+                self.message.clone(),
+                self.detail.iter().cloned(),
+                &self.numeric_details,
+                &JsonBuilder::host(),
+            )
+            .expect("host error projection is infallible")
+    }
+
+    pub(crate) fn into_json_retained(
+        self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let projection = ErrorProjection::of(&self);
+        projection.build(
+            self.message,
+            self.detail.into_iter(),
+            &self.numeric_details,
+            &JsonBuilder::budgeted(&mut work.json, crate::json::JsonInputKind::StoredJson),
+        )
     }
 
     fn recoverable(&self) -> bool {
@@ -262,6 +261,50 @@ impl Error {
                 .detail
                 .iter()
                 .any(|(key, value)| key == "field" && value == "vectors_normalized")
+    }
+}
+
+struct ErrorProjection {
+    code: &'static str,
+    recoverable: bool,
+    suggested_action: Option<&'static str>,
+}
+
+impl ErrorProjection {
+    fn of(error: &Error) -> Self {
+        Self {
+            code: error.code_str(),
+            recoverable: error.recoverable(),
+            suggested_action: error.suggested_action(),
+        }
+    }
+
+    fn build(
+        self,
+        message: String,
+        detail: impl ExactSizeIterator<Item = (String, String)>,
+        numeric: &[usize],
+        builder: &JsonBuilder<'_>,
+    ) -> Result<JsonValue> {
+        let detail = builder.object_entries(detail.enumerate().map(|(index, (key, value))| {
+            let key = builder.owned_key(key)?;
+            let value = if numeric.contains(&index) {
+                JsonValue::Number(value.parse::<u64>().expect("numeric detail") as f64)
+            } else {
+                builder.owned_string(value)?
+            };
+            Ok((key, value))
+        }))?;
+        builder.object([
+            ("code", builder.string(self.code)?),
+            ("message", builder.owned_string(message)?),
+            ("recoverable", JsonValue::Bool(self.recoverable)),
+            (
+                "suggested_action",
+                builder.optional_str(self.suggested_action)?,
+            ),
+            ("detail", detail),
+        ])
     }
 }
 
@@ -449,6 +492,10 @@ mod tests {
                 Some(value.to_string().as_str())
             );
             assert_eq!(error.detail()[1].1, value.to_string());
+            let output = crate::binding::Operation::standalone()
+                .error(error)
+                .unwrap();
+            assert_eq!(output.value(), &json);
         }
     }
 

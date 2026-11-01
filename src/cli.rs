@@ -1412,31 +1412,7 @@ fn parse_weights_in(value: &str, context: &JsonOperationContext) -> Result<Searc
         .with_detail("reason", "invalid_json")
         .with_detail("weights_reason", "invalid_json")
     })?;
-    let obj = value.value.as_object().ok_or_else(|| {
-        Error::new(
-            ErrorCode::InvalidSearchWeights,
-            "--weights must be a JSON object",
-        )
-        .with_detail("field", "weights")
-        .with_detail("weights_reason", "invalid_type")
-        .with_detail("expected", "object")
-    })?;
-    for key in obj.keys() {
-        if !matches!(key.as_str(), "bm25" | "vector" | "metadata") {
-            return Err(Error::new(
-                ErrorCode::InvalidSearchWeights,
-                format!("--weights contains unsupported field {key}"),
-            )
-            .with_detail("field", format!("weights.{key}"))
-            .with_detail("weights_reason", "unsupported_field")
-            .with_detail("reason", "unsupported_field"));
-        }
-    }
-    SearchWeights::new(
-        required_weight(obj, "bm25")?,
-        required_weight(obj, "vector")?,
-        required_weight(obj, "metadata")?,
-    )
+    SearchWeights::from_validated_json(&value.value)
 }
 
 #[cfg(test)]
@@ -1476,25 +1452,6 @@ fn parse_metadata_boost_in(
         .with_detail("reason", "invalid_json")
     })?;
     MetadataBoostConfig::parse_validated_in(&parsed.value, context)
-}
-
-fn required_weight(obj: &crate::json::JsonObject, field: &str) -> Result<f64> {
-    obj.get(field).and_then(JsonValue::as_f64).ok_or_else(|| {
-        Error::new(
-            ErrorCode::InvalidSearchWeights,
-            format!("--weights must include numeric {field}"),
-        )
-        .with_detail("field", format!("weights.{field}"))
-        .with_detail(
-            "weights_reason",
-            if obj.contains_key(field) {
-                "invalid_type"
-            } else {
-                "missing_required_field"
-            },
-        )
-        .with_detail("expected", "number")
-    })
 }
 
 #[cfg(test)]

@@ -142,6 +142,16 @@ pub struct Chunk {
     pub created_at: String,
 }
 
+/// A complete stored chunk and its owning document from one read view.
+///
+/// Both values are owned and remain usable after closing the database. This
+/// does not pin a view across separate search/read calls or load a source file.
+#[derive(Clone, Debug)]
+pub struct ChunkContent {
+    pub chunk: Chunk,
+    pub document: Document,
+}
+
 #[derive(Clone, Debug)]
 pub struct Embedding {
     pub embedding_id: String,
@@ -191,6 +201,53 @@ pub struct SearchWeights {
 }
 
 impl SearchWeights {
+    pub(crate) fn from_validated_json(value: &JsonValue) -> Result<Self> {
+        let obj = value.as_object().ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidSearchWeights,
+                "weights must be a JSON object",
+            )
+            .with_detail("field", "weights")
+            .with_detail("weights_reason", "invalid_type")
+            .with_detail("expected", "object")
+        })?;
+        for key in obj.keys() {
+            if !matches!(key.as_str(), "bm25" | "vector" | "metadata") {
+                return Err(Error::new(
+                    ErrorCode::InvalidSearchWeights,
+                    format!("weights contains unsupported field {key}"),
+                )
+                .with_detail("field", format!("weights.{key}"))
+                .with_detail("weights_reason", "unsupported_field")
+                .with_detail("reason", "unsupported_field"));
+            }
+        }
+        Self::new(
+            Self::required_json_weight(obj, "bm25")?,
+            Self::required_json_weight(obj, "vector")?,
+            Self::required_json_weight(obj, "metadata")?,
+        )
+    }
+
+    fn required_json_weight(obj: &crate::json::JsonObject, field: &str) -> Result<f64> {
+        obj.get(field).and_then(JsonValue::as_f64).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidSearchWeights,
+                format!("weights must include numeric {field}"),
+            )
+            .with_detail("field", format!("weights.{field}"))
+            .with_detail(
+                "weights_reason",
+                if obj.contains_key(field) {
+                    "invalid_type"
+                } else {
+                    "missing_required_field"
+                },
+            )
+            .with_detail("expected", "number")
+        })
+    }
+
     const SUM_EPSILON: f64 = 1e-9;
 
     pub fn new(bm25: f64, vector: f64, metadata: f64) -> Result<Self> {
@@ -402,6 +459,19 @@ impl CollectionHandle {
             .get_chunk_by_external_id_in_collection(&self.collection_id, chunk_external_id)
     }
 
+    /// Read the complete chunk and its document in one bounded read operation.
+    /// Missing or deleted chunks return the existing `chunk_not_found` error.
+    pub fn get_chunk_content(&self, chunk_id: &str) -> Result<ChunkContent> {
+        self.db
+            .get_chunk_content_in_collection(&self.collection_id, chunk_id, false)
+    }
+
+    /// Read complete content using an external ID scoped to this collection.
+    pub fn get_chunk_content_by_external_id(&self, external_id: &str) -> Result<ChunkContent> {
+        self.db
+            .get_chunk_content_in_collection(&self.collection_id, external_id, true)
+    }
+
     pub fn delete_document(&self, document_id: &str) -> Result<()> {
         self.db
             .delete_document_in_collection(&self.collection_id, document_id)
@@ -442,6 +512,13 @@ impl CollectionConfig {
             self.name.capacity() + self.embedding_model.as_ref().map_or(0, String::capacity);
         assert!(bytes <= strings.covered_bytes());
         self.validate_object_in(strings.context(), true)
+    }
+
+    pub(crate) fn validate_preprocessed_in(
+        &self,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<crate::json::JsonReservation> {
+        self.validate_object_in(context, true)
     }
 
     fn validate_object_in(
@@ -691,7 +768,8 @@ impl CollectionInfo {
 
 impl Document {
     pub fn to_json(&self) -> JsonValue {
-        self.build_json(self.metadata.clone(), &JsonBuilder::host())
+        self.clone()
+            .build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
@@ -699,30 +777,33 @@ impl Document {
         &self,
         context: &crate::json::JsonOperationContext,
     ) -> Result<(JsonValue, crate::json::JsonReservation)> {
-        let (metadata, mut work) = self
-            .metadata
-            .try_clone_in(crate::json::JsonInputKind::StoredJson, context)?
-            .into_parts();
-        let value = self.build_json(
-            metadata,
-            &JsonBuilder::budgeted(&mut work, crate::json::JsonInputKind::StoredJson),
-        )?;
-        Ok((value, work))
+        let (document, mut work) = crate::storage::copy_document_in(self, context)?;
+        let value = document.into_json_retained(&mut work)?;
+        Ok((value, work.json))
     }
 
-    fn build_json(&self, metadata: JsonValue, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+    pub(crate) fn into_json_retained(
+        self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let (json, strings) = work.parts_mut();
+        self.build_json(&JsonBuilder::budgeted_owned_strings(
+            json,
+            strings,
+            crate::json::JsonInputKind::StoredJson,
+        ))
+    }
+
+    fn build_json(self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
-            ("document_id", builder.string(&self.document_id)?),
-            ("collection_id", builder.string(&self.collection_id)?),
-            ("external_id", builder.string(&self.external_id)?),
-            ("title", builder.optional_str(self.title.as_deref())?),
-            (
-                "source_uri",
-                builder.optional_str(self.source_uri.as_deref())?,
-            ),
-            ("metadata", metadata),
-            ("created_at", builder.string(&self.created_at)?),
-            ("updated_at", builder.string(&self.updated_at)?),
+            ("document_id", builder.owned_string(self.document_id)?),
+            ("collection_id", builder.owned_string(self.collection_id)?),
+            ("external_id", builder.owned_string(self.external_id)?),
+            ("title", builder.optional_string(self.title)?),
+            ("source_uri", builder.optional_string(self.source_uri)?),
+            ("metadata", self.metadata),
+            ("created_at", builder.owned_string(self.created_at)?),
+            ("updated_at", builder.owned_string(self.updated_at)?),
         ])
     }
 
@@ -748,6 +829,26 @@ impl Document {
             created_at: required_rfc3339_string(obj, "created_at")?,
             updated_at: required_rfc3339_string(obj, "updated_at")?,
         })
+    }
+}
+
+impl ChunkContent {
+    pub(crate) fn into_json_retained(
+        self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let chunk = self.chunk.into_json_retained(work)?;
+        let document = self.document.into_json_retained(work)?;
+        let builder = JsonBuilder::budgeted(&mut work.json, crate::json::JsonInputKind::StoredJson);
+        builder.object([("chunk", chunk), ("document", document)])
+    }
+
+    /// Project the complete owned content using the existing core JSON fields.
+    pub fn to_json(&self) -> JsonValue {
+        crate::json::object_from_pairs([
+            ("chunk", self.chunk.to_json()),
+            ("document", self.document.to_json()),
+        ])
     }
 }
 
@@ -1270,9 +1371,31 @@ impl CollectionStats {
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        self.build_json_with_collection(builder.string(&self.collection)?, builder)
+    }
+
+    pub(crate) fn into_json_retained(
+        mut self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let collection = std::mem::take(&mut self.collection);
+        let (json, strings) = work.parts_mut();
+        let builder = JsonBuilder::budgeted_owned_strings(
+            json,
+            strings,
+            crate::json::JsonInputKind::StoredJson,
+        );
+        self.build_json_with_collection(builder.owned_string(collection)?, &builder)
+    }
+
+    fn build_json_with_collection(
+        &self,
+        collection: JsonValue,
+        builder: &JsonBuilder<'_>,
+    ) -> Result<JsonValue> {
         builder.object([
             ("tokenizer", self.tokenizer.build_json(builder)?),
-            ("collection", builder.string(&self.collection)?),
+            ("collection", collection),
             (
                 "document_count",
                 JsonValue::Number(self.document_count as f64),

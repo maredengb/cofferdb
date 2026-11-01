@@ -70,6 +70,10 @@ impl<'a> JsonBuilder<'a> {
     }
 
     pub(crate) fn owned_string(&self, value: String) -> Result<JsonValue> {
+        self.owned_key(value).map(JsonValue::String)
+    }
+
+    pub(crate) fn owned_key(&self, value: String) -> Result<String> {
         if let Some(work) = &self.work {
             match &self.owned_strings {
                 Some(strings) => work.borrow_mut().merge(
@@ -80,7 +84,7 @@ impl<'a> JsonBuilder<'a> {
                 None => work.borrow_mut().grow(value.capacity(), self.kind)?,
             }
         }
-        Ok(JsonValue::String(value))
+        Ok(value)
     }
 
     pub(crate) fn optional_string(&self, value: Option<String>) -> Result<JsonValue> {
@@ -182,6 +186,23 @@ impl<'a> JsonBuilder<'a> {
         };
         object.insert(key, value);
         Ok(())
+    }
+
+    /// Keys and values have already been admitted by this builder.
+    pub(crate) fn object_entries(
+        &self,
+        entries: impl ExactSizeIterator<Item = Result<(String, JsonValue)>>,
+    ) -> Result<JsonValue> {
+        if let Some(work) = &self.work {
+            work.borrow_mut()
+                .reserve_object_nodes(entries.len(), self.kind)?;
+        }
+        let mut object = BTreeMap::new();
+        for entry in entries {
+            let (key, value) = entry?;
+            object.insert(key, value);
+        }
+        Ok(JsonValue::Object(object))
     }
 }
 

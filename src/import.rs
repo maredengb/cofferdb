@@ -66,6 +66,9 @@ impl ExportChunk {
         })
     }
 }
+// Three hexadecimal SHA-256 strings and the returned manifest filename remain
+// live through export and host projection. This is separate from writer buffers.
+const EXPORT_SUMMARY_BYTES: usize = 3 * 64 + "export_manifest.json".len();
 const EXPORT_FILES: [&str; 4] = [
     "documents.jsonl",
     "chunks.jsonl",
@@ -180,6 +183,24 @@ pub(crate) struct MeasuredImport {
     pub(crate) summary: ImportSummary,
     pub(crate) batches: crate::db::ImportBatchMetrics,
     _work: WorkspaceReservation,
+}
+
+impl MeasuredImport {
+    pub(crate) fn into_output(
+        self,
+        database: &Database,
+        context: &JsonOperationContext,
+    ) -> Result<crate::binding::Output> {
+        let Self { summary, _work, .. } = self;
+        let mut work = crate::storage::RecordReservation::new(context.reservation(), _work);
+        let value = summary.into_json_retained(&mut work)?;
+        work.retain_workspace(0);
+        Ok(crate::binding::Output::new(
+            value,
+            work,
+            Some(database.clone()),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,59 +412,72 @@ impl Database {
         output_dir: impl AsRef<Path>,
     ) -> Result<ExportSummary> {
         let context = self.json_context();
+        self.export_collection_jsonl_retained_in(collection_name, output_dir.as_ref(), &context)
+            .map(|(summary, _)| summary)
+    }
+
+    pub(crate) fn export_collection_jsonl_retained_in(
+        &self,
+        collection_name: &str,
+        output_dir: &Path,
+        context: &JsonOperationContext,
+    ) -> Result<(ExportSummary, WorkspaceReservation)> {
+        self.attach_json_context(context, JsonInputKind::StoredJson)?;
         self.with_read_snapshot_reclaiming(|catalog, storage, reclaim| {
+            let mut summary_work = context.workspace_reservation();
+            summary_work.grow_to(
+                EXPORT_SUMMARY_BYTES,
+                EXPORT_SUMMARY_BYTES,
+                "operation_scratch",
+            )?;
             let collection_info = catalog.collection_by_name(collection_name)?;
             let collection_id = &collection_info.collection_id;
             let mut reader = storage.payload_reader()?;
-            fs::create_dir_all(output_dir.as_ref())?;
-            validate_export_destinations(storage.path(), output_dir.as_ref())?;
-            let documents_path = output_dir.as_ref().join("documents.jsonl");
-            let chunks_path = output_dir.as_ref().join("chunks.jsonl");
-            let embeddings_path = output_dir.as_ref().join("embeddings.jsonl");
-            let manifest_path = output_dir.as_ref().join("export_manifest.json");
+            fs::create_dir_all(output_dir)?;
+            validate_export_destinations(storage.path(), output_dir)?;
+            let documents_path = output_dir.join("documents.jsonl");
+            let chunks_path = output_dir.join("chunks.jsonl");
+            let embeddings_path = output_dir.join("embeddings.jsonl");
+            let manifest_path = output_dir.join("export_manifest.json");
 
             const OUTPUT_BUFFER_BYTES: usize = 8192;
             let disk = self.temporary_disk_budget();
             let (documents, mut documents_temp) = create_budgeted_temporary_file_reclaiming(
-                output_dir.as_ref(),
+                output_dir,
                 "export-documents",
                 "tmp",
                 disk.clone(),
-                &context,
+                context,
                 "operation_scratch",
                 &mut *reclaim,
             )?;
             let (chunks, mut chunks_temp) = create_budgeted_temporary_file_reclaiming(
-                output_dir.as_ref(),
+                output_dir,
                 "export-chunks",
                 "tmp",
                 disk.clone(),
-                &context,
+                context,
                 "operation_scratch",
                 &mut *reclaim,
             )?;
             let (embeddings, mut embeddings_temp) = create_budgeted_temporary_file_reclaiming(
-                output_dir.as_ref(),
+                output_dir,
                 "export-embeddings",
                 "tmp",
                 disk.clone(),
-                &context,
+                context,
                 "operation_scratch",
                 &mut *reclaim,
             )?;
-            let mut documents_file = ExportWriter::new_in(
-                documents,
-                &mut documents_temp,
-                OUTPUT_BUFFER_BYTES,
-                &context,
-            )?;
+            let mut documents_file =
+                ExportWriter::new_in(documents, &mut documents_temp, OUTPUT_BUFFER_BYTES, context)?;
             let mut chunks_file =
-                ExportWriter::new_in(chunks, &mut chunks_temp, OUTPUT_BUFFER_BYTES, &context)?;
+                ExportWriter::new_in(chunks, &mut chunks_temp, OUTPUT_BUFFER_BYTES, context)?;
             let mut embeddings_file = ExportWriter::new_in(
                 embeddings,
                 &mut embeddings_temp,
                 OUTPUT_BUFFER_BYTES,
-                &context,
+                context,
             )?;
             let mut documents_count = 0;
             let mut chunks_count = 0;
@@ -456,7 +490,7 @@ impl Database {
                 let _metadata_work = retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |_| doc.metadata.guard_in(JsonInputKind::StoredJson, &context),
+                    |_| doc.metadata.guard_in(JsonInputKind::StoredJson, context),
                 )?;
                 let fields = [
                     (
@@ -473,7 +507,7 @@ impl Database {
                 retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |writers| writers[0].write_fields(fields, &context),
+                    |writers| writers[0].write_fields(fields, context),
                 )?;
                 documents_count += 1;
             }
@@ -497,7 +531,7 @@ impl Database {
                 let mut prepared = retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |_| ExportChunk::read_in(&mut reader, record_ref, &context),
+                    |_| ExportChunk::read_in(&mut reader, record_ref, context),
                 )?;
                 let (chunk, _) = prepared.retained.parts();
                 let ordinal = JsonValue::Number(chunk.ordinal as f64);
@@ -518,7 +552,7 @@ impl Database {
                 retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |writers| writers[1].write_fields(fields, &context),
+                    |writers| writers[1].write_fields(fields, context),
                 )?;
                 chunks_count += 1;
             }
@@ -538,7 +572,7 @@ impl Database {
                 let retained = retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |_| reader.read_embedding_in(record_ref, &context),
+                    |_| reader.read_embedding_in(record_ref, context),
                 )?;
                 let embedding = retained.embedding();
                 let dim = JsonValue::Number(embedding.dim as f64);
@@ -557,7 +591,7 @@ impl Database {
                 retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
-                    |writers| writers[2].write_fields(fields, &context),
+                    |writers| writers[2].write_fields(fields, context),
                 )?;
                 embeddings_count += 1;
             }
@@ -624,16 +658,16 @@ impl Database {
                 Ok((value, work))
             })?;
             let (file, mut manifest_temp) = create_budgeted_temporary_file_reclaiming(
-                output_dir.as_ref(),
+                output_dir,
                 "export-manifest",
                 "tmp",
                 disk,
-                &context,
+                context,
                 "operation_scratch",
                 &mut *reclaim,
             )?;
             let mut manifest_file =
-                ExportWriter::new_in(file, &mut manifest_temp, OUTPUT_BUFFER_BYTES, &context)?;
+                ExportWriter::new_in(file, &mut manifest_temp, OUTPUT_BUFFER_BYTES, context)?;
             retry_after_buffer_reclaim(&mut [&mut manifest_file], &mut *reclaim, |writers| {
                 #[cfg(test)]
                 tests::EXPORT_MANIFEST_WRITES.set(tests::EXPORT_MANIFEST_WRITES.get() + 1);
@@ -641,28 +675,31 @@ impl Database {
                 let written = value.write_value_retained_in(
                     writers[0],
                     JsonInputKind::StoredJson,
-                    &context,
+                    context,
                     work,
                     true,
                 );
                 writers[0].checked(written)
             })?;
             manifest_file.finish()?;
-            validate_export_destinations(storage.path(), output_dir.as_ref())?;
+            validate_export_destinations(storage.path(), output_dir)?;
             documents_temp.persist(&documents_path)?;
             chunks_temp.persist(&chunks_path)?;
             embeddings_temp.persist(&embeddings_path)?;
             // Publish the manifest only after all complete, hashed artifacts exist.
             manifest_temp.persist(&manifest_path)?;
-            Ok(ExportSummary {
-                documents: documents_count,
-                chunks: chunks_count,
-                embeddings: embeddings_count,
-                manifest: "export_manifest.json".into(),
-                documents_sha256,
-                chunks_sha256,
-                embeddings_sha256,
-            })
+            Ok((
+                ExportSummary {
+                    documents: documents_count,
+                    chunks: chunks_count,
+                    embeddings: embeddings_count,
+                    manifest: "export_manifest.json".into(),
+                    documents_sha256,
+                    chunks_sha256,
+                    embeddings_sha256,
+                },
+                summary_work,
+            ))
         })
     }
 }
@@ -1045,20 +1082,53 @@ fn optional_count_field(obj: &JsonObject, field: &str) -> Result<Option<usize>> 
 
 impl ImportWarning {
     fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
-        builder.object([
-            ("code", builder.string(&self.code)?),
-            ("severity", builder.string("warning")?),
-            ("path", JsonValue::Null),
-            (
-                "details",
-                builder.object([
-                    ("field", builder.string(&self.field)?),
-                    ("artifact_kind", builder.string(&self.artifact_kind)?),
-                ])?,
-            ),
+        WarningFields {
+            code: builder.string(&self.code)?,
+            field: builder.string(&self.field)?,
+            artifact_kind: builder.string(&self.artifact_kind)?,
+            message: builder.string(&self.message)?,
+            details: builder.object([
+                ("field", builder.string(&self.field)?),
+                ("artifact_kind", builder.string(&self.artifact_kind)?),
+            ])?,
+        }
+        .build_json(builder)
+    }
+
+    pub(crate) fn into_json_owned(self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        let details = builder.object([
             ("field", builder.string(&self.field)?),
             ("artifact_kind", builder.string(&self.artifact_kind)?),
-            ("message", builder.string(&self.message)?),
+        ])?;
+        WarningFields {
+            code: builder.owned_string(self.code)?,
+            field: builder.owned_string(self.field)?,
+            artifact_kind: builder.owned_string(self.artifact_kind)?,
+            message: builder.owned_string(self.message)?,
+            details,
+        }
+        .build_json(builder)
+    }
+}
+
+struct WarningFields {
+    code: JsonValue,
+    field: JsonValue,
+    artifact_kind: JsonValue,
+    message: JsonValue,
+    details: JsonValue,
+}
+
+impl WarningFields {
+    fn build_json(self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        builder.object([
+            ("code", self.code),
+            ("severity", builder.string("warning")?),
+            ("path", JsonValue::Null),
+            ("details", self.details),
+            ("field", self.field),
+            ("artifact_kind", self.artifact_kind),
+            ("message", self.message),
         ])
     }
 }
@@ -1224,15 +1294,46 @@ impl ImportSummary {
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        self.build_json_dynamic(
+            builder.optional_str(self.dataset_id.as_deref())?,
+            builder.array(
+                self.warnings
+                    .iter()
+                    .map(|warning| warning.build_json(builder)),
+            )?,
+            builder,
+        )
+    }
+
+    fn into_json_retained(
+        mut self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let dataset_id = self.dataset_id.take();
+        let warnings = std::mem::take(&mut self.warnings);
+        let (json, strings) = work.parts_mut();
+        let builder = JsonBuilder::budgeted_owned_strings(json, strings, JsonInputKind::StoredJson);
+        let dataset_id = builder.optional_string(dataset_id)?;
+        let warnings = builder.array(
+            warnings
+                .into_iter()
+                .map(|warning| warning.into_json_owned(&builder)),
+        )?;
+        self.build_json_dynamic(dataset_id, warnings, &builder)
+    }
+
+    fn build_json_dynamic(
+        &self,
+        dataset_id: JsonValue,
+        warnings: JsonValue,
+        builder: &JsonBuilder<'_>,
+    ) -> Result<JsonValue> {
         let skipped = self.documents_skipped + self.chunks_skipped + self.embeddings_skipped;
         let replaced = self.documents_replaced + self.chunks_replaced + self.embeddings_replaced;
         builder.object([
             ("tokenizer", self.tokenizer.build_json(builder)?),
             ("skipped_files", JsonValue::Array(Vec::new())),
-            (
-                "dataset_id",
-                builder.optional_str(self.dataset_id.as_deref())?,
-            ),
+            ("dataset_id", dataset_id),
             (
                 "documents_seen",
                 JsonValue::Number(self.documents_seen as f64),
@@ -1292,14 +1393,7 @@ impl ImportSummary {
                 JsonValue::Number(self.embeddings_replaced as f64),
             ),
             ("replaced", JsonValue::Number(replaced as f64)),
-            (
-                "warnings",
-                builder.array(
-                    self.warnings
-                        .iter()
-                        .map(|warning| warning.build_json(builder)),
-                )?,
-            ),
+            ("warnings", warnings),
             ("missing_chunks", JsonValue::Number(0.0)),
             ("model_mismatches", JsonValue::Number(0.0)),
             ("errors", JsonValue::Number(0.0)),
@@ -1314,6 +1408,42 @@ impl ExportSummary {
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        self.build_json_dynamic(
+            builder.string(&self.manifest)?,
+            builder.string(&self.documents_sha256)?,
+            builder.string(&self.chunks_sha256)?,
+            builder.string(&self.embeddings_sha256)?,
+            builder,
+        )
+    }
+
+    pub(crate) fn into_json_retained(
+        mut self,
+        work: &mut crate::storage::RecordReservation,
+    ) -> Result<JsonValue> {
+        let manifest = std::mem::take(&mut self.manifest);
+        let documents = std::mem::take(&mut self.documents_sha256);
+        let chunks = std::mem::take(&mut self.chunks_sha256);
+        let embeddings = std::mem::take(&mut self.embeddings_sha256);
+        let (json, strings) = work.parts_mut();
+        let builder = JsonBuilder::budgeted_owned_strings(json, strings, JsonInputKind::StoredJson);
+        self.build_json_dynamic(
+            builder.owned_string(manifest)?,
+            builder.owned_string(documents)?,
+            builder.owned_string(chunks)?,
+            builder.owned_string(embeddings)?,
+            &builder,
+        )
+    }
+
+    fn build_json_dynamic(
+        &self,
+        manifest: JsonValue,
+        documents_sha256: JsonValue,
+        chunks_sha256: JsonValue,
+        embeddings_sha256: JsonValue,
+        builder: &JsonBuilder<'_>,
+    ) -> Result<JsonValue> {
         builder.object([
             ("documents", JsonValue::Number(self.documents as f64)),
             (
@@ -1327,13 +1457,10 @@ impl ExportSummary {
                 "embeddings_exported",
                 JsonValue::Number(self.embeddings as f64),
             ),
-            ("manifest", builder.string(&self.manifest)?),
-            ("documents_sha256", builder.string(&self.documents_sha256)?),
-            ("chunks_sha256", builder.string(&self.chunks_sha256)?),
-            (
-                "embeddings_sha256",
-                builder.string(&self.embeddings_sha256)?,
-            ),
+            ("manifest", manifest),
+            ("documents_sha256", documents_sha256),
+            ("chunks_sha256", chunks_sha256),
+            ("embeddings_sha256", embeddings_sha256),
         ])
     }
 }
@@ -1455,20 +1582,12 @@ pub(crate) fn visit_chunks_jsonl_in(
                 ],
             )?;
             let metadata = required_metadata(obj)?;
-            let metadata_source_span = SourceSpan::try_from_metadata(&metadata);
-            let mut source_span_metadata_conflict = false;
-            let source_span = if let Some(value) = obj.get("source_span") {
-                let explicit = SourceSpan::from_json(value)?;
-                if matches!(&metadata_source_span, Ok(Some(span)) if span != &explicit)
-                    || metadata_source_span.is_err()
-                {
-                    source_span_metadata_conflict = true;
-                }
-                // Keep an empty explicit span until write normalization so metadata cannot fill it.
-                Some(explicit)
-            } else {
-                metadata_source_span?
-            };
+            let explicit = obj
+                .get("source_span")
+                .map(SourceSpan::from_json)
+                .transpose()?;
+            let (source_span, source_span_metadata_conflict) =
+                resolve_input_source_span(&metadata, explicit)?;
             Ok(JsonlChunk {
                 document_external_id: required_nonempty_jsonl_string(obj, "document_external_id")?,
                 chunk: ChunkInput {
@@ -1489,6 +1608,22 @@ pub(crate) fn visit_chunks_jsonl_in(
         },
         consume,
     )
+}
+
+pub(crate) fn resolve_input_source_span(
+    metadata: &JsonValue,
+    explicit: Option<SourceSpan>,
+) -> Result<(Option<SourceSpan>, bool)> {
+    let fallback = SourceSpan::try_from_metadata(metadata);
+    match explicit {
+        Some(span) => {
+            let conflict =
+                matches!(&fallback, Ok(Some(other)) if other != &span) || fallback.is_err();
+            // An empty explicit span overrides metadata until write normalization.
+            Ok((Some(span), conflict))
+        }
+        None => fallback.map(|span| (span, false)),
+    }
 }
 
 #[cfg(test)]
@@ -1800,7 +1935,8 @@ mod tests {
             })
             .unwrap();
         let row_bytes = 3 * 20 + 2 + 65536 + 64 + timestamp + json_node_bytes() + 26 + 40;
-        let minimum = row_bytes + 129 * crate::json::test_write_frame_bytes();
+        let minimum =
+            EXPORT_SUMMARY_BYTES + row_bytes + 129 * crate::json::test_write_frame_bytes();
         let before = fs::read(&path).unwrap();
         for gap in [-1isize, 0, 1] {
             let output = dir.join(format!("out-{gap}"));
@@ -2034,7 +2170,7 @@ mod tests {
             ])
             + 24
             + 3 * 64;
-        let minimum = retained + 4 * crate::json::test_write_frame_bytes();
+        let minimum = EXPORT_SUMMARY_BYTES + retained + 4 * crate::json::test_write_frame_bytes();
         let before = fs::read(&path).unwrap();
         for gap in [-1isize, 0, 1] {
             let output = dir.join(format!("out-{gap}"));
@@ -2468,7 +2604,10 @@ mod tests {
         let failed = dir.join("failed");
         let mut busy = context.reservation();
         busy.grow(
-            capacity - 512 * 1024 - 3 * crate::temporary::test_file_management_bytes(&failed),
+            capacity
+                - EXPORT_SUMMARY_BYTES
+                - 512 * 1024
+                - 3 * crate::temporary::test_file_management_bytes(&failed),
             JsonInputKind::StoredJson,
         )
         .unwrap();

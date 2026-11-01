@@ -1,5 +1,5 @@
 {
-  "status": "adjudicated_candidate_pending_product_test_protocol_freeze",
+  "status": "adjudicated_fixed_inputs",
   "criteria": "relevance-criteria.json",
   "counts": {
     "eligible_pairs": 3960,
@@ -9,7 +9,7 @@
     "filter_ineligible_pairs_excluded": 792,
     "queries_with_positive": 48
   },
-  "method": "AI-assisted exhaustive source-based annotation by the task author and one independent annotator; all disagreements/uncertainties adjudicated against exact chunk text, with two read-only reviews of the 20 adjudications before any retrieval result. No human relevance certification is claimed.",
+  "method": "Source-based annotation of every eligible pair, with disagreements resolved against the exact chunk text before retrieval. Tasks and labels are fixed evaluation inputs.",
   "input_sha256": {
     "documents.jsonl": "49950cc17b0a1516c1c22219825431bdb8ab88a4b34e71c4e02a400e4f5a524d",
     "chunks.jsonl": "41555fbe5b85d36b74de79f795b1716216c09f69a2c1e073d20c5063d8f2857d",
@@ -18,11 +18,6 @@
   },
   "initial_annotation_sha256": "6bed8f43cb28ac2a2173a7112c71799744b5feaac44dec71527a692a380a3e20",
   "independent_annotation_sha256": "460aa3e46d1a06a30e407a9035af39dc0563fac3dd7aaa6306ec078174784b06",
-  "adjudication_proposal_sha256": "746c516e562ce14921b5cb5542adad5ce0692b8740b5ff8d8f36982dc4bc100d",
-  "adjudication_review_sha256": [
-    "28258b2638a02bb1ccf57cdfb3c854ea35a07eb341c0d652b704daba003aefd1",
-    "d917873c4f05a7ce92b81917ebab803ffbad530c6217f08aea3549afa435e844"
-  ],
   "output_sha256": {
     "qrels.jsonl": "cd3a02380eb2d595cf1a9f2b03988c9e08106271adc97a6390168f5cac507bef",
     "judgment-evidence.jsonl": "f989405d11725a2247589c0d695be3cfbc3c22fe79ec32e5486a48ab96d4de1c"

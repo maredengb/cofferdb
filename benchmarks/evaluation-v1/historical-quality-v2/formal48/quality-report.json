@@ -90122,7 +90122,7 @@
   "quality_verdict": "failed",
   "limitations": [
     "48 independently judged representative tasks, not universal quality or broad population estimate.",
-    "Corpus includes source from original de074ca8 and notes297..304; those identities are historical retrieval input, not implementation identity53c116e.",
+    "The corpus includes archived, undistributed retrieval inputs; their identity is distinct from the evaluated implementation.",
     "Model offline vector preparation is excluded from database query/import timings; pinnedvectors reused, no model downloads or provider-product requirement.",
     "Read/cost counters are application-level work; physical disk IO null.",
     "Repeated queries do not increase independent quality coverage; each of12 hybrid groups separately gated.",

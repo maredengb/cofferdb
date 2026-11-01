@@ -171,6 +171,12 @@ impl Drop for ManagedFile {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn with_registry_locked_for_test(action: impl FnOnce()) {
+    let _held = unix::registry().lock().unwrap();
+    action();
+}
+
 #[cfg(unix)]
 mod unix {
     use super::*;
@@ -178,7 +184,7 @@ mod unix {
     use crate::temporary::DiskReservation;
     use std::collections::BTreeMap;
     use std::os::unix::fs::MetadataExt;
-    use std::sync::{Arc, Mutex, OnceLock, Weak};
+    use std::sync::{Arc, Mutex, Weak};
 
     #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
     pub(super) struct Identity {
@@ -195,8 +201,9 @@ mod unix {
     type Registry = BTreeMap<Identity, Weak<FileOwner>>;
 
     pub(super) fn registry() -> &'static Mutex<Registry> {
-        static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-        REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+        static REGISTRY: crate::process_state::ProcessLocal<Mutex<Registry>> =
+            crate::process_state::ProcessLocal::new();
+        REGISTRY.get()
     }
 
     pub(super) fn open_in(

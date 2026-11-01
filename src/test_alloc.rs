@@ -22,6 +22,57 @@ struct State {
 
 thread_local! { static STATE: Cell<Option<State>> = const { Cell::new(None) }; }
 
+#[derive(Clone, Copy)]
+struct DeallocationProbe {
+    pointer: usize,
+    context: *const crate::json::JsonOperationContext,
+    available: *const Cell<Option<usize>>,
+}
+
+thread_local! {
+    static DEALLOCATION_PROBE: Cell<Option<DeallocationProbe>> = const { Cell::new(None) };
+}
+
+fn before_deallocation(pointer: *mut u8) {
+    let _ = DEALLOCATION_PROBE.try_with(|slot| {
+        let Some(probe) = slot.get().filter(|probe| probe.pointer == pointer as usize) else {
+            return;
+        };
+        slot.set(None);
+        // Both references outlive the synchronous measured action. Disarming
+        // before reading the ledger prevents reentrant allocator observations.
+        let available = unsafe { &*probe.context }.available_workspace_bytes();
+        unsafe { &*probe.available }.set(Some(available));
+    });
+}
+
+pub(crate) fn available_before_deallocation<T>(
+    pointer: *const u8,
+    context: &crate::json::JsonOperationContext,
+    action: impl FnOnce() -> T,
+) -> (T, Option<usize>) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DEALLOCATION_PROBE.set(None);
+        }
+    }
+    let available = Cell::new(None);
+    assert!(
+        DEALLOCATION_PROBE.get().is_none(),
+        "nested deallocation measurement"
+    );
+    DEALLOCATION_PROBE.set(Some(DeallocationProbe {
+        pointer: pointer as usize,
+        context,
+        available: &available,
+    }));
+    let reset = Reset;
+    let result = action();
+    drop(reset);
+    (result, available.get())
+}
+
 fn allocated(pointer: *mut u8, bytes: usize, alignment: usize) {
     if pointer.is_null() {
         return;
@@ -119,6 +170,7 @@ unsafe impl GlobalAlloc for AllocationCounter {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         released(pointer);
+        before_deallocation(pointer);
         unsafe { System.dealloc(pointer, layout) };
     }
 }

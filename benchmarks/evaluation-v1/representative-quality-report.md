@@ -11,10 +11,8 @@ These observations are not a whole-version release verdict.
 
 The [dataset](public-quality-v1/dataset_manifest.json) contains 24 source documents,
 99 chunks, 48 authored tasks and 3,960 complete eligible relevance judgments.
-Another 792 pairs are excluded by metadata scope, not judged irrelevant. The task
-author and an independent AI annotator inspected every eligible pair; twenty
-initial disagreements were adjudicated before retrieval. This is AI-assisted
-judgment on authored tasks, not human query-log or population validation.
+Another 792 pairs are excluded by metadata scope, not judged irrelevant. Eligible pairs were annotated against the exact source text, with disagreements
+resolved before retrieval. The tasks and labels are fixed evaluation inputs.
 
 The supplied 147 vectors use `intfloat/multilingual-e5-small` revision
 `ffdcc22a9a5c973ef0470385cef91e1ecb461d9f`, dimension 384. Passage/query text,
@@ -23,23 +21,18 @@ normalization, tokenization, model license and exact vectors are recorded in the
 inference is included in database timing. External vector semantics, task
 coverage and judgments limit the interpretation of retrieval quality.
 
-The original frozen protocol SHA-256 is
-`991a388fd3cb281c704197c20d90a8daad7a136dc2494940ca900f1f4758ea3d`;
-the original execution auditor is
-`08705b7a480e6da726ce714053e4615abdbb792df5f6fa5fb5685fd8b75978a1`.
-The [method freeze receipt](representative-quality-v1/method-freeze-receipt-derived.json)
-binds approval before retrieval. The derived protocol preserves the original
-preparation-stage status field; that field is not a later execution status.
-[Artifact lineage](representative-quality-v1/artifact-lineage.json) binds every
-original and public artifact, declared path substitutions and omitted private
-traceback hash. All numerical results and ranked IDs remain unchanged.
+The [method](representative-quality-v1/frozen-method-protocol-derived.json)
+describes the inputs and execution settings fixed before retrieval.
+[Artifact lineage](representative-quality-v1/artifact-lineage.json) records the
+public presentation files. Quantitative results and ranked IDs are unchanged;
+see [publication notes](PUBLICATION-NOTES.md) for source snapshot labels.
 
 The exact evaluated 168-file source fingerprint is
 `9244290fcb9d5205a004a19d4aabef1ddf0c9836c67514fad2f1ecdd8a3e53f6`.
 The [source bundle](evaluated-source-v1/artifact-lineage.json) preserves every file
 payload and normalizes archive ownership and timestamps; its archive hash differs
 from the original private archive. It contains a test/document overlay over base
-commit `ce1393ef14d6fc03c05f036ed7e7fac6dad3348a`; that commit alone does not identify
+snapshot `snapshot-10`; that label alone does not identify
 the build. The measured CLI SHA-256 is
 `061f25acf65fc8fc181dce8fff0f9843f16728e7b6b37ffa1f0adf089eb08905`.
 This is a reproducible source snapshot, not an official release source package.

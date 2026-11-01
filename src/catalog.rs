@@ -455,7 +455,7 @@ impl Catalog {
         Ok(self.live_document_chunks(document_id).count())
     }
 
-    fn live_document_chunks(&self, document_id: &str) -> impl Iterator<Item = &Chunk> {
+    pub(crate) fn live_document_chunks(&self, document_id: &str) -> impl Iterator<Item = &Chunk> {
         self.document_chunks
             .get(document_id)
             .into_iter()

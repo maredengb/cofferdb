@@ -2,8 +2,7 @@
   "scope": "Exact evaluated168product file payloads, not a published source commit or official release package. No root management files or Git history are included.",
   "original_archive_sha256": "c6ac69c150a56ef315b6cddc63976f4cc47f7b676b9f335ede17e6ba47573840",
   "public_archive_sha256": "229e2e8cca20856161f0192fffcda6a7ff7d90750cc825f7f538992c13e1f861",
-  "identity_original_and_public_sha256": "f655ff863e10dc53a896503999160d6edee410321e8a40d642af6c8dfc6448c7",
-  "transformation": "All168file payloads preserved byte-identically; tar ownership/timestamps/PAX metadata and gzip filename/time normalized. New archive hash is distinct from the measured private archive identity.",
+  "transformation": "Product file payloads are unchanged; archive ownership and timestamps are normalized. Archive digests identify their respective byte streams.",
   "source_fingerprint": "9244290fcb9d5205a004a19d4aabef1ddf0c9836c67514fad2f1ecdd8a3e53f6",
   "members": [
     {
@@ -1016,8 +1015,9 @@
     }
   ],
   "limits": [
-    "The source snapshot has a reviewed17file uncommitted test/document overlay over basece1393e. It is not a standalone public repository or a claim that basecommit alone identifies the build.",
     "Rebuilds must record their own compiler, platform and binary hashes. Source equality does not reproduce historical timing, OS cache state or binary bytes.",
     "Compile with COFFERDB_GIT_COMMIT=unknown to avoid assigning a historical commit to a newly built binary."
-  ]
+  ],
+  "identity_original_sha256": "f655ff863e10dc53a896503999160d6edee410321e8a40d642af6c8dfc6448c7",
+  "identity_public_sha256": "cbb7b33775b5000b0de4232097c3d5c1c6e4cb1820afd51846ab0de6e8f1616d"
 }

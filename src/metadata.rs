@@ -600,6 +600,7 @@ impl MetadataBoostConfig {
         &self.hash
     }
 
+    #[doc(hidden)]
     pub fn score_for_chunk(&self, catalog: &Catalog, chunk: &Chunk) -> MetadataBoostScore {
         let mut total = 0.0;
         let mut matched_rule_count = 0;

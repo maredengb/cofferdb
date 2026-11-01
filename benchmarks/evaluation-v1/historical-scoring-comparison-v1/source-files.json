@@ -5,7 +5,7 @@
   "files": [
     {
       "path": "sources/window_scores/Cargo.lock",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/Cargo.lock",
       "original_git_blob": "ad1bc9ea0f1347038a4f87e579f4d37df08953b0",
@@ -14,7 +14,7 @@
     },
     {
       "path": "sources/window_scores/Cargo.toml",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/Cargo.toml",
       "original_git_blob": "56e1d9d6ac1d35d14890fdbe07238379e2f2e434",
@@ -23,7 +23,7 @@
     },
     {
       "path": "sources/window_scores/LICENSE",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/LICENSE",
       "original_git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
@@ -32,7 +32,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark.rs",
       "original_git_blob": "84e3ed615b2cd0b51ada864ba3120273b637d1aa",
@@ -41,7 +41,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/query_mode.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/query_mode.rs",
       "original_git_blob": "81cd937af1e6c43c610768abccd0e0173fd112a6",
@@ -50,7 +50,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/result.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/result.rs",
       "original_git_blob": "585aadaabda01225b7b6ac90103d46a5ff323e25",
@@ -59,7 +59,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner.rs",
       "original_git_blob": "bfe1a4e473bc6c7a809603cd9632a717d508f329",
@@ -68,7 +68,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/acceptance.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/acceptance.rs",
       "original_git_blob": "77ca05661a866bd4027c8a0ab12469fdd6654713",
@@ -77,7 +77,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/execution.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/execution.rs",
       "original_git_blob": "0b8608ae5ef793e7c96c6573c0f21c09d065a708",
@@ -86,7 +86,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/memory.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/memory.rs",
       "original_git_blob": "5d2e0b171281418e2cafd9fab2e9a65387ad23b1",
@@ -95,7 +95,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/output.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/output.rs",
       "original_git_blob": "5f4e838150c074fc8c7c424a3d6a61713dfab450",
@@ -104,7 +104,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/source_probe.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/source_probe.rs",
       "original_git_blob": "f59da5bbda95ddbc3959fd5b76d14d5fe5c50fed",
@@ -113,7 +113,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/sqlite.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/sqlite.rs",
       "original_git_blob": "81722312e1d0f796e96a132e66957e826a10f236",
@@ -122,7 +122,7 @@
     },
     {
       "path": "sources/window_scores/src/benchmark/runner/tests.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/benchmark/runner/tests.rs",
       "original_git_blob": "49b9c29015e7ab30d3a7df189279badb76031120",
@@ -131,7 +131,7 @@
     },
     {
       "path": "sources/window_scores/src/catalog.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/catalog.rs",
       "original_git_blob": "bee3a601f2930335a493539919f27d15902ce8f9",
@@ -140,7 +140,7 @@
     },
     {
       "path": "sources/window_scores/src/catalog/aliases.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/catalog/aliases.rs",
       "original_git_blob": "3490a2f6889890cbe3684d8372bab08dd654fcdf",
@@ -149,7 +149,7 @@
     },
     {
       "path": "sources/window_scores/src/catalog/mutation.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/catalog/mutation.rs",
       "original_git_blob": "89a619ac9395a93bfce51fbc2557fa0dffe637bb",
@@ -158,7 +158,7 @@
     },
     {
       "path": "sources/window_scores/src/cli.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/cli.rs",
       "original_git_blob": "bbd2ac26fa6b3b69d698f31fc2835037f631a4b4",
@@ -167,7 +167,7 @@
     },
     {
       "path": "sources/window_scores/src/cli/tests/query_dto.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/cli/tests/query_dto.rs",
       "original_git_blob": "68bca99d2d8e5aacc742fba45454bceecf0965f8",
@@ -176,7 +176,7 @@
     },
     {
       "path": "sources/window_scores/src/db.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db.rs",
       "original_git_blob": "e6e0359ba4419e5d5f459a6c71d1e32a7d4a19ab",
@@ -185,7 +185,7 @@
     },
     {
       "path": "sources/window_scores/src/db/coverage.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/coverage.rs",
       "original_git_blob": "c55cd95b9e48b963b1a7877711a88c69cfcc0b2f",
@@ -194,7 +194,7 @@
     },
     {
       "path": "sources/window_scores/src/db/import.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/import.rs",
       "original_git_blob": "1521ec972795b315ff8ebb2b44e5e8cf0fbd8c7d",
@@ -203,7 +203,7 @@
     },
     {
       "path": "sources/window_scores/src/db/read.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/read.rs",
       "original_git_blob": "032e01d02524ac1e73b0bb432b9b69e998c5fbcf",
@@ -212,7 +212,7 @@
     },
     {
       "path": "sources/window_scores/src/db/scoring.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/scoring.rs",
       "original_git_blob": "a5e4a1ddc85d9dec91dadc717f2be6857e5b2a2d",
@@ -221,7 +221,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/collection_stats.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/collection_stats.rs",
       "original_git_blob": "259151ee19ee0778000f56dbd7a215a720126c46",
@@ -230,7 +230,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/query_output.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/query_output.rs",
       "original_git_blob": "5f890ed1f4935062c2a84c0b3656b0c3cde314b3",
@@ -239,7 +239,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/query_preparation.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/query_preparation.rs",
       "original_git_blob": "855ff57e5587ad795f230ad220f746fde4a1a0cd",
@@ -248,7 +248,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/query_rows.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/query_rows.rs",
       "original_git_blob": "475dbb1481569a3f60ce4d9745ef68d9f8caba68",
@@ -257,7 +257,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/token_counts.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/token_counts.rs",
       "original_git_blob": "6199f78306600594aa8ecb09f9e3c09a9d942295",
@@ -266,7 +266,7 @@
     },
     {
       "path": "sources/window_scores/src/db/tests/zero_text_writer.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/db/tests/zero_text_writer.rs",
       "original_git_blob": "061f1b4e96c35b89f254aba59739775d07fd49cd",
@@ -275,7 +275,7 @@
     },
     {
       "path": "sources/window_scores/src/error.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/error.rs",
       "original_git_blob": "5aeb7f098c49b1f2ad77d29305aaa5da653eafb0",
@@ -284,7 +284,7 @@
     },
     {
       "path": "sources/window_scores/src/hash.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/hash.rs",
       "original_git_blob": "ffc88d40b019b243ba8a5f8583e7384ee24948f7",
@@ -293,7 +293,7 @@
     },
     {
       "path": "sources/window_scores/src/import.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/import.rs",
       "original_git_blob": "2e0c90f17fe6e4ccaffa2603711505e243c8e517",
@@ -302,7 +302,7 @@
     },
     {
       "path": "sources/window_scores/src/import/export_writer.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/import/export_writer.rs",
       "original_git_blob": "addee0ce2789b5dd76b610870f843d83a3a5d5bb",
@@ -311,7 +311,7 @@
     },
     {
       "path": "sources/window_scores/src/index/hybrid.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/hybrid.rs",
       "original_git_blob": "38097e9b3e5bf683750c2f2c795db642821a30c4",
@@ -320,7 +320,7 @@
     },
     {
       "path": "sources/window_scores/src/index/mod.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/mod.rs",
       "original_git_blob": "ed52a8e0f99b3c3b3766f78974e26772ab7ba5ce",
@@ -329,7 +329,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text.rs",
       "original_git_blob": "a0168fa400411409b52082d051e5f7d6b8cc7fba",
@@ -338,7 +338,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/build.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/build.rs",
       "original_git_blob": "43006de9bbf0e9bcc30c0b46bf65d1221bba1010",
@@ -347,7 +347,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/cache.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/cache.rs",
       "original_git_blob": "85b5d8d7088e533ce082994891fad2826e91281f",
@@ -356,7 +356,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/cache/tests.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/cache/tests.rs",
       "original_git_blob": "fb63c855b457aeca7dca5a89e562917312906e9d",
@@ -365,7 +365,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/cache_build.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/cache_build.rs",
       "original_git_blob": "9f8c8ce938661771094dac7de136ae955cfb6f48",
@@ -374,7 +374,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/candidates.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/candidates.rs",
       "original_git_blob": "f2f0bd491f2dcb082ee124f528a861ea483c97e2",
@@ -383,7 +383,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/persistent.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/persistent.rs",
       "original_git_blob": "b297a5e50b9d9e3e7ac150ecd1629392df355bfa",
@@ -392,7 +392,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/stats.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/stats.rs",
       "original_git_blob": "6989e661e2ead4e35f7b14af48b9025fccf22bdb",
@@ -401,7 +401,7 @@
     },
     {
       "path": "sources/window_scores/src/index/text/streamed.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/text/streamed.rs",
       "original_git_blob": "c7ae0927b05d8e1a82ac61ba4b844cb02ca73552",
@@ -410,7 +410,7 @@
     },
     {
       "path": "sources/window_scores/src/index/vector.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/index/vector.rs",
       "original_git_blob": "588dadddfc854ec759b0244c5a5282620bda99b7",
@@ -419,7 +419,7 @@
     },
     {
       "path": "sources/window_scores/src/json.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json.rs",
       "original_git_blob": "8ba8ba81227af4f972b8f683aa37dc80ddd91972",
@@ -428,7 +428,7 @@
     },
     {
       "path": "sources/window_scores/src/json/build.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/build.rs",
       "original_git_blob": "36e88bf8870a63ba1d1987a81d6b28fd0b830ac9",
@@ -437,7 +437,7 @@
     },
     {
       "path": "sources/window_scores/src/json/copy.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/copy.rs",
       "original_git_blob": "41be55e57945b865a24888523a8ff5c31180372e",
@@ -446,7 +446,7 @@
     },
     {
       "path": "sources/window_scores/src/json/lines.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/lines.rs",
       "original_git_blob": "48aa2ffd07d783ace85b0275bbf9ff5c836d259a",
@@ -455,7 +455,7 @@
     },
     {
       "path": "sources/window_scores/src/json/output.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/output.rs",
       "original_git_blob": "11177cceabc59f4a5a74c5ecab28c2b16ef9a464",
@@ -464,7 +464,7 @@
     },
     {
       "path": "sources/window_scores/src/json/policy.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/policy.rs",
       "original_git_blob": "de98a2e6a6a3fc9ad7fc3df9675c0fe213f8af18",
@@ -473,7 +473,7 @@
     },
     {
       "path": "sources/window_scores/src/json/work.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/json/work.rs",
       "original_git_blob": "cb5d8062017dc3f8a2b0395044676340a2ca5489",
@@ -482,7 +482,7 @@
     },
     {
       "path": "sources/window_scores/src/lib.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/lib.rs",
       "original_git_blob": "84a58208e66e5edd225ff2939a439f63941fe906",
@@ -491,7 +491,7 @@
     },
     {
       "path": "sources/window_scores/src/lock.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/lock.rs",
       "original_git_blob": "4d83097a2eacb9af1eb6855b8631cfc937915687",
@@ -500,7 +500,7 @@
     },
     {
       "path": "sources/window_scores/src/main.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/main.rs",
       "original_git_blob": "c4ffb202588445918ac252426bbd1b6652b3a3a9",
@@ -509,7 +509,7 @@
     },
     {
       "path": "sources/window_scores/src/metadata.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/metadata.rs",
       "original_git_blob": "2bfde2a096ec59185f6d3dc2a66eecbc5008942b",
@@ -518,7 +518,7 @@
     },
     {
       "path": "sources/window_scores/src/metadata/trace.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/metadata/trace.rs",
       "original_git_blob": "c99fd8684e1ba86ceba2c9271b26beaf646ad50d",
@@ -527,7 +527,7 @@
     },
     {
       "path": "sources/window_scores/src/model.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/model.rs",
       "original_git_blob": "32f963d4d01c048e037d388e070de7c5b18c3e45",
@@ -536,7 +536,7 @@
     },
     {
       "path": "sources/window_scores/src/profile.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/profile.rs",
       "original_git_blob": "30d473aea21196726670d39d9ee6eb146a8af062",
@@ -545,7 +545,7 @@
     },
     {
       "path": "sources/window_scores/src/query.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/query.rs",
       "original_git_blob": "10eab1cba58fb09d468f27760e8fb557dd293eda",
@@ -554,7 +554,7 @@
     },
     {
       "path": "sources/window_scores/src/storage.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage.rs",
       "original_git_blob": "882c4bfa204c01848e389b3bea180c1716dfa2ef",
@@ -563,7 +563,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/checkpoint_writer.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer.rs",
       "original_git_blob": "86a546de7d1cbafedd3fe3932ac4af65eb3ed6fa",
@@ -572,7 +572,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/checkpoint_writer/golden.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/golden.rs",
       "original_git_blob": "464e603fe12ab1f165ec12f82b2910899389c17f",
@@ -581,7 +581,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/checkpoint_writer/text_spool.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/text_spool.rs",
       "original_git_blob": "6a4490d1fb257d5b741fd195dc106cacf49817db",
@@ -590,7 +590,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/checkpoint_writer/text_spool/tests.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/text_spool/tests.rs",
       "original_git_blob": "d224b86ff1cf0d121e4df364ba449cfeac915dda",
@@ -599,7 +599,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/codec.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/codec.rs",
       "original_git_blob": "4b641dcac0e5ce05e084ef16f0ead7df89ff81ed",
@@ -608,7 +608,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/index_source.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/index_source.rs",
       "original_git_blob": "b3f866867e43a550576290f196c23217ab5f1445",
@@ -617,7 +617,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/owned.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/owned.rs",
       "original_git_blob": "360b475e0bd7651077c2cf471c3fef602db9af65",
@@ -626,7 +626,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/payload.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/payload.rs",
       "original_git_blob": "5cfd4a544bc2074dd5369aef2e14d760819dcfaf",
@@ -635,7 +635,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/prepared.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/prepared.rs",
       "original_git_blob": "af08948e883cab543d01a3fad034f4f449f27e3d",
@@ -644,7 +644,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/prepared/locations.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/prepared/locations.rs",
       "original_git_blob": "98ae590e889555d70e29419d828e11cc341b99de",
@@ -653,7 +653,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/recovery.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/recovery.rs",
       "original_git_blob": "4618f9214a75f7a38b6dc163f854f41fa4a2ff09",
@@ -662,7 +662,7 @@
     },
     {
       "path": "sources/window_scores/src/storage/vector_cache.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/storage/vector_cache.rs",
       "original_git_blob": "310a40d5885dd83bebabc48b452cc7fdac0d8c26",
@@ -671,7 +671,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary.rs",
       "original_git_blob": "a049a030142b312436de1c306fd3267762537fa1",
@@ -680,7 +680,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary/budget.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary/budget.rs",
       "original_git_blob": "4c2766350ac86b4fdca5c8cf5aff84647df5344a",
@@ -689,7 +689,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary/path.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary/path.rs",
       "original_git_blob": "f14081df686fb29d957b3885ce3dc0d07cfe0bfc",
@@ -698,7 +698,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary/sort.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary/sort.rs",
       "original_git_blob": "e642a494ce6c881ca9b5327e6ebf259b2b1ca59b",
@@ -707,7 +707,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary/sort/frequencies.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary/sort/frequencies.rs",
       "original_git_blob": "4f49de04087aadc3e6ee453e69cb421898a29548",
@@ -716,7 +716,7 @@
     },
     {
       "path": "sources/window_scores/src/temporary/sort/lookup.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/temporary/sort/lookup.rs",
       "original_git_blob": "97a1a4f2701c0b84e5559449d294e3be08d6d42e",
@@ -725,7 +725,7 @@
     },
     {
       "path": "sources/window_scores/src/test_alloc.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/test_alloc.rs",
       "original_git_blob": "f6c81bfa69eee3b106b9ed4fe7f9ae68c5e38750",
@@ -734,7 +734,7 @@
     },
     {
       "path": "sources/window_scores/src/time.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/time.rs",
       "original_git_blob": "09e92eb05c29b8500f961009e063412340aaabf6",
@@ -743,7 +743,7 @@
     },
     {
       "path": "sources/window_scores/src/tokenizer.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/tokenizer.rs",
       "original_git_blob": "134bd1dc382e5c2c6686448936579148b98e9cc5",
@@ -752,7 +752,7 @@
     },
     {
       "path": "sources/window_scores/src/tokenizer/normalized.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/tokenizer/normalized.rs",
       "original_git_blob": "9543f3302195a6a84f47751b7518c55cd3a55f77",
@@ -761,7 +761,7 @@
     },
     {
       "path": "sources/window_scores/src/tokenizer/query_terms.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/tokenizer/query_terms.rs",
       "original_git_blob": "38945a574764e37d71cdd0495ababb10b3bf819a",
@@ -770,7 +770,7 @@
     },
     {
       "path": "sources/window_scores/src/tokenizer/visit.rs",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/src/tokenizer/visit.rs",
       "original_git_blob": "2fea571f809d8598ca3ca14fda9ec31d2426cf18",
@@ -779,7 +779,7 @@
     },
     {
       "path": "sources/complete_U/Cargo.lock",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/Cargo.lock",
       "original_git_blob": "ad1bc9ea0f1347038a4f87e579f4d37df08953b0",
@@ -788,7 +788,7 @@
     },
     {
       "path": "sources/complete_U/Cargo.toml",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/Cargo.toml",
       "original_git_blob": "56e1d9d6ac1d35d14890fdbe07238379e2f2e434",
@@ -797,7 +797,7 @@
     },
     {
       "path": "sources/complete_U/LICENSE",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/LICENSE",
       "original_git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
@@ -806,7 +806,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark.rs",
       "original_git_blob": "84e3ed615b2cd0b51ada864ba3120273b637d1aa",
@@ -815,7 +815,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/query_mode.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/query_mode.rs",
       "original_git_blob": "81cd937af1e6c43c610768abccd0e0173fd112a6",
@@ -824,7 +824,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/result.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/result.rs",
       "original_git_blob": "585aadaabda01225b7b6ac90103d46a5ff323e25",
@@ -833,7 +833,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner.rs",
       "original_git_blob": "233b65c15d01c471cdf84d2e5ea50be5cdf578da",
@@ -842,7 +842,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/acceptance.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/acceptance.rs",
       "original_git_blob": "1451527fa588b1908c0daafe934024879b86b23f",
@@ -851,7 +851,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/execution.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/execution.rs",
       "original_git_blob": "cfe0ca667c6cf5089fb9a55dc12c71835ad9851e",
@@ -860,7 +860,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/memory.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/memory.rs",
       "original_git_blob": "5d2e0b171281418e2cafd9fab2e9a65387ad23b1",
@@ -869,7 +869,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/output.rs",
       "original_git_blob": "5f4e838150c074fc8c7c424a3d6a61713dfab450",
@@ -878,7 +878,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/source_probe.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/source_probe.rs",
       "original_git_blob": "f59da5bbda95ddbc3959fd5b76d14d5fe5c50fed",
@@ -887,7 +887,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/sqlite.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/sqlite.rs",
       "original_git_blob": "81722312e1d0f796e96a132e66957e826a10f236",
@@ -896,7 +896,7 @@
     },
     {
       "path": "sources/complete_U/src/benchmark/runner/tests.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/benchmark/runner/tests.rs",
       "original_git_blob": "e19835cedd615ad710772aad590cdfa4a1013334",
@@ -905,7 +905,7 @@
     },
     {
       "path": "sources/complete_U/src/catalog.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/catalog.rs",
       "original_git_blob": "f2b1a9343cad0e231e8648158e42a5e46b3f437e",
@@ -914,7 +914,7 @@
     },
     {
       "path": "sources/complete_U/src/catalog/aliases.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/catalog/aliases.rs",
       "original_git_blob": "3490a2f6889890cbe3684d8372bab08dd654fcdf",
@@ -923,7 +923,7 @@
     },
     {
       "path": "sources/complete_U/src/catalog/models.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/catalog/models.rs",
       "original_git_blob": "4face8bae4d5f77a177c11369a8af5c387d5d93c",
@@ -932,7 +932,7 @@
     },
     {
       "path": "sources/complete_U/src/catalog/mutation.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/catalog/mutation.rs",
       "original_git_blob": "d866166913d1fd80e0808f0916546093c08a662e",
@@ -941,7 +941,7 @@
     },
     {
       "path": "sources/complete_U/src/cli.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli.rs",
       "original_git_blob": "d150263663271fd785311b2cddfc82f453ecff94",
@@ -950,7 +950,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/catalog_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/catalog_output.rs",
       "original_git_blob": "8a5d5da3ceb810b19014a0cf21de3a92cb050ce8",
@@ -959,7 +959,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/diagnostic_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/diagnostic_output.rs",
       "original_git_blob": "022fbf4b461bbb31647fcb7c465f9c333c5c40c2",
@@ -968,7 +968,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/embedding_import.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/embedding_import.rs",
       "original_git_blob": "562332c46997cbe4005a8286b3804b9c6f653f3f",
@@ -977,7 +977,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/import_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/import_output.rs",
       "original_git_blob": "f062cc68ceae1922f3481a1f05af4d4dcb342b6e",
@@ -986,7 +986,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/query_dto.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/query_dto.rs",
       "original_git_blob": "668b9f3b24c9427f916869142195fc2f6233292a",
@@ -995,7 +995,7 @@
     },
     {
       "path": "sources/complete_U/src/cli/tests/summary_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/cli/tests/summary_output.rs",
       "original_git_blob": "542c9fea310782f64799c1bfa64f6d96eea17f8f",
@@ -1004,7 +1004,7 @@
     },
     {
       "path": "sources/complete_U/src/db.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db.rs",
       "original_git_blob": "c0313cc95dbc8c9b53c9f17d900a3444dab187f0",
@@ -1013,7 +1013,7 @@
     },
     {
       "path": "sources/complete_U/src/db/coverage.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/coverage.rs",
       "original_git_blob": "c55cd95b9e48b963b1a7877711a88c69cfcc0b2f",
@@ -1022,7 +1022,7 @@
     },
     {
       "path": "sources/complete_U/src/db/embedding_import.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/embedding_import.rs",
       "original_git_blob": "4c5021e843bbd09a8ff2797bddcf129503451d04",
@@ -1031,7 +1031,7 @@
     },
     {
       "path": "sources/complete_U/src/db/import.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/import.rs",
       "original_git_blob": "2b4053cd996b346773a99c24a17271c258742d1b",
@@ -1040,7 +1040,7 @@
     },
     {
       "path": "sources/complete_U/src/db/models.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/models.rs",
       "original_git_blob": "3df4757c620f8d0cdab159701c521540f2d85597",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "sources/complete_U/src/db/read.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/read.rs",
       "original_git_blob": "50c3d7c58faa4da23f18b3427cdda52ae1df1167",
@@ -1058,7 +1058,7 @@
     },
     {
       "path": "sources/complete_U/src/db/scoring.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/scoring.rs",
       "original_git_blob": "6f6a19b602cbe42ec253b5c335b4756d541cde84",
@@ -1067,7 +1067,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/close.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/close.rs",
       "original_git_blob": "4de5f5f9e00c553fa1b9e2cc6df43394f95664bd",
@@ -1076,7 +1076,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/collection_stats.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/collection_stats.rs",
       "original_git_blob": "9e721f617ecb0c939a10ca489b429e9e1dfc8f12",
@@ -1085,7 +1085,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/embedding_import.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/embedding_import.rs",
       "original_git_blob": "c94b7ff770f8943ea210a1e26741115f1913192d",
@@ -1094,7 +1094,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/import_priority.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/import_priority.rs",
       "original_git_blob": "4e8dd10633817e6782ddd340ee2f2ed5e38c4766",
@@ -1103,7 +1103,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/import_warnings.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/import_warnings.rs",
       "original_git_blob": "7519c2e54cbaddc11c1f6a14021cf4e31d610ba3",
@@ -1112,7 +1112,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/models.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/models.rs",
       "original_git_blob": "6737bae8df0ec033586d6f04768894a907bd12c3",
@@ -1121,7 +1121,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/query_cost.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/query_cost.rs",
       "original_git_blob": "83655ee5b2b06055a19f57556156bafb537a18c3",
@@ -1130,7 +1130,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/query_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/query_output.rs",
       "original_git_blob": "20a9ce1f95506e61eb0e958825fe9fe6ec800107",
@@ -1139,7 +1139,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/query_preparation.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/query_preparation.rs",
       "original_git_blob": "74659166bd113d90152669b1cf49fa2ae78add81",
@@ -1148,7 +1148,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/query_rows.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/query_rows.rs",
       "original_git_blob": "08ed620bcef5e6cc6d8582d87cc8e217f4e1b700",
@@ -1157,7 +1157,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/readonly_text_cache.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/readonly_text_cache.rs",
       "original_git_blob": "ec996c852c6ddbdc64e589b69f8f9e393264970b",
@@ -1166,7 +1166,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/retained_file.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/retained_file.rs",
       "original_git_blob": "665e5ff138cfcb2d0d6a13c74835c8d1b2a54ca1",
@@ -1175,7 +1175,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/token_counts.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/token_counts.rs",
       "original_git_blob": "71d029c6248b247bcd3a209f6891c65fd60411ff",
@@ -1184,7 +1184,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/vector_reclaim.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/vector_reclaim.rs",
       "original_git_blob": "2efb91e728a4c22a5e879bcc581c59d050c401e7",
@@ -1193,7 +1193,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/why_not.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/why_not.rs",
       "original_git_blob": "2b73140d5e9aaeb2237f756bdf4c907331df12ba",
@@ -1202,7 +1202,7 @@
     },
     {
       "path": "sources/complete_U/src/db/tests/zero_text_writer.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/db/tests/zero_text_writer.rs",
       "original_git_blob": "844a75359998605d4b43a8a7e71473c21df1e7bb",
@@ -1211,7 +1211,7 @@
     },
     {
       "path": "sources/complete_U/src/error.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/error.rs",
       "original_git_blob": "761c6ff7b3d95ab7e278b676eca505a1bf1ace12",
@@ -1220,7 +1220,7 @@
     },
     {
       "path": "sources/complete_U/src/hash.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/hash.rs",
       "original_git_blob": "0d2178c369e52bea2dd1f006489c73ce88723d75",
@@ -1229,7 +1229,7 @@
     },
     {
       "path": "sources/complete_U/src/import.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/import.rs",
       "original_git_blob": "41f5ac003495032a0e86857a6748fd0c0faa0f13",
@@ -1238,7 +1238,7 @@
     },
     {
       "path": "sources/complete_U/src/import/export_writer.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/import/export_writer.rs",
       "original_git_blob": "addee0ce2789b5dd76b610870f843d83a3a5d5bb",
@@ -1247,7 +1247,7 @@
     },
     {
       "path": "sources/complete_U/src/import/tests/embedding_rows.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/import/tests/embedding_rows.rs",
       "original_git_blob": "17ab23403df9d6f6641f54dbb9542b4334933577",
@@ -1256,7 +1256,7 @@
     },
     {
       "path": "sources/complete_U/src/import/tests/summary_output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/import/tests/summary_output.rs",
       "original_git_blob": "aa80bbd4fed047bc61ba89c14e7b4be84dd47b25",
@@ -1265,7 +1265,7 @@
     },
     {
       "path": "sources/complete_U/src/import/warnings.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/import/warnings.rs",
       "original_git_blob": "0c372599ae7e96d4c8320e10c91aaa6ab6f654a0",
@@ -1274,7 +1274,7 @@
     },
     {
       "path": "sources/complete_U/src/index/hybrid.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/hybrid.rs",
       "original_git_blob": "7ed7beb708f384e55795bbe3247d0f19bf7d57d4",
@@ -1283,7 +1283,7 @@
     },
     {
       "path": "sources/complete_U/src/index/mod.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/mod.rs",
       "original_git_blob": "ed52a8e0f99b3c3b3766f78974e26772ab7ba5ce",
@@ -1292,7 +1292,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text.rs",
       "original_git_blob": "ec48a30aac8882f3732d01f174232c7edfc5de42",
@@ -1301,7 +1301,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/build.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/build.rs",
       "original_git_blob": "43006de9bbf0e9bcc30c0b46bf65d1221bba1010",
@@ -1310,7 +1310,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/cache.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/cache.rs",
       "original_git_blob": "85b5d8d7088e533ce082994891fad2826e91281f",
@@ -1319,7 +1319,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/cache/tests.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/cache/tests.rs",
       "original_git_blob": "fb63c855b457aeca7dca5a89e562917312906e9d",
@@ -1328,7 +1328,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/cache_build.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/cache_build.rs",
       "original_git_blob": "9f8c8ce938661771094dac7de136ae955cfb6f48",
@@ -1337,7 +1337,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/candidates.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/candidates.rs",
       "original_git_blob": "f2f0bd491f2dcb082ee124f528a861ea483c97e2",
@@ -1346,7 +1346,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/persistent.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/persistent.rs",
       "original_git_blob": "86b114c9aa7e4010f351a51baf0db7aeace26dd3",
@@ -1355,7 +1355,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/stats.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/stats.rs",
       "original_git_blob": "6989e661e2ead4e35f7b14af48b9025fccf22bdb",
@@ -1364,7 +1364,7 @@
     },
     {
       "path": "sources/complete_U/src/index/text/streamed.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/text/streamed.rs",
       "original_git_blob": "9df0b4ab68247ca1cd61531d0f1338b02c0371f5",
@@ -1373,7 +1373,7 @@
     },
     {
       "path": "sources/complete_U/src/index/vector.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/index/vector.rs",
       "original_git_blob": "7d84b009f4496c83cc9df69b7a2601d381d94ffd",
@@ -1382,7 +1382,7 @@
     },
     {
       "path": "sources/complete_U/src/json.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json.rs",
       "original_git_blob": "badd4dc0d26082594a2d243a028db4896965ed71",
@@ -1391,7 +1391,7 @@
     },
     {
       "path": "sources/complete_U/src/json/build.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/build.rs",
       "original_git_blob": "92554d3e97350bd695115ea54683148330b21878",
@@ -1400,7 +1400,7 @@
     },
     {
       "path": "sources/complete_U/src/json/copy.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/copy.rs",
       "original_git_blob": "41be55e57945b865a24888523a8ff5c31180372e",
@@ -1409,7 +1409,7 @@
     },
     {
       "path": "sources/complete_U/src/json/lines.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/lines.rs",
       "original_git_blob": "fb2d866c06acf40162467f0d72a434a67a304708",
@@ -1418,7 +1418,7 @@
     },
     {
       "path": "sources/complete_U/src/json/output.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/output.rs",
       "original_git_blob": "11177cceabc59f4a5a74c5ecab28c2b16ef9a464",
@@ -1427,7 +1427,7 @@
     },
     {
       "path": "sources/complete_U/src/json/policy.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/policy.rs",
       "original_git_blob": "5dd2f97282deda4eebb608d4d6ebc3c82dd0ea47",
@@ -1436,7 +1436,7 @@
     },
     {
       "path": "sources/complete_U/src/json/work.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/json/work.rs",
       "original_git_blob": "f409cf8b0c7a456cfbbe6882a38ce9763add9a76",
@@ -1445,7 +1445,7 @@
     },
     {
       "path": "sources/complete_U/src/lib.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/lib.rs",
       "original_git_blob": "df89bc762f68450a572502a32fd73fb0d5e52255",
@@ -1454,7 +1454,7 @@
     },
     {
       "path": "sources/complete_U/src/lock.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/lock.rs",
       "original_git_blob": "23635ff582d1ef6c5b2be5b4f394aedc26ecfd97",
@@ -1463,7 +1463,7 @@
     },
     {
       "path": "sources/complete_U/src/main.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/main.rs",
       "original_git_blob": "c4ffb202588445918ac252426bbd1b6652b3a3a9",
@@ -1472,7 +1472,7 @@
     },
     {
       "path": "sources/complete_U/src/metadata.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/metadata.rs",
       "original_git_blob": "2bfde2a096ec59185f6d3dc2a66eecbc5008942b",
@@ -1481,7 +1481,7 @@
     },
     {
       "path": "sources/complete_U/src/metadata/trace.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/metadata/trace.rs",
       "original_git_blob": "c99fd8684e1ba86ceba2c9271b26beaf646ad50d",
@@ -1490,7 +1490,7 @@
     },
     {
       "path": "sources/complete_U/src/model.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/model.rs",
       "original_git_blob": "1629f9f0bbc98eea92b18ab33309cff5fdc4f913",
@@ -1499,7 +1499,7 @@
     },
     {
       "path": "sources/complete_U/src/physical_file.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/physical_file.rs",
       "original_git_blob": "07930a85e16d4acc6d5129d5cd9078bac3bae0a5",
@@ -1508,7 +1508,7 @@
     },
     {
       "path": "sources/complete_U/src/profile.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/profile.rs",
       "original_git_blob": "30d473aea21196726670d39d9ee6eb146a8af062",
@@ -1517,7 +1517,7 @@
     },
     {
       "path": "sources/complete_U/src/query.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/query.rs",
       "original_git_blob": "f6d380fd3fba3c485cb7c68ba2d138024a690518",
@@ -1526,7 +1526,7 @@
     },
     {
       "path": "sources/complete_U/src/search_cost.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/search_cost.rs",
       "original_git_blob": "b9f45b7a4c2bb3a923862a85447459ea9194ba8e",
@@ -1535,7 +1535,7 @@
     },
     {
       "path": "sources/complete_U/src/storage.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage.rs",
       "original_git_blob": "623813f952095347658154a1e649d15802508244",
@@ -1544,7 +1544,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/checkpoint_writer.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer.rs",
       "original_git_blob": "75a9f675c838221e75a8a56aa99b4bafb3d7e5a6",
@@ -1553,7 +1553,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/checkpoint_writer/golden.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/golden.rs",
       "original_git_blob": "464e603fe12ab1f165ec12f82b2910899389c17f",
@@ -1562,7 +1562,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/checkpoint_writer/text_spool.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/text_spool.rs",
       "original_git_blob": "6a4490d1fb257d5b741fd195dc106cacf49817db",
@@ -1571,7 +1571,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/checkpoint_writer/text_spool/tests.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/checkpoint_writer/text_spool/tests.rs",
       "original_git_blob": "04b7727666e68146f9f7ab63c26af66d1a951069",
@@ -1580,7 +1580,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/codec.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/codec.rs",
       "original_git_blob": "4b641dcac0e5ce05e084ef16f0ead7df89ff81ed",
@@ -1589,7 +1589,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/index_source.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/index_source.rs",
       "original_git_blob": "7a737d76cbb1f944a0046ed185ae704e88f9e721",
@@ -1598,7 +1598,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/owned.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/owned.rs",
       "original_git_blob": "ef2e97d77f2ef28d96bce6bb9361aef108e5e5ec",
@@ -1607,7 +1607,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/payload.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/payload.rs",
       "original_git_blob": "75da01152d65bf3845678f8c29522081d49c9828",
@@ -1616,7 +1616,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/prepared.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/prepared.rs",
       "original_git_blob": "7aca2e9559320d925bfab2b0ce5bbe07654bf46e",
@@ -1625,7 +1625,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/prepared/locations.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/prepared/locations.rs",
       "original_git_blob": "98ae590e889555d70e29419d828e11cc341b99de",
@@ -1634,7 +1634,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/recovery.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/recovery.rs",
       "original_git_blob": "4618f9214a75f7a38b6dc163f854f41fa4a2ff09",
@@ -1643,7 +1643,7 @@
     },
     {
       "path": "sources/complete_U/src/storage/vector_cache.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/storage/vector_cache.rs",
       "original_git_blob": "310a40d5885dd83bebabc48b452cc7fdac0d8c26",
@@ -1652,7 +1652,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary.rs",
       "original_git_blob": "b5670f1ab7a3881b6ba5cd267e027c958058f3af",
@@ -1661,7 +1661,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary/budget.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary/budget.rs",
       "original_git_blob": "c4a00a6602deaadb4621531b7bddacac90f58c39",
@@ -1670,7 +1670,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary/path.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary/path.rs",
       "original_git_blob": "f14081df686fb29d957b3885ce3dc0d07cfe0bfc",
@@ -1679,7 +1679,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary/sort.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary/sort.rs",
       "original_git_blob": "488f52c69d0eab3171106e27cac86499258a7cc1",
@@ -1688,7 +1688,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary/sort/frequencies.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary/sort/frequencies.rs",
       "original_git_blob": "4f49de04087aadc3e6ee453e69cb421898a29548",
@@ -1697,7 +1697,7 @@
     },
     {
       "path": "sources/complete_U/src/temporary/sort/lookup.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/temporary/sort/lookup.rs",
       "original_git_blob": "97a1a4f2701c0b84e5559449d294e3be08d6d42e",
@@ -1706,7 +1706,7 @@
     },
     {
       "path": "sources/complete_U/src/test_alloc.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/test_alloc.rs",
       "original_git_blob": "f6c81bfa69eee3b106b9ed4fe7f9ae68c5e38750",
@@ -1715,7 +1715,7 @@
     },
     {
       "path": "sources/complete_U/src/time.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/time.rs",
       "original_git_blob": "09e92eb05c29b8500f961009e063412340aaabf6",
@@ -1724,7 +1724,7 @@
     },
     {
       "path": "sources/complete_U/src/tokenizer.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/tokenizer.rs",
       "original_git_blob": "134bd1dc382e5c2c6686448936579148b98e9cc5",
@@ -1733,7 +1733,7 @@
     },
     {
       "path": "sources/complete_U/src/tokenizer/normalized.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/tokenizer/normalized.rs",
       "original_git_blob": "9543f3302195a6a84f47751b7518c55cd3a55f77",
@@ -1742,7 +1742,7 @@
     },
     {
       "path": "sources/complete_U/src/tokenizer/query_terms.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/tokenizer/query_terms.rs",
       "original_git_blob": "38945a574764e37d71cdd0495ababb10b3bf819a",
@@ -1751,7 +1751,7 @@
     },
     {
       "path": "sources/complete_U/src/tokenizer/visit.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/src/tokenizer/visit.rs",
       "original_git_blob": "2fea571f809d8598ca3ca14fda9ec31d2426cf18",
@@ -1760,7 +1760,7 @@
     },
     {
       "path": "sources/window_scores/tests/fixtures/legacy-2d9eb64.hex",
-      "original_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "original_commit": "snapshot-05",
       "original_tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_git_path": "cofferdb/tests/fixtures/legacy-2d9eb64.hex",
       "original_git_blob": "a82604e2e0d13e7ff94f2d95671213ae1a482507",
@@ -1769,7 +1769,7 @@
     },
     {
       "path": "sources/complete_U/tests/fixtures/legacy-2d9eb64.hex",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/tests/fixtures/legacy-2d9eb64.hex",
       "original_git_blob": "a82604e2e0d13e7ff94f2d95671213ae1a482507",
@@ -1778,7 +1778,7 @@
     },
     {
       "path": "sources/complete_U/tests/support/error_contract.rs",
-      "original_commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "original_commit": "snapshot-04",
       "original_tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_git_path": "cofferdb/tests/support/error_contract.rs",
       "original_git_blob": "23610ada39684133c7d1a679919fdab4be5cb160",

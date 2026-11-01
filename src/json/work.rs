@@ -5,6 +5,7 @@ use super::{JsonInputKind, JsonLimitReason, JsonProcessingPolicyV1};
 use crate::{Error, ErrorCode, Result};
 
 pub(crate) struct WorkLedger {
+    pid: u32,
     state: Mutex<LedgerState>,
 }
 
@@ -41,6 +42,7 @@ impl WorkLedger {
 
     pub(crate) fn with_limits(limit: usize, catalog_limit: usize, total_limit: usize) -> Self {
         Self {
+            pid: std::process::id(),
             state: Mutex::new(LedgerState {
                 limit,
                 total_limit,
@@ -75,7 +77,7 @@ impl LedgerState {
     }
 
     fn admit_workspace(&self, extra: u128, phase: &'static str) -> Result<()> {
-        let working = self.used as u128 + self.workspace_used as u128 + extra;
+        let working = (self.used as u128 + self.workspace_used as u128).saturating_add(extra);
         if working > self.limit as u128 {
             return Err(Error::resource_exhausted(
                 "memory",
@@ -201,7 +203,9 @@ impl CacheReservation {
 
 impl Drop for CacheReservation {
     fn drop(&mut self) {
-        self.retain(0);
+        if self.bytes != 0 && self.ledger.pid == std::process::id() {
+            self.retain(0);
+        }
     }
 }
 
@@ -286,16 +290,20 @@ impl CatalogReservation {
 
 impl Drop for CatalogReservation {
     fn drop(&mut self) {
-        self.retain(0);
+        if self.bytes != 0 && self.ledger.pid == std::process::id() {
+            self.retain(0);
+        }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct JsonOperationContext {
+    pid: u32,
     state: Arc<Mutex<OperationState>>,
     // Optional diagnostics are independent of the resource ledger. The stage
     // belongs to this clone; changing it cannot relabel other live owners.
     search_cost: Option<crate::search_cost::Handle>,
+    write_progress: Option<crate::write_progress::WriteProgress>,
 }
 
 struct OperationState {
@@ -305,6 +313,46 @@ struct OperationState {
 }
 
 impl JsonOperationContext {
+    pub(crate) fn is_current_process(&self) -> bool {
+        self.pid == std::process::id()
+    }
+
+    pub(crate) fn ledger(&self) -> Arc<WorkLedger> {
+        let operation = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        Arc::clone(&operation.ledger)
+    }
+
+    pub(crate) fn same_operation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    pub(crate) fn with_write_progress(
+        &self,
+        progress: &crate::write_progress::WriteProgress,
+    ) -> Self {
+        let mut context = self.clone();
+        context.write_progress = Some(progress.clone());
+        context
+    }
+
+    pub(crate) fn expect_write_records(&self, count: usize) {
+        if let Some(progress) = &self.write_progress {
+            progress.expect_records(count);
+        }
+    }
+
+    pub(crate) fn begin_append(&self, count: usize) {
+        if let Some(progress) = &self.write_progress {
+            progress.begin_append(count);
+        }
+    }
+
+    pub(crate) fn confirm_append(&self, records: usize, batch_id: u64, sequence_no: u64) {
+        if let Some(progress) = &self.write_progress {
+            progress.confirmed(records, batch_id, sequence_no);
+        }
+    }
+
     pub(crate) fn with_search_cost(&self, trace: &crate::search_cost::SearchCostTrace) -> Self {
         let mut context = self.clone();
         context.search_cost = Some(trace.handle());
@@ -378,7 +426,9 @@ impl JsonOperationContext {
 
     pub(crate) fn new(ledger: Arc<WorkLedger>) -> Self {
         Self {
+            pid: ledger.pid,
             search_cost: None,
+            write_progress: None,
             state: Arc::new(Mutex::new(OperationState {
                 ledger,
                 used: 0,
@@ -643,7 +693,9 @@ impl WorkspaceReservation {
 
 impl Drop for WorkspaceReservation {
     fn drop(&mut self) {
-        self.retain(0);
+        if self.bytes != 0 && self.context.is_current_process() {
+            self.retain(0);
+        }
     }
 }
 
@@ -740,6 +792,10 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ReservedVec<T> {
 }
 
 impl<T> ReservedVec<T> {
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.values.pop()
+    }
+
     #[cfg(test)]
     pub(crate) fn assert_operation_context(&self, context: &JsonOperationContext) {
         let mut probe = self._work.context().workspace_reservation();
@@ -966,6 +1022,14 @@ pub(crate) struct JsonReservation {
 }
 
 impl JsonReservation {
+    pub(crate) fn reserve_object_nodes(
+        &mut self,
+        length: usize,
+        kind: JsonInputKind,
+    ) -> Result<()> {
+        self.grow(object_workspace(length), kind)
+    }
+
     const BLOCK_BYTES: usize = 4096;
 
     pub(crate) fn context(&self) -> &JsonOperationContext {
@@ -1052,7 +1116,7 @@ impl JsonReservation {
         Ok(copy)
     }
 
-    pub(super) fn format_string(
+    pub(crate) fn format_string(
         &mut self,
         kind: JsonInputKind,
         render: impl Fn(&mut dyn std::fmt::Write) -> std::fmt::Result,
@@ -1314,7 +1378,108 @@ pub(crate) fn copy_precharged_string(value: &str) -> Result<String> {
 
 impl Drop for JsonReservation {
     fn drop(&mut self) {
-        self.refund(self.bytes);
+        // A fork child cannot repair the parent's counters. In particular this
+        // must precede access to either inherited mutex during FFI cleanup.
+        if self.bytes != 0 && self.context.is_current_process() {
+            self.refund(self.bytes);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fork_cleanup_probe {
+    use super::*;
+
+    #[test]
+    fn inherited_reservations_do_not_wait_for_parent_operation_or_ledger_locks() {
+        const MARKER: &str = "COFFER_RESERVATION_FORK_PROBE";
+        const NAME: &str = "json::work::fork_cleanup_probe::inherited_reservations_do_not_wait_for_parent_operation_or_ledger_locks";
+        if std::env::var_os(MARKER).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(MARKER, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        extern "C" {
+            fn fork() -> i32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn kill(pid: i32, signal: i32) -> i32;
+            fn _exit(status: i32) -> !;
+        }
+        let context = JsonOperationContext::standalone();
+        let mut json = context.reservation();
+        json.grow(8, JsonInputKind::Filter).unwrap();
+        let mut workspace = context.workspace_reservation();
+        workspace.grow_to(8, 8, "operation_scratch").unwrap();
+        let cache = context.cache_reservation(8, 1024).unwrap();
+        let mut catalog = context.catalog_reservation();
+        catalog.grow(8).unwrap();
+        let mut output = crate::binding::Output::new(
+            crate::JsonValue::Null,
+            crate::storage::RecordReservation::from(context.reservation()),
+            None,
+        );
+        let available = context.available_workspace_bytes();
+        let holder = context.clone();
+        let (ready, ready_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let operation = holder.state.lock().unwrap();
+            let _ledger = operation.ledger.state.lock().unwrap();
+            ready.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let child = unsafe { fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let rejected = output.stack::<u8>().is_err() && output.reserve_host(8).is_err();
+            output.clear_native();
+            drop(output);
+            drop((json, workspace, cache, catalog));
+            let fresh = JsonOperationContext::standalone();
+            let mut work = fresh.workspace_reservation();
+            let passed = rejected && work.grow_to(8192, 8192, "operation_scratch").is_ok();
+            drop(work);
+            unsafe { _exit(if passed { 0 } else { 2 }) };
+        }
+        let start = std::time::Instant::now();
+        let mut status = 0;
+        let passed = loop {
+            if unsafe { waitpid(child, &mut status, 1) } == child {
+                break status == 0;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                unsafe {
+                    kill(child, 9);
+                    waitpid(child, &mut status, 0);
+                }
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        assert_eq!(context.available_workspace_bytes(), available);
+        drop(output);
+        drop((json, workspace, cache, catalog));
+        assert_eq!(
+            context.available_workspace_bytes(),
+            JsonProcessingPolicyV1::WORK_BUDGET_BYTES
+        );
+        assert!(
+            passed,
+            "fork child blocked while dropping inherited reservations"
+        );
     }
 }
 

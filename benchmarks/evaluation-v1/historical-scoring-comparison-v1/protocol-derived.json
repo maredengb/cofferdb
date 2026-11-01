@@ -6,13 +6,13 @@
   "scope": "Descriptive comparison of two complete historical implementations; not isolated scoring causality or final current-product performance.",
   "source_versions": {
     "window_scores": {
-      "commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+      "commit": "snapshot-05",
       "tree": "58da20090bab93136320700b25014df740d8f9fd",
       "original_export_file_count": 113,
       "provided_source_file_count": 87
     },
     "complete_U": {
-      "commit": "38d88f41ed353e76a31a359d1896a8b765bd97b1",
+      "commit": "snapshot-04",
       "tree": "ea2aa73afbab209875601020dc8286fa7bbb375a",
       "original_export_file_count": 140,
       "provided_source_file_count": 111

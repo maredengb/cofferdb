@@ -1,7 +1,7 @@
 {
   "schema_version": "cofferdb-isolated-fusion-experiment-1",
   "protocol_sha256": "94d0585523e33dd7f389586e135127681c61c6097b649982c0be5a11152ca2e9",
-  "source_commit": "48063f48f29ea6a5799975e5ff6e2ac2c4f1b4cf",
+  "source_commit": "snapshot-05",
   "control_reproduced_all_queries_and_cold_warm_groups": true,
   "control_score_tolerance": 0,
   "limitations": [
