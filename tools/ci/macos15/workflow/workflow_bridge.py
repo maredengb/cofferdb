@@ -13,12 +13,12 @@ import types
 
 PINS = {
     'runtime_bridge/runtime_bridge.py': 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f',
-    'dynamic_inputs/dynamic_collect.py': 'da7cf26018aef0c22e157a06e659ac2e6f7998ff3e80b02fde48117795dec241',
-    'native_dependencies/native_closure.py': 'b74ce7d9e8395ea2463d806e8ebf39c99d81b5e2e0220bfa572e205eb67766a6',
-    'launch_bridge/launch_bridge.py': '1cca3be95346894d4ed798d00516a1e1a6af035e0f2433a6277b4a7c80a4c6d7',
+    'dynamic_inputs/dynamic_collect.py': 'beef90c78e09b1ef059f6bec8712d11fa362b4fe8508f135e7f6e100f9c27006',
+    'native_dependencies/native_closure.py': '20a1e97dec3515ab9393e365ca5ded1e6b47de82e72a9c05255ea55f7e0f5e86',
+    'launch_bridge/launch_bridge.py': 'db7304c474dc107751eb7af53d6603ee2f48da07b325875ed143f0c838b17079',
     'tool_observer/tool_observer.py': 'b5514572dc0a073b707705d20c55fc5b718705eb2047606975e99339dce51998',
 }
-INPUT_MANIFEST = '9eb7a88533539174e79f15b97a67fe7548c19a52c7a735f074a7727576924887'
+INPUT_MANIFEST = '095dae5a01eb58086b076cda14644e89344f8f255d5c2e9189b6b9c50f10933e'
 WHOLE_SECONDS = 7200
 
 

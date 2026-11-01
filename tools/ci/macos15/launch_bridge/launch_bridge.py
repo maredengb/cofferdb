@@ -14,7 +14,7 @@ import time
 import types
 
 BRIDGE_SHA = 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f'
-NATIVE_SHA = 'b74ce7d9e8395ea2463d806e8ebf39c99d81b5e2e0220bfa572e205eb67766a6'
+NATIVE_SHA = '20a1e97dec3515ab9393e365ca5ded1e6b47de82e72a9c05255ea55f7e0f5e86'
 
 
 def need(value, reason):

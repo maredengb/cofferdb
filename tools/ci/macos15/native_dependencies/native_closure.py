@@ -16,7 +16,7 @@ import struct
 import time
 import types
 
-COLLECTOR_SHA = 'da7cf26018aef0c22e157a06e659ac2e6f7998ff3e80b02fde48117795dec241'
+COLLECTOR_SHA = 'beef90c78e09b1ef059f6bec8712d11fa362b4fe8508f135e7f6e100f9c27006'
 PLAN_SHA = 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
 SYSTEM_ROOTS = ('/usr/lib', '/System/Library/Frameworks', '/System/Library/PrivateFrameworks')
 MACH_MAGICS = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf')

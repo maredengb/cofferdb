@@ -99,6 +99,51 @@ class Tests(unittest.TestCase):
         rows=c.index_tree(root,c.time.monotonic()+5);self.assertEqual(len(rows),1);self.assertEqual(rows[0]['sha256'],m.sha(b'pass\n'))
         (root/'escape').symlink_to(self.root/'outside')
         with self.assertRaises(ValueError):c.index_tree(root,c.time.monotonic()+5)
+    def provider_fixture(self):
+        cache=self.root/'hostedtoolcache/Python'
+        framework=self.root/'Python.framework/Versions'
+        cache.mkdir(parents=True);framework.mkdir(parents=True)
+        binary=framework/'3.12/bin/python3.12'
+        binary.parent.mkdir(parents=True);binary.write_bytes(b'fixture, never executable')
+        alias=cache/'3.12.99/arm64/bin/python3.12'
+        alias.parent.mkdir(parents=True)
+        return cache,framework,binary,alias
+
+    def test_declared_provider_alias_is_deduplicated_at_earliest_priority(self):
+        cache,framework,binary,alias=self.provider_fixture();alias.symlink_to(binary)
+        with patch.object(c,'load_instantiator',return_value=type('Plan',(),{'PROVIDERS':[str(cache),str(framework)]})):
+            observed=[]
+            self.assertEqual(c.candidates(12,observed),[(0,str(binary))])
+            self.assertEqual([x['target_provider'] for x in observed],[1,1])
+            self.assertEqual(c.candidates(13),[])
+
+    def test_same_provider_regular_binary_remains_eligible(self):
+        cache,framework,binary,alias=self.provider_fixture()
+        with patch.object(c,'load_instantiator',return_value=type('Plan',(),{'PROVIDERS':[str(framework)]})):
+            self.assertEqual(c.candidates(12),[(0,str(binary))])
+
+    def test_external_and_sibling_prefix_targets_are_rejected_without_path_leak(self):
+        cache,framework,binary,alias=self.provider_fixture()
+        outside=Path(str(framework)+'-unapproved')/'python3.12'
+        outside.parent.mkdir();outside.write_bytes(b'never execute')
+        alias.symlink_to(outside)
+        with patch.object(c,'load_instantiator',return_value=type('Plan',(),{'PROVIDERS':[str(cache),str(framework)]})):
+            with self.assertRaisesRegex(ValueError,'outside fixed providers') as caught:c.candidates(12)
+        self.assertNotIn(str(outside),str(caught.exception))
+        self.assertIn(c.hashlib.sha256(c.os.fsencode(str(outside))).hexdigest(),str(caught.exception))
+
+    def test_missing_alias_is_not_an_accepted_interpreter(self):
+        cache,framework,binary,alias=self.provider_fixture();alias.symlink_to(self.root/'missing')
+        with patch.object(c,'load_instantiator',return_value=type('Plan',(),{'PROVIDERS':[str(cache)]})):
+            self.assertEqual(c.candidates(12),[])
+
+    def test_link_loop_cannot_become_an_accepted_interpreter(self):
+        cache,framework,binary,alias=self.provider_fixture();alias.symlink_to(alias)
+        with patch.object(c,'load_instantiator',return_value=type('Plan',(),{'PROVIDERS':[str(cache)]})):
+            try:result=c.candidates(12)
+            except (OSError,RuntimeError):return
+            self.assertEqual(result,[])
+
     def test_directory_drift_during_collection_is_hold(self):
         root=self.root/'changing';root.mkdir();(root/'one.py').write_bytes(b'1');original=c.os.read;changed=False
         def read(fd,n):

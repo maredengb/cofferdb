@@ -136,11 +136,12 @@ def index_tree(root,deadline):
         if fd is not None:os.close(fd)
         os.close(parent)
 
-def candidates(minor):
+def candidates(minor, observations=None):
     """Bounded deterministic names; no PATH search, setup-python/download/Homebrew invocation."""
-    result=[]
-    for priority,source in enumerate(load_instantiator().PROVIDERS):
-        root=Path(source)
+    result={}
+    providers=tuple(Path(source) for source in load_instantiator().PROVIDERS)
+    for priority,root in enumerate(providers):
+        source=str(root)
         if not root.exists():continue
         fd=directory(root)
         try:
@@ -163,10 +164,20 @@ def candidates(minor):
         for p in paths:
             if not p.exists():continue
             real=p.resolve(strict=True)
-            if root not in real.parents:raise ValueError('provider symlink escapes source')
-            result.append((priority,str(real)))
+            if not any(allowed in real.parents for allowed in providers):
+                # Avoid exposing an unexpected external path in public job logs.
+                identity=hashlib.sha256(os.fsencode(str(real))).hexdigest()
+                if observations is not None:observations.append({'minor':minor,'source_priority':priority,
+                    'candidate':str(p),'target_class':'outside_fixed_providers','target_sha256':identity})
+                raise ValueError('interpreter target outside fixed providers: minor=%d source=%d target_sha256=%s'
+                                 % (minor,priority,identity))
+            # Cache and framework entries can name the same installed binary.
+            # Query it once, preserving the original earliest-provider priority.
+            name=str(real);result[name]=min(priority,result.get(name,priority))
+            if observations is not None:observations.append({'minor':minor,'source_priority':priority,
+                'candidate':str(p),'target':name,'target_provider':next(i for i,r in enumerate(providers) if r in real.parents)})
     if len(result)>8:raise ValueError('too many candidate interpreters for bounded queries')
-    return sorted(set(result))
+    return sorted((priority,name) for name,priority in result.items())
 
 def host():
     if platform.system()!='Darwin' or platform.machine()!='arm64' or platform.mac_ver()[0].split('.')[0]!='15':raise ValueError('HOLD_REQUIRES_MAC15_ARM64')
@@ -193,8 +204,10 @@ def collect(p,helper_root,output):
     exec(compile(executable,supervisor.__file__,'exec',dont_inherit=True),supervisor.__dict__)
     deadline=time.monotonic()+180;observations=[];runtimes=[];all_rows=[];save('INTENT.json',{'sdk_executed':False,'config_sha256':m.sha(m.raw(p)),'deadline_monotonic':deadline})
     for minor in [12,13,14]:
-        queried=[]
-        for number,(priority,python) in enumerate(candidates(minor)):
+        queried=[];candidate_observations=[]
+        try:selected_candidates=candidates(minor,candidate_observations)
+        finally:save('CANDIDATES-%d.json'%minor,candidate_observations)
+        for number,(priority,python) in enumerate(selected_candidates):
             gate(deadline);binary_sha=m.sha(bytes_(python,MAX_FILE));request=out/('query-%d-%d.json'%(minor,number))
             save(request.name,{'schema_version':1,'argv':[python,'-I','-S','-B','-c',QUERY],'cwd':str(out)})
             receipt=supervisor.capture(str(request),m.sha(bytes_(request)),python=python,environment={'PATH':'/nonexistent','LANG':'C','LC_ALL':'C','HOME':str(out),'TMPDIR':str(out)},
