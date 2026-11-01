@@ -13,7 +13,7 @@ import types
 import hashlib
 
 HERE = Path(__file__).absolute().parent
-RUNNER_SHA = 'f984c5a04572522efa2b5c422b854a71f827124449be353a0c83b2e57a1dc835'
+RUNNER_SHA = '2e6972ccfc45fb41c4145ff60a6933a767a4b18862dfcde5952fff95d5edc815'
 def runner_bytes():
     selected = HERE / 'runner.py'
     if any(item.is_symlink() for item in [selected, *selected.parents]):
@@ -75,7 +75,7 @@ def read_plan(path, expected):
 def actual(plan):
     r.row(plan['supervisor'])
     for row in plan['runtimes']:
-        r.row({k: row[k] for k in ['path', 'sha256']}, executable=True)
+        r.row({k: row[k] for k in ['path', 'sha256']}, executable=True, host_role='python')
 
 
 def binding(row, original):
@@ -85,7 +85,7 @@ def binding(row, original):
            'Only the same newly owned private0700 venv root; never repair chmod')
     invoke = root / 'bin/python'; real = invoke.resolve(strict=True)
     r.need(r.beneath(real, root), '--copies venv target must remain inside the new root')
-    r.row({'path': str(real), 'sha256': row['sha256']}, executable=True)
+    r.row({'path': str(real), 'sha256': row['sha256']}, executable=True, host_role='private_python', private_root=str(root))
     cfg = root / 'pyvenv.cfg'; r.no_link(cfg)
     info = cfg.stat(); r.need(stat.S_ISREG(info.st_mode) and info.st_size <= 16384, 'Bounded venv config')
     with cfg.open('rb') as stream: raw = stream.read(16385)

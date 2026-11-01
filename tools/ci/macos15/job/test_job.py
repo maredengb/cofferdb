@@ -151,6 +151,21 @@ class Tests(unittest.TestCase):
         result = json.loads((self.root / 'job/RESULT.json').read_bytes())
         self.assertFalse(result['product_acceptance'])
 
+    def test_compiler_role_survives_immutable_fresh_reads(self):
+        compiler = str(self.root / 'developer/clang')
+        original_read = self.b.read_file; original_host = self.b.host_file; roles = []
+        def strict(path, *args, **kwargs):
+            if str(path) == compiler:
+                raise AssertionError('Compiler must not re-enter ordinary size gate')
+            return original_read(path, *args, **kwargs)
+        def installed(path, **kwargs):
+            if str(path) == compiler: roles.append(kwargs['role'])
+            return original_host(path, **kwargs)
+        with patch.object(self.b, 'read_file', side_effect=strict), patch.object(self.b, 'host_file', side_effect=installed):
+            self.execute()
+        self.assertGreater(len(roles), 1)
+        self.assertEqual(set(roles), {'compiler'})
+
     def test_initial_source_failure_prevents_download(self):
         self.fail = 'initial-source-status'
         with self.assertRaisesRegex(ValueError, 'synthetic command'): self.execute()

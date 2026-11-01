@@ -83,9 +83,97 @@ def no_link(p, missing=False):
             need(stat.S_ISDIR(info.st_mode), 'Ancestor not directory')
 
 
-def row(value, *, executable=False):
+def python_provider(value):
+    text = str(path(str(value)))
+    patterns = (
+        r'/Library/Frameworks/Python[.]framework/Versions/3[.](?:12|13|14)/',
+        r'/opt/homebrew/Cellar/python@3[.](?:12|13|14)/3[.](?:12|13|14)[.][0-9]+(?:_[0-9]+)?/Frameworks/Python[.]framework/Versions/3[.](?:12|13|14)/',
+        r'/Users/runner/hostedtoolcache/Python/3[.](?:12|13|14)[.][0-9]+/arm64/',
+    )
+    return any(re.match(pattern, text) for pattern in patterns)
+
+
+def host_limits(value, role, private_root=None):
+    """Explicit installed-file roles; ordinary evidence never uses this policy."""
+    p = path(str(value))
+    if role in ('python', 'native'):
+        if not python_provider(p):
+            return 128 * 1024 ** 2, 0o022
+        if role == 'python':
+            need(p.name in ('Python', 'python3.12', 'python3.13', 'python3.14'),
+                 'Actual provider interpreter required')
+        else:
+            need(p.name == 'Python' or p.suffix in ('.so', '.dylib'), 'Declared native file required')
+        return 128 * 1024 ** 2, 0o002
+    if role == 'compiler':
+        selected = (re.fullmatch(r'/Applications/Xcode[A-Za-z0-9_.-]*[.]app/Contents/Developer/Toolchains/XcodeDefault[.]xctoolchain/usr/bin/clang(?:-[0-9]+)?', str(p))
+             or re.fullmatch(r'/Library/Developer/CommandLineTools/usr/bin/clang(?:-[0-9]+)?', str(p)))
+        return (512 if selected else 128) * 1024 ** 2, 0o022
+    need(role == 'private_python' and private_root is not None, 'Explicit installed-file role required')
+    root = path(private_root); no_link(root); info = root.stat()
+    need(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+         and p.parent == root / 'bin' and p.name in ('python', 'python3', 'python3.12', 'python3.13', 'python3.14'),
+         'Copied Python must belong to bound private0700 venv')
+    return 128 * 1024 ** 2, 0o002
+
+
+def host_protection(value, info, role, private_root=None):
+    bound, forbidden_mode = host_limits(value, role, private_root)
+    checks = {'regular': stat.S_ISREG(info.st_mode), 'single_link': info.st_nlink == 1,
+              'within_size': info.st_size <= bound,
+              'protected_mode': not bool(info.st_mode & (forbidden_mode | 0o7000)),
+              'owner': info.st_uid in (0, os.getuid())}
+    need(all(checks.values()), 'Protected installed-file metadata rejected: ' + json.dumps(
+        {'role': role, 'mode': oct(stat.S_IMODE(info.st_mode)), 'links': info.st_nlink,
+         'bytes': info.st_size, 'checks': checks}, sort_keys=True))
+    return bound
+
+
+def host_file(value, *, role, private_root=None):
+    """Bounded NOFOLLOW read, with fd and named-file identity checked before/after."""
+    p = path(value); no_link(p)
+    private_signature = None
+    if role == 'private_python':
+        root_info = path(private_root).stat()
+        private_signature = (root_info.st_dev, root_info.st_ino, root_info.st_mode, root_info.st_uid, root_info.st_gid)
+    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY); opened = None
+    try:
+        for part in p.parent.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory); directory = child
+        opened = os.open(p.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        before = os.fstat(opened); bound = host_protection(p, before, role, private_root)
+        if role in ('python', 'private_python', 'compiler'):
+            need(os.access(p, os.X_OK), 'Installed executable unavailable')
+        signature = lambda x: (x.st_dev, x.st_ino, x.st_mode, x.st_uid, x.st_gid,
+                               x.st_nlink, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
+        chunks, size = [], 0
+        while size <= bound:
+            block = os.read(opened, min(65536, bound + 1 - size))
+            if not block: break
+            chunks.append(block); size += len(block)
+        need(size == before.st_size and signature(before) == signature(os.fstat(opened))
+             and signature(before) == signature(os.stat(p.name, dir_fd=directory, follow_symlinks=False)),
+             'Installed file changed during read')
+        host_protection(p, os.fstat(opened), role, private_root)
+        if private_signature is not None:
+            root_info = path(private_root).stat()
+            need(private_signature == (root_info.st_dev, root_info.st_ino, root_info.st_mode, root_info.st_uid, root_info.st_gid),
+                 'Private venv root changed during read')
+        no_link(p)
+        need(signature(before) == signature(p.lstat()), 'Installed path changed during read')
+        return b''.join(chunks)
+    finally:
+        if opened is not None: os.close(opened)
+        os.close(directory)
+
+
+def row(value, *, executable=False, host_role=None, private_root=None):
     need(type(value) is dict and set(value) == {'path', 'sha256'}, 'Exact file identity row')
     p = path(value['path']); checksum(value['sha256'])
+    if host_role is not None:
+        need(digest(host_file(str(p), role=host_role, private_root=private_root)) == value['sha256'], 'File bytes changed')
+        return p
     no_link(p)
     info = p.stat()
     need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 128 * 1024 * 1024
@@ -219,11 +307,11 @@ def actual_inputs(plan):
     # Never called by verify/preview. Existing venv is newly provisioned by an
     # independently approved step; this runtime cannot bootstrap an interpreter.
     for key in ['sandbox', 'supervisor', 'compiler']:
-        row(plan[key], executable=key != 'supervisor')
+        row(plan[key], executable=key != 'supervisor', host_role='compiler' if key == 'compiler' else None)
     need(Path(plan['python']['invocation']).resolve(strict=True) == path(plan['python']['real']),
          'Venv Python target changed')
-    row({'path': plan['python']['real'], 'sha256': plan['python']['sha256']}, executable=True)
-    row({'path': plan['python']['base'], 'sha256': plan['python']['sha256']}, executable=True)
+    row({'path': plan['python']['real'], 'sha256': plan['python']['sha256']}, executable=True, host_role='private_python', private_root=plan['venv'])
+    row({'path': plan['python']['base'], 'sha256': plan['python']['sha256']}, executable=True, host_role='python')
     for key in ['venv', 'stdlib']:
         p = path(plan[key]); no_link(p); need(p.is_dir(), 'Runtime read directory missing')
     venv = path(plan['venv']); info = venv.stat()
@@ -231,7 +319,7 @@ def actual_inputs(plan):
     for value in plan['dependencies']:
         p = path(value); no_link(p); need(p.is_dir(), 'Dependency read directory missing')
     for value in plan['runtime_files']:
-        row(value)
+        row(value, host_role='native')
     row({'path': str(HERE / 'probe.py'), 'sha256': plan['probe_sha256']})
     row({k: plan['driver'][k] for k in ['path', 'sha256']})
     for value in plan['driver']['inputs']:

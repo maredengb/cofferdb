@@ -65,6 +65,7 @@ class Tests(unittest.TestCase):
             self.put(stdlib / 'tiny.py', b'x = 1\n')
             self.put(provider / 'lib.dylib', image(deps=[(0xc, '/usr/lib/libSystem.B.dylib')]))
             self.put(provider / 'python3', image(kind=2, deps=[(0xc, '@loader_path/lib.dylib')]))
+            (provider / 'python3').chmod(0o755)
             self.put(stdlib / 'extension.so', image(kind=8, deps=[(0xc, '@loader_path/../lib.dylib')]))
             rows = OBSERVER.index_tree(stdlib, time.monotonic() + 5)
             self.index += rows
@@ -75,6 +76,7 @@ class Tests(unittest.TestCase):
         for name in ('cargo', 'rustc', 'maturin', 'sandbox', 'compiler', 'prepare', 'builder'):
             selected = self.root / 'tools' / name
             self.put(selected, ('fixture tool ' + name).encode())
+            if name == 'compiler': selected.chmod(0o755)
             self.snapshot['tools'][name] = self.file_row(selected)
 
     def put(self, path, data):
@@ -196,6 +198,17 @@ class Tests(unittest.TestCase):
         lib.unlink(); lib.symlink_to(other.name)
         with self.assertRaisesRegex(ValueError, 'graph changed'):
             n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
+
+    def test_selected_base_keeps_its_interpreter_role_in_native_graph(self):
+        calls = []; original = OBSERVER.native_bytes
+        def record(value, bound, **kwargs):
+            calls.append((value, kwargs.get('python_base')))
+            return original(value, bound, **kwargs)
+        with patch.object(OBSERVER, 'native_bytes', side_effect=record):
+            self.inspect()
+        for runtime in self.snapshot['runtimes']:
+            base = runtime['binary']['path']
+            self.assertIn((base, base), calls)
 
     def test_stdlib_addition_or_byte_mutation_fails_fresh(self):
         result = self.inspect()

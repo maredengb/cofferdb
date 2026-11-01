@@ -13,8 +13,8 @@ import stat
 import time
 import types
 
-BRIDGE_SHA = 'e4a4978671957b18dc92fbd1cd8ea1d928ff46db2b88c36062d8b80f231fc4c4'
-NATIVE_SHA = '71011b78c440b1563b96ab0935c7528df5e776ab6915fa5c1baa76a10c55dbb4'
+BRIDGE_SHA = 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f'
+NATIVE_SHA = 'b74ce7d9e8395ea2463d806e8ebf39c99d81b5e2e0220bfa572e205eb67766a6'
 
 
 def need(value, reason):

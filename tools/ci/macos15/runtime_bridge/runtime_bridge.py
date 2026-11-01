@@ -15,12 +15,12 @@ import zipfile
 
 
 HELPERS = {
-    'runner.py': 'f984c5a04572522efa2b5c422b854a71f827124449be353a0c83b2e57a1dc835',
+    'runner.py': '2e6972ccfc45fb41c4145ff60a6933a767a4b18862dfcde5952fff95d5edc815',
     'probe.py': 'c0cdbf1ce7271f7585bba59d58e51a2f22fc5e9c2a49eeb82d87ab2725b90c10',
-    'workflow_build.py': 'cbb6b8f55254022eb31434af9becee0be753c953bbe86bb60e99c9fa8e84b303',
-    'venv_prepare.py': 'b82c9d0c15776cd200c95d52c03e34f2f555e55995bbf84571b6a2ec74b1fa71',
+    'workflow_build.py': 'ee1bdb098e292998179a1eb50cb721a9d3af16420c9d6ca4454f305d9cac1492',
+    'venv_prepare.py': 'b6fa5a197d1e22d4c6e270b8243e0241444d0d6012740dd88b2b6961ae20e3c1',
     'q_process_supervisor.py': '39d6c8842e1a9c972fd911feb4e3c483d1eb6947fc7291b65ac6f8a3bc778e51',
-    'dynamic_inputs/dynamic_plan.py': 'c1b3a635f0b621018416b71dd6770891784624670c89ef99fd174092523ef010',
+    'dynamic_inputs/dynamic_plan.py': 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3',
 }
 DOCUMENTS = ('config', 'snapshot', 'layout', 'driver_contract', 'native_closure',
              'build_result', 'build_manifest', 'empty_venvs_result')
@@ -95,6 +95,15 @@ def read_file(value, bound=MAX_FILE):
         if opened is not None:
             os.close(opened)
         os.close(directory)
+
+
+def host_file(value, *, role, private_root=None):
+    selected = Path(__file__).parent.parent / 'runner.py'
+    raw = read_file(str(selected), 131072)
+    need(sha(raw) == HELPERS['runner.py'], 'Installed reader identity differs')
+    module = types.ModuleType('selected_installed_reader'); module.__file__ = str(selected)
+    exec(compile(raw, str(selected), 'exec', dont_inherit=True), module.__dict__)
+    return module.host_file(value, role=role, private_root=private_root)
 
 
 def unique(pairs):
@@ -193,8 +202,8 @@ def actual_binding(value, expected, r):
     real = path(value['real'])
     need(real.is_relative_to(root) and Path(value['invocation']).resolve(strict=True) == real,
          'Copied venv Python no longer resolves inside its root')
-    need(sha(read_file(str(real))) == value['sha256']
-         and sha(read_file(value['base'])) == value['sha256'], 'Base/copy interpreter changed')
+    need(sha(host_file(str(real), role='private_python', private_root=str(root))) == value['sha256']
+         and sha(host_file(value['base'], role='python')) == value['sha256'], 'Base/copy interpreter changed')
     checksum(value['pyvenv_cfg_sha256'])
     cfg = read_file(str(root / 'pyvenv.cfg'), 16384)
     need(sha(cfg) == value['pyvenv_cfg_sha256'], 'Venv configuration changed')

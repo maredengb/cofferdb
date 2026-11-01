@@ -16,8 +16,8 @@ import struct
 import time
 import types
 
-COLLECTOR_SHA = '15b1354b782b51e99a01bfa563b004e5c38573ad41674259bc882db84dd1cc1c'
-PLAN_SHA = 'c1b3a635f0b621018416b71dd6770891784624670c89ef99fd174092523ef010'
+COLLECTOR_SHA = 'da7cf26018aef0c22e157a06e659ac2e6f7998ff3e80b02fde48117795dec241'
+PLAN_SHA = 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
 SYSTEM_ROOTS = ('/usr/lib', '/System/Library/Frameworks', '/System/Library/PrivateFrameworks')
 MACH_MAGICS = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf')
 LOADS = {0xc: 'required', 0x80000018: 'weak', 0x8000001f: 'reexport',
@@ -180,7 +180,7 @@ def resolve_dependency(name, loader, executable, rpaths):
     return resolved[0] if resolved else None
 
 
-def inspect_runtime(runtime, index, maximum_os, read_file, deadline):
+def inspect_runtime(runtime, index, maximum_os, read_file, deadline, *, protection=None):
     base = runtime['binary']['path']
     absolute(base)
     stdlib = absolute(runtime['stdlib'])
@@ -201,7 +201,10 @@ def inspect_runtime(runtime, index, maximum_os, read_file, deadline):
         read_bytes += len(data)
         need(read_bytes <= MAX_BYTES, 'Native read byte budget')
         info = os.stat(value, follow_symlinks=False)
-        need(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022, 'Protected native file required')
+        if protection is None:
+            need(stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022, 'Protected native file required')
+        else:
+            protection(value, info)
         digest = sha(data)
         if value == base:
             need(digest == runtime['binary']['sha256'], 'Interpreter identity changed')
@@ -308,6 +311,13 @@ def input_set(snapshot, index):
          'Index contains files outside selected stdlibs')
 
 
+def observed_runtime(runtime, index, maximum_os, observer, deadline):
+    base = runtime['binary']['path']
+    return inspect_runtime(runtime, index, maximum_os,
+        lambda value, bound: observer.native_bytes(value, bound, python_base=base), deadline,
+        protection=lambda value, info: observer.native_protection(value, info, python_base=base))
+
+
 def inspect(config, snapshot, index, validator_sha256, evidence_reference, observer, plan):
     plan.configuration(config)
     checksum(validator_sha256)
@@ -326,7 +336,7 @@ def inspect(config, snapshot, index, validator_sha256, evidence_reference, obser
         # Re-index exact file sets, not just the old paths: additions must fail too.
         actual = observer.index_tree(Path(runtime['stdlib']), deadline)
         need(sha(canonical(actual)) == runtime['stdlib_index_sha256'], 'Fresh complete stdlib index differs')
-        graph = inspect_runtime(runtime, index, maximum_os, observer.bytes_, deadline)
+        graph = observed_runtime(runtime, index, maximum_os, observer, deadline)
         graphs.append(graph)
         amended['runtimes'][number]['runtime_files'] = graph['runtime_files']
     report = {'schema_version': 1, 'kind': 'mac15_declared_static_native_graph_1',
@@ -359,7 +369,7 @@ def fresh(snapshot, index, report, observer):
              and runtime['runtime_files'] == graph['runtime_files'], 'Fresh graph runtime differs')
         need(sha(canonical(observer.index_tree(Path(runtime['stdlib']), deadline))) == runtime['stdlib_index_sha256'],
              'Fresh complete stdlib changed')
-        need(inspect_runtime(runtime, index, maximum_os, observer.bytes_, deadline) == graph,
+        need(observed_runtime(runtime, index, maximum_os, observer, deadline) == graph,
              'Fresh native dependency graph changed')
     need(type(snapshot['tools']) is dict
          and set(snapshot['tools']) == {'cargo', 'rustc', 'maturin', 'sandbox', 'compiler', 'prepare', 'builder'},
@@ -367,7 +377,7 @@ def fresh(snapshot, index, report, observer):
     for name, row in snapshot['tools'].items():
         need(row is not None, 'Missing selected tool: ' + name)
         need(time.monotonic() < deadline, 'Fresh input deadline')
-        tool_raw = observer.bytes_(row['path'], MAX_FILE)
+        tool_raw = observer.compiler_bytes(row['path']) if name == 'compiler' else observer.bytes_(row['path'], MAX_FILE)
         info = os.stat(row['path'], follow_symlinks=False)
         need(time.monotonic() < deadline and stat.S_ISREG(info.st_mode) and not info.st_mode & 0o022
              and sha(tool_raw) == row['sha256'], 'Fresh tool identity or protection changed: ' + name)

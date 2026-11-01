@@ -11,7 +11,7 @@ import stat
 import time
 import types
 
-BRIDGE_SHA = 'e4a4978671957b18dc92fbd1cd8ea1d928ff46db2b88c36062d8b80f231fc4c4'
+BRIDGE_SHA = 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f'
 KEYS = ('cargo', 'rustc', 'maturin', 'sandbox', 'compiler', 'prepare', 'builder')
 QUERIES = ('cargo', 'rustc', 'maturin', 'compiler')
 
@@ -71,7 +71,7 @@ def selected_rows(b, selected, checkout):
         need(b.path(selected[key]).name == key, 'Select actual named tool binary, not a shim target')
     rows = {}
     for key in KEYS:
-        raw = b.read_file(selected[key])
+        raw = b.host_file(selected[key], role='compiler') if key == 'compiler' else b.read_file(selected[key])
         if key not in ('prepare', 'builder'):
             need(os.access(selected[key], os.X_OK), 'Selected executable unavailable')
         rows[key] = {'path': selected[key], 'sha256': sha(raw)}

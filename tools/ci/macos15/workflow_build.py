@@ -10,7 +10,7 @@ import types
 import stat
 
 HERE = Path(__file__).absolute().parent
-RUNNER_SHA = 'f984c5a04572522efa2b5c422b854a71f827124449be353a0c83b2e57a1dc835'
+RUNNER_SHA = '2e6972ccfc45fb41c4145ff60a6933a767a4b18862dfcde5952fff95d5edc815'
 def runner_bytes():
     selected = HERE / 'runner.py'
     if any(item.is_symlink() for item in [selected, *selected.parents]):
@@ -89,7 +89,7 @@ def actual(plan):
     for key in ['cargo', 'rustc', 'maturin']:
         r.row(plan[key], executable=True)
     for row in plan['pythons']:
-        r.row({k: row[k] for k in ['path', 'sha256']}, executable=True)
+        r.row({k: row[k] for k in ['path', 'sha256']}, executable=True, host_role='python')
     for key in ['checkout', 'cargo_home']:
         p = r.path(plan[key]); r.no_link(p); r.need(p.is_dir(), 'Selected existing input directory')
 

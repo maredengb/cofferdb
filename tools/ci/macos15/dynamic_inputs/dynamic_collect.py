@@ -13,7 +13,7 @@ import stat
 import time
 import types
 
-INSTANTIATOR_SHA='c1b3a635f0b621018416b71dd6770891784624670c89ef99fd174092523ef010'
+INSTANTIATOR_SHA='d98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
 HERE=Path(__file__).absolute().parent
 
 def load_instantiator():
@@ -57,6 +57,30 @@ def bytes_(p,bound=131072):
     finally:
         if fd is not None:os.close(fd)
         os.close(parent)
+
+def installed_policy():
+    selected = HERE.parent / 'runner.py'; raw = bytes_(selected, 131072)
+    expected = load_instantiator().HELPERS['runner.py']
+    if hashlib.sha256(raw).hexdigest() != expected: raise ValueError('Installed reader identity')
+    module = types.ModuleType('observed_installed_policy'); module.__file__ = str(selected)
+    exec(compile(raw, str(selected), 'exec', dont_inherit=True), module.__dict__)
+    return module
+
+
+def native_bytes(value, bound=128*1024**2, *, python_base=None):
+    # Runtime graph members remain bounded at the original native-file limit.
+    data = installed_policy().host_file(str(value), role='python' if str(value) == python_base else 'native')
+    if len(data) > bound: raise ValueError('Native file bound')
+    return data
+
+
+def native_protection(value, info, *, python_base=None):
+    return installed_policy().host_protection(str(value), info, 'python' if str(value) == python_base else 'native')
+
+
+def compiler_bytes(value):
+    return installed_policy().host_file(str(value), role='compiler')
+
 
 def gate(deadline):
     if time.monotonic()>=deadline:raise ValueError('collection deadline')

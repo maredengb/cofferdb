@@ -10,7 +10,7 @@ import sys
 import time
 import types
 
-WORKFLOW_SHA = '114ac6faa96e643701e0237c9f85364cde84c10242029f39a132e809fe6e53ec'
+WORKFLOW_SHA = '53bbced02bf9c734f6a70641bdf8ecf0da3be65f580a860ab521f1aa635231fa'
 PREPARER_SHA = '99a394b4c5c247800f525aa716091872fd82ac3c2bb93168c3c92374f6419daf'
 INSTALLER_SHA = 'bb2899ac427808253bb5c201ae3fbb06f95bee74d14b330569e41ec989b00d8a'
 BUSINESS_SHA = '0db442b087a9a1b69dab32263f60ddc799c7a7ec5b3a3735fd73c0b4e6483152'
@@ -171,7 +171,7 @@ def developer_tools(raw, b):
     for name, invocation in candidates.items():
         real = invocation.resolve(strict=True)
         need(real.is_relative_to(root), 'Developer tool alias escapes selected installation')
-        data = b.read_file(str(real))
+        data = b.host_file(str(real), role='compiler') if name == 'compiler' else b.read_file(str(real))
         need(os.access(real, os.X_OK), 'Developer tool unavailable')
         result[name] = {'path': str(real), 'sha256': sha(data)}
     return result
@@ -269,15 +269,16 @@ def execute(value, w, modules, helper_root, budget):
     need(sha(preparer_raw) == PREPARER_SHA, 'Input recipe identity differs')
     preparer = module(preparer_raw, local / 'prepare_inputs.py', 'selected_input_preparation')
     python = str(Path(sys.executable).resolve(strict=True))
-    immutable = {python: sha(b.read_file(python)), str(local / 'prepare_inputs.py'): PREPARER_SHA,
+    immutable = {python: sha(b.host_file(python, role='python')), str(local / 'prepare_inputs.py'): PREPARER_SHA,
                  str(local / 'job.py'): sha(b.read_file(str(local / 'job.py'), 131072)),
                  str(Path(helper_root) / 'workflow/workflow_bridge.py'): WORKFLOW_SHA}
+    immutable_roles = {python: 'python'}
     for system in ('/usr/bin/xcode-select', '/usr/bin/curl', '/usr/bin/sandbox-exec'):
         immutable[system] = sha(b.read_file(system))
     def fresh():
         budget['check'](); public_identity(value, os.environ)
         for filename, expected in immutable.items():
-            need(sha(b.read_file(filename)) == expected, 'Selected job code/tool changed')
+            need(sha(b.host_file(filename, role=immutable_roles[filename]) if filename in immutable_roles else b.read_file(filename)) == expected, 'Selected job code/tool changed')
         for filename, expected in refs.items():
             need(sha(b.read_file(filename, 16 * 1024 ** 2)) == expected, 'Original job record changed')
         budget['check']()
@@ -291,6 +292,7 @@ def execute(value, w, modules, helper_root, budget):
         developer = developer_tools(cap.run('developer-directory', ['/usr/bin/xcode-select', '--print-path'],
                                              out / 'home', environment, 20), b)
         saved('inputs/developer-tools.json', developer)
+        immutable_roles[developer['compiler']['path']] = 'compiler'
         immutable.update({developer[key]['path']: developer[key]['sha256'] for key in ('git', 'compiler')})
         source = source_gate(cap, value, environment, 'initial-source', developer['git']['path'])
         pair = rust_pair(preparer, value['rustup_home']); saved('inputs/rust-selection.json', pair)

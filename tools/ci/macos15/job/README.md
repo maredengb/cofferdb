@@ -100,3 +100,21 @@ of those output bytes changed.
 The three actual context cell IDs are N01, N02 and N03 for CPython 3.12, 3.13
 and 3.14 respectively. Offline assertion mappings can refer to the same actual
 cell and attempt; they do not cause an additional installation or a new context.
+
+## Installed host inputs
+
+Installed interpreters and declared Python native images use an explicit file
+role within the fixed Python provider paths. A group-writable installation is
+permitted there; world-writable files, multiple hard links, unexpected owners,
+links along the selected real path, and changes during reads are rejected.
+The original 128 MiB native/interpreter bound remains. Only the selected Xcode
+or Command Line Tools clang receives a 512 MiB bound, with group and world write
+still rejected. Other tool paths keep the original bound and mode policy.
+
+A copied interpreter may retain its installation mode only inside the exact
+owned 0700 virtual-environment root, with its digest equal to the selected base
+interpreter. No installation or system permission is changed. Ordinary source,
+JSON, driver, fixture, wheel and evidence readers keep their strict file policy.
+All tool identities are checked again at the existing stage boundaries; these
+file-role checks do not replace the existing native graph, sandbox or runtime
+validation.
