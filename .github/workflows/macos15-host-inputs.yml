@@ -1,0 +1,34 @@
+name: macOS standard-library metadata
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full public commit equal to dispatch HEAD
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: macos15-stdlib-inputs-${{ github.repository_id }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    if: github.event_name == 'workflow_dispatch' && github.repository_id == '1422246026' && github.event.repository.private == false && github.run_attempt == 1 && inputs.source_sha == github.sha
+    runs-on: macos-15
+    timeout-minutes: 3
+    steps:
+      - name: Check out selected public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: maredengb/cofferdb
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+      - name: Read fixed standard-library metadata
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -I -S -B \
+            tools/ci/macos15/stdlib_inputs/probe.py
