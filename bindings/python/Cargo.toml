@@ -1,0 +1,30 @@
+[package]
+name = "cofferdb-python"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Experimental in-process Python bindings for CofferDB."
+readme = "README.md"
+repository = "https://github.com/maredengb/coffered"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+cofferdb = { path = "../.." }
+pyo3 = { version = "=0.27.2" }
+
+[features]
+extension-module = ["pyo3/extension-module"]
+native-test-support = ["cofferdb/native-test-support"]
+
+[profile.release]
+panic = "unwind"
+lto = "thin"
+# Preserve valid Mach-O layout on affected Rust/LLVM toolchains. Stripping
+# debuginfo can misalign LINKEDIT and prevent native/proc-macro loading:
+# https://github.com/rust-lang/rust/issues/157750
+strip = "none"

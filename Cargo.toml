@@ -1,0 +1,28 @@
+[package]
+name = "cofferdb"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Single-file embedded retrieval database for explainable local RAG."
+readme = "README.md"
+exclude = ["benchmarks/evaluation-v1/**"]
+keywords = ["database", "retrieval", "bm25", "rag", "embedded"]
+categories = ["database-implementations"]
+repository = "https://github.com/maredengb/coffered"
+
+[features]
+# Native integration tests only; never enabled by ordinary product builds.
+native-test-support = []
+
+[lib]
+name = "cofferdb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "coffer"
+path = "src/main.rs"
+
+[[example]]
+name = "workload-driver"
+path = "tools/workload_rust/main.rs"

@@ -1,0 +1,77 @@
+name: macOS 15 package validation
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed full public commit (must equal dispatch HEAD)
+        required: true
+        type: string
+      execution_reference:
+        description: Approved execution record or digest
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: macos15-package-${{ github.repository_id }}
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.event_name == 'workflow_dispatch' && github.repository_id == '1422246026' && github.event.repository.private == false && github.run_attempt == 1 && inputs.source_sha == github.sha
+    runs-on: macos-15
+    timeout-minutes: 130
+    steps:
+      - name: Check out the selected public source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: maredengb/coffered
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+      - name: Prepare inputs and validate three native Python wheels
+        shell: bash
+        timeout-minutes: 122
+        env:
+          COFFERDB_PUBLIC_SHA: ${{ inputs.source_sha }}
+          COFFERDB_EXECUTION_REFERENCE: ${{ inputs.execution_reference }}
+        run: |
+          set -euo pipefail
+          umask 077
+          /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -I -S -B \
+            tools/ci/macos15/job/job.py run \
+            --checkout "$GITHUB_WORKSPACE" \
+            --source-commit "$COFFERDB_PUBLIC_SHA" \
+            --execution-reference "$COFFERDB_EXECUTION_REFERENCE" \
+            --rustup-home "$HOME/.rustup" \
+            --output "$RUNNER_TEMP/cofferdb-mac15-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - name: Preserve exact packages and successful or failed evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cofferdb-macos15-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 1
+          path: |
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/INTENT.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/RESULT.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/HOLD.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/evidence
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/inputs
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/maturin
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/vendor
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/cargo/config.toml
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/INTENT.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/RESULT.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/HOLD.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/data
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/collect
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/tools
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/gates
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/evidence
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/work/runtime-*
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/work/build/wheels
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/work/build/source/SOURCE-INPUTS.json
+            ${{ runner.temp }}/cofferdb-mac15-${{ github.run_id }}-${{ github.run_attempt }}/workflow/work/build/source/bindings/python/python/cofferdb/_source.json

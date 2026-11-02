@@ -1,0 +1,1716 @@
+{
+  "scope": "Historical41phase cost observations mapped from existing macOS multicollection and largefile workers; no product rerun or new performance conclusion.",
+  "artifacts": [
+    {
+      "artifact": "mac-multicollection/report.json",
+      "original_sha256": "69f892b6fd4399a173302f413b19e92ba8e8197e0bf8132740822d8eadc33001",
+      "public_sha256": "223f96cdf4e1b06f10845b6bbdc0822b5bec3a5c466f9bae49e1d946bdbac3c6",
+      "bytes": 1271824,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [
+          {
+            "json_pointer": "/stages/0/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/0/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/0/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/0/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "6e717d1025020cd34704ba3ebdc8943ed54fa9c66321acc4835c9707efc58bd2",
+            "replacement": "external-reference/6e717d1025020cd3/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/1/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/1/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "66a9d8ab7917807b1e2d4ace5493d108f99661e6b573f9d47d40b2b423ed1521",
+            "replacement": "external-reference/66a9d8ab7917807b/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/2/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/2/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bc971e79f6d0fc30146aeb2cdaedf0ff9004c3a55c3936889e36e5da733a153",
+            "replacement": "external-reference/5bc971e79f6d0fc3/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/3/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/3/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "ed7fd37c7daae713d8caad60673501ec4d81741adc0f2017d3551dcd52903597",
+            "replacement": "external-reference/ed7fd37c7daae713/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/4/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/4/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "3dd1916462498021bde1032d15d90b6b44fcc4a51f62d85207635a44071366ea",
+            "replacement": "external-reference/3dd1916462498021/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/5/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/5/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2e58bd48a4daf4b4acdd345811a2fbd8a035ee1073f8131db82a72ea9f6ce1de",
+            "replacement": "external-reference/2e58bd48a4daf4b4/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/6/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/6/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "082858affd8496622e861a50e1c07a9e920b5fedf3da407facbe2ec4343f0b1f",
+            "replacement": "external-reference/082858affd849662/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/7/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/7/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c5f69ef9067b027d1ea5806216271164be2f7d6b98976c41918bab6db8b841ba",
+            "replacement": "external-reference/c5f69ef9067b027d/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/8/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/8/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98898c097ccb077fa393bb0b836ddf9eb9afde0fa07a4d255ebda35e1df88ba7",
+            "replacement": "external-reference/98898c097ccb077f/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/9/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/9/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "65116077afaf40534f0c1a003c6584c1e7262069f640abb44a63274da7a7ae18",
+            "replacement": "external-reference/65116077afaf4053/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/10/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/10/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/11/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/11/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/11/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/11/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/12/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/12/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/12/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/12/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/13/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/13/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/13/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "dd22f68df51adafbf896bc6a0fa5b0d92f8f04763ee75b840c63011fcdd8a957",
+            "replacement": "external-reference/dd22f68df51adafb/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/13/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/13/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/14/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/14/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/14/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/14/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/15/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/15/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/15/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/15/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/16/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/16/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/rows/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/17/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/17/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/17/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "e5c43483d800da70d566f6671eb275a460df1500b0d6646b1df316667338a31d",
+            "replacement": "external-reference/e5c43483d800da70/export"
+          },
+          {
+            "json_pointer": "/stages/17/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/17/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "faac2f9ef7d9420d242872ad20fb4ebb532ee788355d7bda65f0ce77068364bd",
+            "replacement": "external-reference/faac2f9ef7d9420d/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/18/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/19/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/19/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "faac2f9ef7d9420d242872ad20fb4ebb532ee788355d7bda65f0ce77068364bd",
+            "replacement": "external-reference/faac2f9ef7d9420d/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/19/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/19/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5a3fef0dd0afa8981b4f1032cb165fda8fcf4b2a33a9338685d56d2f548eda18",
+            "replacement": "external-reference/5a3fef0dd0afa898/helper"
+          },
+          {
+            "json_pointer": "/stages/20/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "faac2f9ef7d9420d242872ad20fb4ebb532ee788355d7bda65f0ce77068364bd",
+            "replacement": "external-reference/faac2f9ef7d9420d/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f38015fd59673c29611480d86a9e149bf209dc002661652dc00fec6286dded02",
+            "replacement": "external-reference/f38015fd59673c29/coffer"
+          },
+          {
+            "json_pointer": "/stages/20/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/rows/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "faac2f9ef7d9420d242872ad20fb4ebb532ee788355d7bda65f0ce77068364bd",
+            "replacement": "external-reference/faac2f9ef7d9420d/safe-copy.coffer"
+          }
+        ],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "largefile/report.json",
+      "original_sha256": "7e68c2ac0c218134926d1df8253bd4d4696a65b8d110fc4468bfd21d03ffdce2",
+      "public_sha256": "e1dbaac367aad5d75e98341947dd0dc968c5e13409eda4172ebcf7048451dcd1",
+      "bytes": 39999,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [
+          {
+            "json_pointer": "/cases/0/read_only/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bb7e5cc8e30d1f1f2cda657454ab935236dd667c834b632c16458ad0838a48e",
+            "replacement": "external-reference/5bb7e5cc8e30d1f1/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/0/reopen/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bb7e5cc8e30d1f1f2cda657454ab935236dd667c834b632c16458ad0838a48e",
+            "replacement": "external-reference/5bb7e5cc8e30d1f1/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/1/read_only/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c8417d8eff7069354f615d78b19f1559fa3c4a910635581f1c487d94e1a2eee1",
+            "replacement": "external-reference/c8417d8eff706935/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/1/reopen/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c8417d8eff7069354f615d78b19f1559fa3c4a910635581f1c487d94e1a2eee1",
+            "replacement": "external-reference/c8417d8eff706935/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/2/read_only/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "141bfc7c8b3f1ecc3dde895fd9c4ef535ce0da6335877afa8ef21a7024b31167",
+            "replacement": "external-reference/141bfc7c8b3f1ecc/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/2/reopen/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "141bfc7c8b3f1ecc3dde895fd9c4ef535ce0da6335877afa8ef21a7024b31167",
+            "replacement": "external-reference/141bfc7c8b3f1ecc/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/3/read_only/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98a5ed58bee6acca61b6c49a13ef1d7f99ec0e835aee1ae701049f10753c65a2",
+            "replacement": "external-reference/98a5ed58bee6acca/data.coffer"
+          },
+          {
+            "json_pointer": "/cases/3/reopen/rows/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98a5ed58bee6acca61b6c49a13ef1d7f99ec0e835aee1ae701049f10753c65a2",
+            "replacement": "external-reference/98a5ed58bee6acca/data.coffer"
+          }
+        ],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/protocol.json",
+      "original_sha256": "39ef2e742ed5f20bd34de9570edaa9996db9df0b28adddee2eb79381d77fbde6",
+      "public_sha256": "c2f7c6259ad79c17381ab9736cc9351fc343a4ec59dbca3f5a267a250b0bfcd8",
+      "bytes": 30068,
+      "transformation": {
+        "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
+      }
+    },
+    {
+      "artifact": "largefile/protocol.json",
+      "original_sha256": "d15419898d3bd8f7d1dab7b2415b96fd6d940dcc6230bbe03b805053a9c8e56d",
+      "public_sha256": "f6c766cd438f961377ae88b27566370750d632a3f770bb92adf1733bc6625541",
+      "bytes": 3222,
+      "transformation": {
+        "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
+      }
+    },
+    {
+      "artifact": "mac-multicollection/init-stderr.log",
+      "original_sha256": "e62ba5a756e2382d57c9efbcc40fce794a5105fe56d5cd8033d628eabaab0524",
+      "public_sha256": "e62ba5a756e2382d57c9efbcc40fce794a5105fe56d5cd8033d628eabaab0524",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/init-stdout.log",
+      "original_sha256": "66bf4139542a956c032340071b49d3819e03f4c11aea9c15fcaf697b32d783dc",
+      "public_sha256": "d07c091fb7b14cad0aa7299170d0ef81166aa1eabd26aaac82f9967e20bd9a8b",
+      "bytes": 184,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/init-disk-samples.json",
+      "original_sha256": "187fa74aa4eaacae376a452d89d1b9dcf34091776143c35fc2f202e802383a31",
+      "public_sha256": "0dc3ac67d8f0177576469b4c415c556ff839e96905f77e39defece14ce790716",
+      "bytes": 427,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-0-stderr.log",
+      "original_sha256": "ab4105513a7f064c529c2652345720749b7630c095441d509a6f7cdcfdcab4f3",
+      "public_sha256": "ab4105513a7f064c529c2652345720749b7630c095441d509a6f7cdcfdcab4f3",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-0-stdout.log",
+      "original_sha256": "9777f179336ff2c4622cc90136b43c0a93ccd1dd87f11e69c1bf79191ecbb337",
+      "public_sha256": "9bca1b0f2709ac0f8aec7ee5b359c59eed47665ca29f3bb726df656c1b921abb",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "6e717d1025020cd34704ba3ebdc8943ed54fa9c66321acc4835c9707efc58bd2",
+            "replacement": "external-reference/6e717d1025020cd3/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-0-disk-samples.json",
+      "original_sha256": "0d177084b89619ae19ba16e47ec34dac5f150f2ebd581c92bb39d7d4ee2a8506",
+      "public_sha256": "c742b973f900c2354567bbfd2d22ff19c933e8b46211b8b667f99bc45622c89a",
+      "bytes": 1463,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-1-stderr.log",
+      "original_sha256": "8eb107892bc54439330b359ca7393c0307c0fa596c4a7962baee8f551f475b68",
+      "public_sha256": "8eb107892bc54439330b359ca7393c0307c0fa596c4a7962baee8f551f475b68",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-1-stdout.log",
+      "original_sha256": "f92095a2241005a639157d2b7537c0b1b45ba5dee4c72016c5d35a3dd5c44fc1",
+      "public_sha256": "b4b5bd51e4429e36a953a22d6bdc0e7abf7c61412781c4878bb2af3f1d6d7966",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "66a9d8ab7917807b1e2d4ace5493d108f99661e6b573f9d47d40b2b423ed1521",
+            "replacement": "external-reference/66a9d8ab7917807b/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-1-disk-samples.json",
+      "original_sha256": "390e1b63d4cd8bafed2dad404778f1d8cc8eb1481c42c99016b40ab098f076e3",
+      "public_sha256": "99fb972de01e97a9c7dc1344a925d6e698fc9b86daef09880bc67997782c48c7",
+      "bytes": 1787,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-2-stderr.log",
+      "original_sha256": "c1a7b8d397ed0df28d41d75c7341bc48b840e31e4e81882de9ff1f7f3791b7d4",
+      "public_sha256": "c1a7b8d397ed0df28d41d75c7341bc48b840e31e4e81882de9ff1f7f3791b7d4",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-2-stdout.log",
+      "original_sha256": "8ab99d6a288f40cb5b550079dc1fecc7e1ad6747d0e41dee9362236fd1805c60",
+      "public_sha256": "ebf8f4460f3e453ba50542cb7aa7d40f72ded00cbbc2e63c34fc470f3197b5f2",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bc971e79f6d0fc30146aeb2cdaedf0ff9004c3a55c3936889e36e5da733a153",
+            "replacement": "external-reference/5bc971e79f6d0fc3/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-2-disk-samples.json",
+      "original_sha256": "7292f3a0e894295cac7b173ec91461e438a580067a2374f02992a9c0334aca95",
+      "public_sha256": "51f2f7c3af5ac523bb7a7d467484a40a92cca2f67a3f30c42cafe1d2affbfe7c",
+      "bytes": 2200,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-3-stderr.log",
+      "original_sha256": "d4aa5c3951466f9d886d9fba8b04c7c210cec1c450260ef200f6ca8653ede6cc",
+      "public_sha256": "d4aa5c3951466f9d886d9fba8b04c7c210cec1c450260ef200f6ca8653ede6cc",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-3-stdout.log",
+      "original_sha256": "104d20596ae25cbc7885fa3c78ef28a765295e073e53cb80e427c88201adcb3a",
+      "public_sha256": "f8d8e3eff7b3cf9e2bf0f9d324f7e8d052809580e0c25ed2f6e4310b9b74b4f2",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "ed7fd37c7daae713d8caad60673501ec4d81741adc0f2017d3551dcd52903597",
+            "replacement": "external-reference/ed7fd37c7daae713/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-3-disk-samples.json",
+      "original_sha256": "ec455bc3e2a9329f27c31571e82c5ae627d5a58277af9dd6d5276a4aa4d358a1",
+      "public_sha256": "08a9e4e2597d995949c38c41137a328eeb75e403b31ca31cd8920672322c0d63",
+      "bytes": 2601,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-4-stderr.log",
+      "original_sha256": "977a53a5b7464f490de87ce106a63da08609a519361763a834b7de0ceb96a2fc",
+      "public_sha256": "977a53a5b7464f490de87ce106a63da08609a519361763a834b7de0ceb96a2fc",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-4-stdout.log",
+      "original_sha256": "31ddfa36fc945da16829d1340fd93da21a350181b9e4034b1779f4a102333cab",
+      "public_sha256": "044728860446767bda627f50988300af93ae8b2509ab71f34a89e4b231715db7",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "3dd1916462498021bde1032d15d90b6b44fcc4a51f62d85207635a44071366ea",
+            "replacement": "external-reference/3dd1916462498021/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-4-disk-samples.json",
+      "original_sha256": "4e0a109a308a6430461e2b55fc498c387f9752b5c777b5fc2c1351a02c8dab58",
+      "public_sha256": "190626bba6534e917eaa7be956d4797b727992f9ee5b5f077bf32d6cd173369e",
+      "bytes": 2998,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-5-stderr.log",
+      "original_sha256": "1e8b90926d122fd31770f3236be68139f9c8b37bd5a80f89d37136c2bc8cdc7a",
+      "public_sha256": "1e8b90926d122fd31770f3236be68139f9c8b37bd5a80f89d37136c2bc8cdc7a",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-5-stdout.log",
+      "original_sha256": "4c90751da3e0fbc2159d0f3f22e66bbfcb479c8390f421fba3bf3ba7b24813cf",
+      "public_sha256": "c99c15afce428c304e3b46a3e1547853a177053d88985f8579fcb27fe213aece",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2e58bd48a4daf4b4acdd345811a2fbd8a035ee1073f8131db82a72ea9f6ce1de",
+            "replacement": "external-reference/2e58bd48a4daf4b4/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-5-disk-samples.json",
+      "original_sha256": "9e2d7929cf68204a1d3481d6d4a2b22276567a6fe04587783457191f51c37922",
+      "public_sha256": "7cc85a476d76bd0860da604ecbbfcfcde6bf08a284afdd75a9b1b30d3f3fd315",
+      "bytes": 3395,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-6-stderr.log",
+      "original_sha256": "069bd0e62e94966b616563c4ad86bda797f5aea55e2b99b980949e6cab4c3587",
+      "public_sha256": "069bd0e62e94966b616563c4ad86bda797f5aea55e2b99b980949e6cab4c3587",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-6-stdout.log",
+      "original_sha256": "bef5564c1f468570f1ef95866e830800b7c52685ae93ac3463057be8b2e8d13c",
+      "public_sha256": "a9b19ecc93f319fcec3f2392f35e820190e4fd98f30986cdf0c8fc81dd4837ba",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "082858affd8496622e861a50e1c07a9e920b5fedf3da407facbe2ec4343f0b1f",
+            "replacement": "external-reference/082858affd849662/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-6-disk-samples.json",
+      "original_sha256": "8ea1655688705c7d1176f5d876ae0ffd1d6ceec2bb45d19f02200b1382cd09bd",
+      "public_sha256": "95438dcae2cfe211c8c70ac8cd726ba28904296098282747f9c4fa55ee8403f8",
+      "bytes": 3793,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-7-stderr.log",
+      "original_sha256": "e0b4b36573bf8c2b0580ca9b666b25fbb34b3192f2a1d7bb0ac9d7c28bcf6dc5",
+      "public_sha256": "e0b4b36573bf8c2b0580ca9b666b25fbb34b3192f2a1d7bb0ac9d7c28bcf6dc5",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-7-stdout.log",
+      "original_sha256": "891421771569164d9a156a036077581508e771894cd163bb0f4bd8e97134334d",
+      "public_sha256": "04cbf84414d17e9554f44e33c4eea6d2d793b7c2fa03ef8dcf41464c31d3399c",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c5f69ef9067b027d1ea5806216271164be2f7d6b98976c41918bab6db8b841ba",
+            "replacement": "external-reference/c5f69ef9067b027d/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-7-disk-samples.json",
+      "original_sha256": "6aed9473017ebcd35b40da8a6eb6a2e3df2f5dac5ce7fa7eb4b6274ec8160a8a",
+      "public_sha256": "8469c158c02accd620d57b68dce9278f1f7e199b43b2221b1cb338dc8fdfd961",
+      "bytes": 4293,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-8-stderr.log",
+      "original_sha256": "1cd0591def1ed3dd74c636654327c298e608281d6ce0ea04128a3749a559aecc",
+      "public_sha256": "1cd0591def1ed3dd74c636654327c298e608281d6ce0ea04128a3749a559aecc",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-8-stdout.log",
+      "original_sha256": "073f07657c72e119853cdccfc77f8f8b96725620b83d47b6045b5d2523bcc5a5",
+      "public_sha256": "31c4f2819aca3f2d8428109ecd20b631536e53f686553b597347eedd87dbf9d8",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98898c097ccb077fa393bb0b836ddf9eb9afde0fa07a4d255ebda35e1df88ba7",
+            "replacement": "external-reference/98898c097ccb077f/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-8-disk-samples.json",
+      "original_sha256": "d02fc24d12e7900e1928eed71f900a4e1634e8f5d8894ba93878c93064b28fd3",
+      "public_sha256": "f688da56f6ae6576b6e20a67c3975da4d19f607f996cbee231dba64c2cd7b560",
+      "bytes": 4781,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-9-stderr.log",
+      "original_sha256": "1f194acfc5c745a1932d02b473fe86a4e229385a2ee5416476591344870894a7",
+      "public_sha256": "1f194acfc5c745a1932d02b473fe86a4e229385a2ee5416476591344870894a7",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/import-9-stdout.log",
+      "original_sha256": "3e096fb771d09ae076422bb3436b33e9cc9f172cebcad71d145f58edf38e485f",
+      "public_sha256": "372882ac31017f2425323dc636d995ad20d74123e5d0f9b4241b78f0478ec435",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact multiline JSON event projection; private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "65116077afaf40534f0c1a003c6584c1e7262069f640abb44a63274da7a7ae18",
+            "replacement": "external-reference/65116077afaf4053/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/import-9-disk-samples.json",
+      "original_sha256": "75482d29b5e7c754ed00dbe4e4b366ba3f8b6ce86b249e9538dbec23ce66b0a2",
+      "public_sha256": "ce1f51c1f8d164d4c0ddc7979c39a6f980280a8c5a33a4d0043e5e7b271421d7",
+      "bytes": 5270,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/open-stderr.log",
+      "original_sha256": "3479184c771b119ec51419e44cd915313e2283a9f45925d7fbee129fd90fee72",
+      "public_sha256": "3479184c771b119ec51419e44cd915313e2283a9f45925d7fbee129fd90fee72",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/open-stdout.log",
+      "original_sha256": "53e1d58e8c7b8afc892b64f5bf5bb9e9a0d0de1e0e5ff990d71c5dbdf238aeb2",
+      "public_sha256": "53e1d58e8c7b8afc892b64f5bf5bb9e9a0d0de1e0e5ff990d71c5dbdf238aeb2",
+      "bytes": 545,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/open-disk-samples.json",
+      "original_sha256": "60a06b42b559d42b986157c18a8b869c75e9708e52d2cea28813f8fa11b134ca",
+      "public_sha256": "45712ea2cfc58095592df2cf9ab74c6d6c592b0c94a73b3970c4b4093b4019ac",
+      "bytes": 4790,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/initial-queries-stderr.log",
+      "original_sha256": "bba161263b0370863bec88f327c86438dc089a7842b90239ad9b56e66549a06b",
+      "public_sha256": "bba161263b0370863bec88f327c86438dc089a7842b90239ad9b56e66549a06b",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/initial-queries-stdout.log",
+      "original_sha256": "9369d92fc8bf766c1fb294bb874039eb4190eac39d34d7739b6726dff5c2a5d7",
+      "public_sha256": "9369d92fc8bf766c1fb294bb874039eb4190eac39d34d7739b6726dff5c2a5d7",
+      "bytes": 159277,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/initial-queries-disk-samples.json",
+      "original_sha256": "66385c328e687545423bce511c59f09ff3e33cb255cb8721f6f8bdaf25fd1f25",
+      "public_sha256": "f28232c67508f8d172d0fd51e0d78390c782f1238927f095e9eaab66203924cc",
+      "bytes": 4982,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/replace-stderr.log",
+      "original_sha256": "6db4094087a58aa13a64bfcd1b913079c00c053d452b7dfd7a6a13c41824e7a8",
+      "public_sha256": "6db4094087a58aa13a64bfcd1b913079c00c053d452b7dfd7a6a13c41824e7a8",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/replace-stdout.log",
+      "original_sha256": "94409394a9b910527b224f3d418b3f2771552df6e053460a9300d883ac5a7ec3",
+      "public_sha256": "94409394a9b910527b224f3d418b3f2771552df6e053460a9300d883ac5a7ec3",
+      "bytes": 376627,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/replace-disk-samples.json",
+      "original_sha256": "a4eb85c71d914992c4a053a6e4f8ef65d36a05702ffb2cf17d673016f45aa4bf",
+      "public_sha256": "71666ad042516c16cccfe8665ba1f8cee137a7a467935f9af85428ba1d6a8fe8",
+      "bytes": 11935,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/delete-drop-stderr.log",
+      "original_sha256": "2aeb63cbe2ee1a8d37a80a82c9dff5be9dbcfe80f2ced9ce93087a22f37a33e3",
+      "public_sha256": "2aeb63cbe2ee1a8d37a80a82c9dff5be9dbcfe80f2ced9ce93087a22f37a33e3",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/delete-drop-stdout.log",
+      "original_sha256": "82a47f7b37a36ee4ea3d41fb00edb1bef6bfca6d04d446c1f5d3111af8ea955d",
+      "public_sha256": "82a47f7b37a36ee4ea3d41fb00edb1bef6bfca6d04d446c1f5d3111af8ea955d",
+      "bytes": 328677,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/delete-drop-disk-samples.json",
+      "original_sha256": "1515264c47226f31402331b81a78b3d625345619ad51627bb01e1a81cba16356",
+      "public_sha256": "543e6d04feb0a720523fc838384c67cff6d9d09131600f8ee6fff9874b87e82f",
+      "bytes": 14420,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/compact-stderr.log",
+      "original_sha256": "a1711044d957d6e26455dc3a2cb39db4130ae8b1c25af5807c53a8a5b80151ae",
+      "public_sha256": "a1711044d957d6e26455dc3a2cb39db4130ae8b1c25af5807c53a8a5b80151ae",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/compact-stdout.log",
+      "original_sha256": "1385ee3b187192450a24733d6a888a30ecbc3d305dd43bb7a7e48669c0c83733",
+      "public_sha256": "1385ee3b187192450a24733d6a888a30ecbc3d305dd43bb7a7e48669c0c83733",
+      "bytes": 221371,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/compact-disk-samples.json",
+      "original_sha256": "3ebbca5702ed739f567827cc5b4409b557a3a5a46c87543565327d729b2990fa",
+      "public_sha256": "32cde4e98be2a77fe1a0fc90bb8b40e4749b87b8d02f30b2fd63502172c583e1",
+      "bytes": 14029,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/check-stderr.log",
+      "original_sha256": "b2100a4a7c11bd016dde3653fc50e557475eb377124c9a0a49740dcfe732b26f",
+      "public_sha256": "b2100a4a7c11bd016dde3653fc50e557475eb377124c9a0a49740dcfe732b26f",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/check-stdout.log",
+      "original_sha256": "d5b3e0bb74553b7545700c1a86e67da2a8ad41b84163e95ff4cfdb7ff5eba813",
+      "public_sha256": "7c108bd63286bd9193427dbb76849e0727c0fc426f95f81990399646ad0d0264",
+      "bytes": 989,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "60a8f38d51d3a6763f1fb99dce04b877456e44b99fcda8e78f82aa2b4ee3de16",
+            "replacement": "external-reference/60a8f38d51d3a676/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/check-disk-samples.json",
+      "original_sha256": "01b772195e5a4fc4c4fbcd2fabfee47667903cb0ee50f72cd2849f6048abd82e",
+      "public_sha256": "831099d25c3672457d1fe7ce735249133a19996ed9eb6f2dcfc0a7b6f16f3113",
+      "bytes": 3696,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/export-stderr.log",
+      "original_sha256": "d0752815288b044150bd8ca71a91f5cd2559a7d0bb63ed454fe966aadd5c6b92",
+      "public_sha256": "d0752815288b044150bd8ca71a91f5cd2559a7d0bb63ed454fe966aadd5c6b92",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/export-stdout.log",
+      "original_sha256": "e5a28030b598de36cdd42f2ccd2553fe9dac65c92152fcdf5556cdde1c7c0835",
+      "public_sha256": "e5a28030b598de36cdd42f2ccd2553fe9dac65c92152fcdf5556cdde1c7c0835",
+      "bytes": 1024,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/export-disk-samples.json",
+      "original_sha256": "b2b2fd029787c4d8ec52eea41c04d432481b9acd95528b8cc34c19f9b0e32247",
+      "public_sha256": "cb08036aa4c9984691e4769d77f1e4187f52778b4268d727bda21f11cd88b384",
+      "bytes": 2600,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/safe-copy-stderr.log",
+      "original_sha256": "449c1dcb4eecbafb27bfe237a0c00f7985de35cc3bd1f01852192af87bd32553",
+      "public_sha256": "449c1dcb4eecbafb27bfe237a0c00f7985de35cc3bd1f01852192af87bd32553",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/safe-copy-stdout.log",
+      "original_sha256": "01e937eba45b8a8d6ce2b3e9f25a557c0e1f277ad988eda617c90a591853e42e",
+      "public_sha256": "01e937eba45b8a8d6ce2b3e9f25a557c0e1f277ad988eda617c90a591853e42e",
+      "bytes": 196,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/safe-copy-disk-samples.json",
+      "original_sha256": "28de074e227380846c04f064d895a742d12bedd02e60088b7e26db6f4a199a21",
+      "public_sha256": "b7af048e8c9658e637f3c330176e49e0e3994a60b582fdb44ab367f0a863a2fb",
+      "bytes": 816,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/reopen-copy-stderr.log",
+      "original_sha256": "bcbe318121c59981e6e9d6ddad3c478740f3f73b576e6714def44fb1857861d6",
+      "public_sha256": "bcbe318121c59981e6e9d6ddad3c478740f3f73b576e6714def44fb1857861d6",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/reopen-copy-stdout.log",
+      "original_sha256": "6f2f1e464448b87146d7a99a3f0cebdaee6e3d6ad485977dfc410e8201e2efbe",
+      "public_sha256": "6f2f1e464448b87146d7a99a3f0cebdaee6e3d6ad485977dfc410e8201e2efbe",
+      "bytes": 111203,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/reopen-copy-disk-samples.json",
+      "original_sha256": "1bdfebd79bd04f295fdcf2ea031a596b0c59f6d5dd06c72175845eef28ad09b2",
+      "public_sha256": "28af0cb9c10442619bfcef570b1821905de6f1c49f46da6afca5cf6ae3e23a0b",
+      "bytes": 4578,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "mac-multicollection/check-copy-stderr.log",
+      "original_sha256": "cbe0ea5e677020fac837257c526b3dfa24476d9fc51ebb5b4c1fa0bd53cd18cd",
+      "public_sha256": "cbe0ea5e677020fac837257c526b3dfa24476d9fc51ebb5b4c1fa0bd53cd18cd",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "mac-multicollection/check-copy-stdout.log",
+      "original_sha256": "41057a1dff7627d34d8d116e2c0bd5c81a4b27cf304498c8d005b8cdd012ab27",
+      "public_sha256": "5069dc519ec8ed6cb083635664015e714558796b8d2cf79bad0b4959f01f9f11",
+      "bytes": 993,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "faac2f9ef7d9420d242872ad20fb4ebb532ee788355d7bda65f0ce77068364bd",
+            "replacement": "external-reference/faac2f9ef7d9420d/safe-copy.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "mac-multicollection/check-copy-disk-samples.json",
+      "original_sha256": "7b278a90bdeb6e967030b63058df5ad4815a1b6ac1fa43d7391c6f05f443a4d1",
+      "public_sha256": "bd631f06947899efc92807466b67e4e7d78c09a85a352e9165fd03f669f2a262",
+      "bytes": 3770,
+      "transformation": {
+        "kind": "Exact JSON projection: only declared private path aliases and nonproduct protocol source identity entries changed. All measurements and terminal states preserved.",
+        "replaced_references": [],
+        "omitted_nonproduct_source_identity_entries": []
+      }
+    },
+    {
+      "artifact": "largefile/fast-before_publication/compact.stdout",
+      "original_sha256": "946810ee2cb071b0fcefe59e1275fd545f11dbbda39c319b3ab1f03bbc1ac8c4",
+      "public_sha256": "946810ee2cb071b0fcefe59e1275fd545f11dbbda39c319b3ab1f03bbc1ac8c4",
+      "bytes": 593,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/compact.stderr",
+      "original_sha256": "64c53c5e5c2e78455190b45f5fe437b27e35c02f06ca1e900bed3e10460cda6a",
+      "public_sha256": "64c53c5e5c2e78455190b45f5fe437b27e35c02f06ca1e900bed3e10460cda6a",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/verify-after-kill.stdout",
+      "original_sha256": "3f21c7e602c33427d8ddb31ef8b0304fdb7e98dd0c62727c2048911a12a8fc2e",
+      "public_sha256": "57228991a0a0f31840cd1d7f8a394abe101cb0f0e282de8c03b36bdcb8cb6880",
+      "bytes": 1914,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bb7e5cc8e30d1f1f2cda657454ab935236dd667c834b632c16458ad0838a48e",
+            "replacement": "external-reference/5bb7e5cc8e30d1f1/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/fast-before_publication/verify-after-kill.stderr",
+      "original_sha256": "36e3edd0f92aca06c5d82da01b7c03e8cead9c36810e3963dac8f570012cc62a",
+      "public_sha256": "36e3edd0f92aca06c5d82da01b7c03e8cead9c36810e3963dac8f570012cc62a",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/recover.stdout",
+      "original_sha256": "049f00723a13c52443590265a4c07bea4ca8af9b87d39139702ec3778b51ece9",
+      "public_sha256": "049f00723a13c52443590265a4c07bea4ca8af9b87d39139702ec3778b51ece9",
+      "bytes": 1359,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/recover.stderr",
+      "original_sha256": "281295e5a5480c78f2bce5def0ac6dc458ed182e8052b54cf5f7c0bc5938694e",
+      "public_sha256": "281295e5a5480c78f2bce5def0ac6dc458ed182e8052b54cf5f7c0bc5938694e",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/reader.stdout",
+      "original_sha256": "179284f0fac78bb2a0f9dcc8304fe3decc730c26b67e20ed170004daabe35e0f",
+      "public_sha256": "179284f0fac78bb2a0f9dcc8304fe3decc730c26b67e20ed170004daabe35e0f",
+      "bytes": 2791,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/reader.stderr",
+      "original_sha256": "c6c097e8df5f35d07f124a434b62b9cdbd02e1ea0bc64ce914857fc59b716af1",
+      "public_sha256": "c6c097e8df5f35d07f124a434b62b9cdbd02e1ea0bc64ce914857fc59b716af1",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-before_publication/final-reopen.stdout",
+      "original_sha256": "0ebc29150657250894cbc209502f169fc4145d8b5d0abe1cdc991c37dcac3075",
+      "public_sha256": "b7035aaf9101ba2b90363d4820244108e984ae0570bfdac07419ec4cf6eaff33",
+      "bytes": 1914,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5bb7e5cc8e30d1f1f2cda657454ab935236dd667c834b632c16458ad0838a48e",
+            "replacement": "external-reference/5bb7e5cc8e30d1f1/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/fast-before_publication/final-reopen.stderr",
+      "original_sha256": "e28c0f004a17591c7d23b71ab5063e188d705a1ee1d16511939f4134c2987284",
+      "public_sha256": "e28c0f004a17591c7d23b71ab5063e188d705a1ee1d16511939f4134c2987284",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/compact.stdout",
+      "original_sha256": "56f0656be0e7054c167215bbdeeafeb707b38a83e2c25a5865b3d7e6412c0c3f",
+      "public_sha256": "56f0656be0e7054c167215bbdeeafeb707b38a83e2c25a5865b3d7e6412c0c3f",
+      "bytes": 593,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/compact.stderr",
+      "original_sha256": "1d32f914dcfd446264ddc52a6b46ca371523d0d8dc5319568f2806067a77b9bf",
+      "public_sha256": "1d32f914dcfd446264ddc52a6b46ca371523d0d8dc5319568f2806067a77b9bf",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/verify-after-kill.stdout",
+      "original_sha256": "2dca27aa0ac3e90b4b0b6e190db5b28527714c79203cb0280ca607d8c6ee9f29",
+      "public_sha256": "32ee176c341bee6b6e5b52b2dc22e8740e3bd23e076a8f3f882119b357d20996",
+      "bytes": 1374,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c8417d8eff7069354f615d78b19f1559fa3c4a910635581f1c487d94e1a2eee1",
+            "replacement": "external-reference/c8417d8eff706935/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/fast-after_publication/verify-after-kill.stderr",
+      "original_sha256": "58136b2e806fddfa48d80d93229d491aaba3cbb959c859aed69e37ed46815f50",
+      "public_sha256": "58136b2e806fddfa48d80d93229d491aaba3cbb959c859aed69e37ed46815f50",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/recover.stdout",
+      "original_sha256": "704b5c5382dbea93a8e1ab12b60b62d7d80684e633ae87787cd5a5ad39d7f97e",
+      "public_sha256": "704b5c5382dbea93a8e1ab12b60b62d7d80684e633ae87787cd5a5ad39d7f97e",
+      "bytes": 1328,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/recover.stderr",
+      "original_sha256": "7c5a97dc1d1c37a058186c948f16f083761a668db648aba31b8cc17fb0d896bc",
+      "public_sha256": "7c5a97dc1d1c37a058186c948f16f083761a668db648aba31b8cc17fb0d896bc",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/reader.stdout",
+      "original_sha256": "89c1fabb217911c06b6bc346dd609d9286550cc647a09f27ab358c63db09f735",
+      "public_sha256": "89c1fabb217911c06b6bc346dd609d9286550cc647a09f27ab358c63db09f735",
+      "bytes": 2791,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/reader.stderr",
+      "original_sha256": "b788a6dbf7b980b3aec46f57753fb8c94a6d9fc7222e1308e2e26f749c30d714",
+      "public_sha256": "b788a6dbf7b980b3aec46f57753fb8c94a6d9fc7222e1308e2e26f749c30d714",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/fast-after_publication/final-reopen.stdout",
+      "original_sha256": "5a0dfb40f9d065eeed2422c77db5a3bc2c1eb75b323dd3d4ac8fa74491469f4f",
+      "public_sha256": "39f8d65a8cff5530de9e0cf91a4507a6adb65f59e1339dc372291c22ceef6975",
+      "bytes": 1887,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "c8417d8eff7069354f615d78b19f1559fa3c4a910635581f1c487d94e1a2eee1",
+            "replacement": "external-reference/c8417d8eff706935/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/fast-after_publication/final-reopen.stderr",
+      "original_sha256": "76d627a7052c69ec407603cdeee884defc9207c746c373f06efad3515cd340f8",
+      "public_sha256": "76d627a7052c69ec407603cdeee884defc9207c746c373f06efad3515cd340f8",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/compact.stdout",
+      "original_sha256": "f58de0f3760cf6f4ec99c96c880bf7debecb05b77efe005ed9605fff548bf0a9",
+      "public_sha256": "f58de0f3760cf6f4ec99c96c880bf7debecb05b77efe005ed9605fff548bf0a9",
+      "bytes": 593,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/compact.stderr",
+      "original_sha256": "4af63b8ec03d9ce7e8d492722b8efb48b9880d8dcef2a0b9ea619d0eb90840fd",
+      "public_sha256": "4af63b8ec03d9ce7e8d492722b8efb48b9880d8dcef2a0b9ea619d0eb90840fd",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/verify-after-kill.stdout",
+      "original_sha256": "3de5672f9a4abfe89ae97d434e323461bd70031658470312bda2f06a0b297233",
+      "public_sha256": "4d277523d38e0e2cac19e5dfcccca7949fcd89184bbbdf15dc6d71994c6b92ea",
+      "bytes": 1914,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "141bfc7c8b3f1ecc3dde895fd9c4ef535ce0da6335877afa8ef21a7024b31167",
+            "replacement": "external-reference/141bfc7c8b3f1ecc/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/commit-before_publication/verify-after-kill.stderr",
+      "original_sha256": "15e60bbb8abf10bf7fce293dceb6a804a50574b38486cc348bd1a81255c878e0",
+      "public_sha256": "15e60bbb8abf10bf7fce293dceb6a804a50574b38486cc348bd1a81255c878e0",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/recover.stdout",
+      "original_sha256": "b45ef79d67fb8b73b084bcd4da706b92847ab8eab37981d2d23376b0b3ac99a3",
+      "public_sha256": "b45ef79d67fb8b73b084bcd4da706b92847ab8eab37981d2d23376b0b3ac99a3",
+      "bytes": 1359,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/recover.stderr",
+      "original_sha256": "22be5ba7cefb4d6098f4db295eb543407e025c0ba036b2386937dd067d2ad4f9",
+      "public_sha256": "22be5ba7cefb4d6098f4db295eb543407e025c0ba036b2386937dd067d2ad4f9",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/reader.stdout",
+      "original_sha256": "e897cecb908bdd81f5bf490e011d7186d209fd5aef3bb43080080d398ddc3d96",
+      "public_sha256": "e897cecb908bdd81f5bf490e011d7186d209fd5aef3bb43080080d398ddc3d96",
+      "bytes": 2791,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/reader.stderr",
+      "original_sha256": "3c59f1dc903ac343e81cd97ccb8a60074c53f397995102322e25fcdf3de70670",
+      "public_sha256": "3c59f1dc903ac343e81cd97ccb8a60074c53f397995102322e25fcdf3de70670",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-before_publication/final-reopen.stdout",
+      "original_sha256": "8859fb9599eeb54f3dc79f6f7b8cefe3769095741ee4201a166e2e7d8a9c6525",
+      "public_sha256": "e13f7cdf2b3ac9db873872829d68beec4889b4aff979fd2bdc7014b935525b3c",
+      "bytes": 1914,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "141bfc7c8b3f1ecc3dde895fd9c4ef535ce0da6335877afa8ef21a7024b31167",
+            "replacement": "external-reference/141bfc7c8b3f1ecc/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/commit-before_publication/final-reopen.stderr",
+      "original_sha256": "f7a2c65574a4de5117df0120b17b07f856c4384eb1071dbaa9795e498020e64e",
+      "public_sha256": "f7a2c65574a4de5117df0120b17b07f856c4384eb1071dbaa9795e498020e64e",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/compact.stdout",
+      "original_sha256": "d1ce43c0d2c4d7302d4f5931b387197d1f4450e57c95c4c4fc8ab7c9c9587076",
+      "public_sha256": "d1ce43c0d2c4d7302d4f5931b387197d1f4450e57c95c4c4fc8ab7c9c9587076",
+      "bytes": 593,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/compact.stderr",
+      "original_sha256": "81c56940dae2170fabeaea44c7eb7a66b8110d6978ad038b66ab89d45a9c517f",
+      "public_sha256": "81c56940dae2170fabeaea44c7eb7a66b8110d6978ad038b66ab89d45a9c517f",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/verify-after-kill.stdout",
+      "original_sha256": "5281940757e08ddffd0d6241805a9849e13be66d89a3d253cbd0ecd140aa5e81",
+      "public_sha256": "6c84423a9b6836705080de2716a46e1f61940ba7900de434e94e6f67622187d5",
+      "bytes": 1374,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98a5ed58bee6acca61b6c49a13ef1d7f99ec0e835aee1ae701049f10753c65a2",
+            "replacement": "external-reference/98a5ed58bee6acca/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/commit-after_publication/verify-after-kill.stderr",
+      "original_sha256": "6eeacfbf584e4dd09d892ebeea6ceb774b5dbf91c18e42e04863aedfbcd0f9cf",
+      "public_sha256": "6eeacfbf584e4dd09d892ebeea6ceb774b5dbf91c18e42e04863aedfbcd0f9cf",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/recover.stdout",
+      "original_sha256": "e3ab24d2a83c2bfe7a25bf4cc9bcf18b75ffea1c3583cc9b3945bc7011cddd37",
+      "public_sha256": "e3ab24d2a83c2bfe7a25bf4cc9bcf18b75ffea1c3583cc9b3945bc7011cddd37",
+      "bytes": 1328,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/recover.stderr",
+      "original_sha256": "4e792f98c0f601fbf081c288718f3638bc9d835df459f09033beca177ecf119b",
+      "public_sha256": "4e792f98c0f601fbf081c288718f3638bc9d835df459f09033beca177ecf119b",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/reader.stdout",
+      "original_sha256": "25b1f3417dc0e8d969bd1dab6f9c8cf5d9856cca0001804e78bde623f23ece8c",
+      "public_sha256": "25b1f3417dc0e8d969bd1dab6f9c8cf5d9856cca0001804e78bde623f23ece8c",
+      "bytes": 2791,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/reader.stderr",
+      "original_sha256": "e29a43a65cf41c43577a35799422a446ab74ab646eb642ff24e911d47bdca3c7",
+      "public_sha256": "e29a43a65cf41c43577a35799422a446ab74ab646eb642ff24e911d47bdca3c7",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "largefile/commit-after_publication/final-reopen.stdout",
+      "original_sha256": "1b0f29b111ad1baf494aa82b47031a8d13f9f63ac1c65edef8617b012a444cff",
+      "public_sha256": "571931961ef76bab54095192e5c388c0753675b76985c362cb29c77576760a81",
+      "bytes": 1887,
+      "transformation": {
+        "kind": "Exact JSONL projection: only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/3/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "98a5ed58bee6acca61b6c49a13ef1d7f99ec0e835aee1ae701049f10753c65a2",
+            "replacement": "external-reference/98a5ed58bee6acca/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "largefile/commit-after_publication/final-reopen.stderr",
+      "original_sha256": "1325ae6e13b1d1ad09fd46f8e5003e776e39d51a858cc7a3cd470c7785c53bc6",
+      "public_sha256": "1325ae6e13b1d1ad09fd46f8e5003e776e39d51a858cc7a3cd470c7785c53bc6",
+      "bytes": 777,
+      "transformation": "Byte-identical original raw event/native resource log."
+    },
+    {
+      "artifact": "phase-cost-report-derived.json",
+      "original_sha256": "a8d8d7d398143493ae9a73dd604b0f6a1d7d43fbfc11e5e04d12757a34cc1d10",
+      "public_sha256": "c5221207badca2c279a2d00c542916df4e29d5e214735dd16be39810cbcc97aa",
+      "bytes": 51239,
+      "transformation": {
+        "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
+      }
+    }
+  ],
+  "limits": [
+    "The collector status evidence_mapped_with_limits and historical overall acceptance incomplete are preserved as historical facts, not current release verdicts.",
+    "41phase rows have17distinct labels; they are separate operations/worker scopes, not41comparable repetitions or per-phase percentiles.",
+    "Original macOS native time maxima and non-atomic directory samples retain their boundaries; no physical IO bytes, energy, strict simultaneous disk peak or per-query CPU attribution is inferred.",
+    "The largefile original_bytes/hash and verification outputs are historical evidence bindings. The2GiBfile itself is not copied or reopened by this projection.",
+    "Killed compaction workers and successful post-kill verification/recovery observations remain separate; exit/signals/not_run fields are not normalized into success.",
+    "Original source/binary hashes identify each historical run; later names/docs/test overlays do not turn old timings into new-binary measurements.",
+    "Private path aliases are archive locators, not runnable local paths. All110original bound small artifacts were checked against collector hashes;3internal sidecar contents are omitted with hashes retained."
+  ]
+}

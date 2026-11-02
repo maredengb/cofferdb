@@ -1,0 +1,65 @@
+{
+  "scope": "Historical resource supplement on an already-restored approximately2GiB file; not a new from-empty recovery replay or current-source measurement.",
+  "artifacts": [
+    {
+      "artifact": "protocol-derived.json",
+      "original_sha256": "2f5c814eb5a2005411083fc3987e7b3efd365299bd7e111a98b34835d02cc566",
+      "public_sha256": "84ab6bd66e03edf48e506226a23ed83229b3c6df51b1bbe18a856d380622164b",
+      "bytes": 2462,
+      "transformation": {
+        "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
+      }
+    },
+    {
+      "artifact": "report-derived.json",
+      "original_sha256": "3158b87bbc9392a11f9e23a972800e1944d7b666a49d81dc1e1487cafe09b625",
+      "public_sha256": "b192e4c1ab3534b27c6f8eeffca4878dd931c969a6edc6f3156811040e54e875",
+      "bytes": 2309,
+      "transformation": {
+        "kind": "Only declared private path references replaced; exact numbers and all other values retained.",
+        "replaced_references": [
+          {
+            "json_pointer": "/stages/1/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "6dec446446abbde3ab4fb80bb169c10cc09c203eb3854bbb38b5367ece67d770",
+            "replacement": "external-reference/6dec446446abbde3/worker"
+          },
+          {
+            "json_pointer": "/stages/1/command/5",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "15cd40d003bea7c7f894c184c92b1565765aa7af58c6cd84644dcc7d7fa553cb",
+            "replacement": "external-reference/15cd40d003bea7c7/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "stdout",
+      "original_sha256": "abb8fa63a5b9a7dfb16f0a2f52475f98f9370611e8cdd00d32554f97fe3ceafd",
+      "public_sha256": "abb8fa63a5b9a7dfb16f0a2f52475f98f9370611e8cdd00d32554f97fe3ceafd",
+      "bytes": 1361,
+      "transformation": "Byte-identical original execution/resource record."
+    },
+    {
+      "artifact": "stderr",
+      "original_sha256": "d9b873dd9e015aa762f1374d7a77fb7904a3dcde3f0db1cdfbbf60943f61cb0d",
+      "public_sha256": "d9b873dd9e015aa762f1374d7a77fb7904a3dcde3f0db1cdfbbf60943f61cb0d",
+      "bytes": 777,
+      "transformation": "Byte-identical original execution/resource record."
+    },
+    {
+      "artifact": "disk-samples.json",
+      "original_sha256": "759c1c3734bafaae88dd22ce03f239fccdf12596d058ab5db468a014798c54f3",
+      "public_sha256": "759c1c3734bafaae88dd22ce03f239fccdf12596d058ab5db468a014798c54f3",
+      "bytes": 165727,
+      "transformation": "Byte-identical original execution/resource record."
+    }
+  ],
+  "limits": [
+    "Explicit cache1024MiB, not default256MiB. Actual6queries and1rebuild/check; zero new crash cases.",
+    "Whole supervised process-family RSS and wall time are not per-query RSS or runtime resource-ledger limits.",
+    "308non-atomic logical directory observations are not strict simultaneous physical disk peak; physical read/write bytes remain null.",
+    "Input file and all original source/binary identities are historical. No2GiB file read or new recovery/query execution was performed to prepare this derived archive.",
+    "This supplemental archive does not reconstruct the original growth history or replace the separate completed large-file replay evidence."
+  ]
+}

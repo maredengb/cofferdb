@@ -1,0 +1,1899 @@
+{
+  "scope": "Historical Linux multi-collection lifecycle,21operation processes and21separate stats processes; not a new current-binary performance run.",
+  "artifacts": [
+    {
+      "artifact": "protocol-derived.json",
+      "original_sha256": "c548f7c6109f46057571719b9b596d1f78f18455a0aa2f3a4dcf0a053db391e2",
+      "public_sha256": "829f2e1c8c0c981280d1afade8bcaa0065e16c910f519e62afdb9d1ad6b08333",
+      "bytes": 31384,
+      "transformation": {
+        "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
+      }
+    },
+    {
+      "artifact": "report-derived.json",
+      "original_sha256": "5568d6767201d0414768078ce7f6900ab3c32f9bca7bf4eb7d8cb7826df5ef60",
+      "public_sha256": "25060f42c7bf18c230a80002df9ca1bac877f6a4e4bdc4f22f5054d783f6aa58",
+      "bytes": 1335425,
+      "transformation": {
+        "kind": "Private path references replaced; protocol source-file map limited to product subtree. All measurements and statuses retained exactly.",
+        "replaced_references": [
+          {
+            "json_pointer": "/stages/0/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/0/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/0/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/0/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/1/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5cb3b003a9b39c7b35fcb46a2d1de905b315a076712c9ae45216a60d9b28bcbb",
+            "replacement": "external-reference/5cb3b003a9b39c7b/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/1/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/1/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/2/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "be99985b1b1a3bd683bdfac6eea2ee36ae4ba0ec595cfb15cd183d5285942b56",
+            "replacement": "external-reference/be99985b1b1a3bd6/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/2/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/2/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/3/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "1dee8f5c81a06dcde3aaf64a37b2da5bc81c73d80d34f85ff88693b2df2ab23d",
+            "replacement": "external-reference/1dee8f5c81a06dcd/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/3/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/3/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/4/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f3ac9c02273598c39b3f9a6e3d85fe3adc62d1e18e2cd1e6ce5dc7e8eb5a228f",
+            "replacement": "external-reference/f3ac9c02273598c3/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/4/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/4/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/5/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b25a68e36792cfc8ad42f98e86914b89ceb2630507c35880d61f080231427271",
+            "replacement": "external-reference/b25a68e36792cfc8/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/5/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/5/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/6/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "4c58a229d541e3fd628713d0b481617ac6b7ac751f0dcc6c0e3a70fbbfa65c6a",
+            "replacement": "external-reference/4c58a229d541e3fd/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/6/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/6/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/7/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "e4f6629ee73ae5379706338753778f6a0504d33a2e2d5ac98a3db2117f187b7a",
+            "replacement": "external-reference/e4f6629ee73ae537/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/7/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/7/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/8/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2c02be747fd2304419284547170fc8073d53d5a4488c35ef595ae11e99489cbb",
+            "replacement": "external-reference/2c02be747fd23044/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/8/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/8/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/9/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f4b884217987693a3f32da5489e201f6a8d9a99bf474f89c7f8bc778afa8cdb2",
+            "replacement": "external-reference/f4b884217987693a/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/9/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/9/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/10/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "334bbea9dd96557bb5fbbfd9c778e6bdf056436b93204e6a2e238ad0aaeb3069",
+            "replacement": "external-reference/334bbea9dd96557b/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/10/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/10/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/11/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/11/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/11/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/11/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/12/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/12/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/12/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/12/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/13/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/13/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/13/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "09ba4f67e23bc71fceeda3ea26df60fcf460a1eddfd6e2f38b21b16043f0c73e",
+            "replacement": "external-reference/09ba4f67e23bc71f/manifest.json"
+          },
+          {
+            "json_pointer": "/stages/13/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/13/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/14/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/14/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/14/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/14/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/15/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/15/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/15/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/15/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/16/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/16/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/16/rows/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/17/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/17/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/17/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9411fdcef32feee63c26686ac67cdd74497f0427356a19c17d00938ac5d97958",
+            "replacement": "external-reference/9411fdcef32feee6/export"
+          },
+          {
+            "json_pointer": "/stages/17/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/17/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/command/3",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/command/4",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9ce43510d08f1ec69fe747047fdcdca6c3670d17e0a4de3a9e3cd5efcad305d2",
+            "replacement": "external-reference/9ce43510d08f1ec6/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/18/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/18/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/19/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/19/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9ce43510d08f1ec69fe747047fdcdca6c3670d17e0a4de3a9e3cd5efcad305d2",
+            "replacement": "external-reference/9ce43510d08f1ec6/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/19/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/19/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b4d83d4e97281be46a0cc2d57abc18ce048182015d914b5ddf976a79f0cb2ca4",
+            "replacement": "external-reference/b4d83d4e97281be4/helper"
+          },
+          {
+            "json_pointer": "/stages/20/command/1",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9ce43510d08f1ec69fe747047fdcdca6c3670d17e0a4de3a9e3cd5efcad305d2",
+            "replacement": "external-reference/9ce43510d08f1ec6/safe-copy.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/metadata_observation/command/0",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2a9a2b7cf902d6923a9838afc6dde9f2cece85140e5fe83307a39015eabb51d1",
+            "replacement": "external-reference/2a9a2b7cf902d692/coffer"
+          },
+          {
+            "json_pointer": "/stages/20/metadata_observation/command/2",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          },
+          {
+            "json_pointer": "/stages/20/rows/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9ce43510d08f1ec69fe747047fdcdca6c3670d17e0a4de3a9e3cd5efcad305d2",
+            "replacement": "external-reference/9ce43510d08f1ec6/safe-copy.coffer"
+          }
+        ],
+        "omitted_nonproduct_source_identity_entries": [],
+        "limitation": "Original complete protocol remains identified by original_sha256. External-reference aliases are archive locators, not runnable local paths."
+      }
+    },
+    {
+      "artifact": "workers/init/stdout.log",
+      "original_sha256": "e91349e92a96601ba4b104d5c87912284477ef4861f08f5c24aebefcc8f067fa",
+      "public_sha256": "89a9b876815b6ebb989279c95d920e06f664892dc24c7fce69fc78917f622f14",
+      "bytes": 184,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/init/stderr.log",
+      "original_sha256": "38b6fd8c81beff659940a84be7695cdca46d95a00e98a3e5db356ca993f7208f",
+      "public_sha256": "154e76e67da90ed3ab9fb28af1e7089d8719714d2ad4815429c39da39d4b00b3",
+      "bytes": 757,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/init/disk-samples.json",
+      "original_sha256": "939ad41f1b16a81f0a59f594354532bba0e80a27c90b8ff830e06aed0c574e41",
+      "public_sha256": "9a662e08787246b620133f60f2c37734ae381ce1f9d142aeffffecd672a18f36",
+      "bytes": 89,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/init-stats/stdout.log",
+      "original_sha256": "6e3a3a7fe11b19834e99fa4bee5c09d09a57137d4ed3d7ae87f25ff613748cb5",
+      "public_sha256": "1053d939f045f0b3ba71214cbcb2d9b4be047792c6146ba4656028a80b683f32",
+      "bytes": 479,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/init-stats/stderr.log",
+      "original_sha256": "83740c7dc6ca7eaea05ed1c14ea85aee5ba3c7b96f86deb8b44cd61ac9588f3a",
+      "public_sha256": "8e5a5390a9d71b198f63b11441bb0f5d2c410071afe55c9531595b5234ab1e5c",
+      "bytes": 757,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/init-stats/disk-samples.json",
+      "original_sha256": "ba0d4cb0b2ecf85146e3088b4a7489ef999acbce1a75b9f4533ab8a32c80f3d5",
+      "public_sha256": "01d81921ca88e4140393c285bdf675f094577b40710b0d555e878371246cffd9",
+      "bytes": 93,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-0/stdout.log",
+      "original_sha256": "a6d6448edf1443e03be0827ffea902ac4197551ddc3b087d85e40f0ac15c5f9b",
+      "public_sha256": "078d2301734b602571ccb146808f594f2509607d3dd91147460dcfe4ee831a57",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "5cb3b003a9b39c7b35fcb46a2d1de905b315a076712c9ae45216a60d9b28bcbb",
+            "replacement": "external-reference/5cb3b003a9b39c7b/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-0/stderr.log",
+      "original_sha256": "bc467222d4be28ece51dfbeaea405d16c4e4dcd611e209ecc1e2fe26d462f8eb",
+      "public_sha256": "a154c91c3010f7c222902ea50460d4b8ba70ef7d84f81d55f4c0df0ebc7aeea1",
+      "bytes": 768,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-0/disk-samples.json",
+      "original_sha256": "439031bf8f318eae96d5ebaa89aeb3019813b0d56572d85514cc3655759c4341",
+      "public_sha256": "91efddf687b2ed95075a2fd9122422c2ed7a02a0006010240fbd63f9d238a71d",
+      "bytes": 2052,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-0-stats/stdout.log",
+      "original_sha256": "1a64464060e13ca575ceec0d5ec4de2795d50588f9b84a5ff791762f09716f0f",
+      "public_sha256": "91ed0478eeebf2ff601fa63bf48861515eb85c0369eeb82d7b1b15f61067cff2",
+      "bytes": 531,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-0-stats/stderr.log",
+      "original_sha256": "b358bf1b9889f4213a4ca57299fbf00200b06eea8af74c2883b511e181225bdb",
+      "public_sha256": "024ee4c27747313619020192cb385a4a0a9f0632e35bb0edb398b2160efb95e2",
+      "bytes": 759,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-0-stats/disk-samples.json",
+      "original_sha256": "87d27a54f4dbccfb2e1c81dc334e129b1303a6642fa86f149a0049d8cca77abf",
+      "public_sha256": "597ab79989f40126a12e9d4066a4b5962e5f72d71541313fe5ac40fe724cadae",
+      "bytes": 399,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-1/stdout.log",
+      "original_sha256": "3f4ab2ec0bfafdeb94dac1a4b57b4c9531d9d44b3d07b79a178538587fb33ec7",
+      "public_sha256": "5fd72cf1f2ce90755a831bef1e0d652574417c64531723d407988fd3d6e13c54",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "be99985b1b1a3bd683bdfac6eea2ee36ae4ba0ec595cfb15cd183d5285942b56",
+            "replacement": "external-reference/be99985b1b1a3bd6/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-1/stderr.log",
+      "original_sha256": "2d282d8335f67efb409d1f0934713e8e9f5a89f3c50579374fd98ffbfa2b2909",
+      "public_sha256": "1103398c454b3e2d2262a4e898c745b6ae7e9cbc401149100213f0e71cd5ac35",
+      "bytes": 769,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-1/disk-samples.json",
+      "original_sha256": "d685611a256bfbce79ebe7ea922309a9b8d6d70868400854ebed5c7e1d858004",
+      "public_sha256": "c58275d05673536402ac04d8f20154bb3baae6fdeebfe7797f51bd85a322cdf7",
+      "bytes": 2580,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-1-stats/stdout.log",
+      "original_sha256": "9a7925d007bde7006d25a2bb8e8a77fc1632a0cc11443c417c2c391337328d8f",
+      "public_sha256": "f8c30e66af1287387fec0591b77ee01e5012cc07831bf8da88902f6150993e80",
+      "bytes": 533,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-1-stats/stderr.log",
+      "original_sha256": "1fc2c24adf4fc369a5e4d3f5c97a07ba3e6b9d6a866d92593f3100c262bd9780",
+      "public_sha256": "0ead6624baa7e248eb286e8fb7523e8b999ed1225a653be2f1758bae732f528a",
+      "bytes": 760,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-1-stats/disk-samples.json",
+      "original_sha256": "f64ebe689f62274cc3577650156daa5afa9a7bfb529091921f613f271f7f32d0",
+      "public_sha256": "074ec058e1fa31d233b5e80ae5171876d3b5d791c3fc9c83db5affd0ef0d3f70",
+      "bytes": 707,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-2/stdout.log",
+      "original_sha256": "e8e3e8720f9e245d68a341c59f09fe2af63003401736cc8d43af33f03e3a6d12",
+      "public_sha256": "cc41075430e3f9f443045c71579a944e23ea7e83fad80d7dc477388ae6b18524",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "1dee8f5c81a06dcde3aaf64a37b2da5bc81c73d80d34f85ff88693b2df2ab23d",
+            "replacement": "external-reference/1dee8f5c81a06dcd/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-2/stderr.log",
+      "original_sha256": "ea0e3630d4301321e5e4776ae13cbe21cc03238f3422696d10bb926591fc5a78",
+      "public_sha256": "5f0ce389d5fc59df2477c13da9546253b1b1d1b35083f966a881d3a8f8cf6e8d",
+      "bytes": 769,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-2/disk-samples.json",
+      "original_sha256": "3ed3dbab8a02d2f3b1d5dc962abb174d3715fed68be6f1b082fe7f707f2f587a",
+      "public_sha256": "46f253ab84ea4f17a8f980ef71a7359c1913be1971b9aeae1365fdbbdf5d5e2f",
+      "bytes": 3192,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-2-stats/stdout.log",
+      "original_sha256": "fe0d76ee53263e46b638702d6b416e8ecf0ba3f3c57deb10479b10de736f72c9",
+      "public_sha256": "3319fe75a645047d0385afc3f8ada793b26b2f0c5b806c2781f1ef1d26705b29",
+      "bytes": 538,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-2-stats/stderr.log",
+      "original_sha256": "3dd4a0d7d865a2883eb97ed996ee4dea1aeff6f01901427e3d79a45484c89d4c",
+      "public_sha256": "68f3f44c2191b2f0e76c171b21dd3cd57c327df91845650bb2539ffb08b738f1",
+      "bytes": 761,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-2-stats/disk-samples.json",
+      "original_sha256": "b6ef69e7a615a2f8c2399f02fe3c78507cad90cf5d1cd11be3a2429806d5f8c4",
+      "public_sha256": "39ba84ff27f85bd0a04d9893889421321d74a21f9934b8d12208dd5d676d49bd",
+      "bytes": 1105,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-3/stdout.log",
+      "original_sha256": "d4b3fc3abee3bbe4d1461497c4200acaf7327d190af4a4507fdf0bdc3e472075",
+      "public_sha256": "96023ea932c27eb041174584bdf2937affe1e197b588bff43c04ef0331817763",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f3ac9c02273598c39b3f9a6e3d85fe3adc62d1e18e2cd1e6ce5dc7e8eb5a228f",
+            "replacement": "external-reference/f3ac9c02273598c3/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-3/stderr.log",
+      "original_sha256": "cafced6931e45a3e0e1cda2a59bb6f2e87a7f9f8fd11816b84a81e4d76c3f7d7",
+      "public_sha256": "833aca6ba885c2e96a4183f4558a5df2410b3ed32f6f27d8a87386039f267e68",
+      "bytes": 769,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-3/disk-samples.json",
+      "original_sha256": "d01e88c9e98712019acc15c25c673e4a3ec88078899efd8cb85dd278d5139e77",
+      "public_sha256": "0c7e36015259a9f845fed420ce06b72aaa8a16647b85d2a2fbc3ca98e85552bb",
+      "bytes": 3892,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-3-stats/stdout.log",
+      "original_sha256": "001ed827d696e1d6ababcf4f6f6072071945e7d944dd08207991db1223103352",
+      "public_sha256": "955dafa0d6e8f7052a19bcb6701bf3fc575239e10d422f4e575ea73c05139bb4",
+      "bytes": 538,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-3-stats/stderr.log",
+      "original_sha256": "c440692bdfd8b282e59dc9bc4756b2044eefed96bd0beaa8e3340dd83cdc03a3",
+      "public_sha256": "64b46acd51b292cc420517ecc764ca963e3997959475c7af3a7db74e7494ee57",
+      "bytes": 761,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-3-stats/disk-samples.json",
+      "original_sha256": "b755c6231d11eead8a73011fb67d5bdf15ea6ee918db6f56f354b0c32226dc64",
+      "public_sha256": "f31faaff376cbc510648f17bdb530ee78dd9eba167243625bf6d185b4a49b6cf",
+      "bytes": 1505,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-4/stdout.log",
+      "original_sha256": "75d69c149be6d227875dab4e3d3216d6b1eee6741689aceda9f4f0a499c7b1d0",
+      "public_sha256": "f758a41d1623916ca135e08b1cdef7da02fa1d6c6d8d2628ef6a886c96e5caf1",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "b25a68e36792cfc8ad42f98e86914b89ceb2630507c35880d61f080231427271",
+            "replacement": "external-reference/b25a68e36792cfc8/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-4/stderr.log",
+      "original_sha256": "c9485f7ecddf488e6a2135752d02317961b194665b26ac1583b0c92161d8a0ac",
+      "public_sha256": "5cc633c1cb0cd1755c0b4d4a7f3dfbc03cbc3c711828cebe31f5b77d2cf5a522",
+      "bytes": 770,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-4/disk-samples.json",
+      "original_sha256": "d4580832ae734ac1ae6d85ec91e3db8e54c8f519d279aa1ef023df6af0381dc7",
+      "public_sha256": "c99fee1feec6d989617c355922953f35183c006e6e68827cfb763f6f15d9c2d4",
+      "bytes": 4585,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-4-stats/stdout.log",
+      "original_sha256": "a270e35c13549b5cfa23d2089388c5f8cd801c0c33a2acc138b4e903104ae894",
+      "public_sha256": "ef140937c992f2b155906074fdda6240d5aabac0d9e271ae16e0743796d275cb",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-4-stats/stderr.log",
+      "original_sha256": "f4f143fb8b130f7186b83f39fd5a3bbdb5f8261e354faac6a613a7f9568d4755",
+      "public_sha256": "0092409d4f243d01cc4cc5af3424d4549bbfedcc75236ef2df0ff5ae55efd1df",
+      "bytes": 761,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-4-stats/disk-samples.json",
+      "original_sha256": "6ae918bc0e90e87c3916cff88e6565de789fea7e8c4cf377f5d1b8b4b9e6f9ea",
+      "public_sha256": "76aace19d90eb6f843ea1d0393d01fe9e62aab59ff5a281704cd5fcdfc444c2b",
+      "bytes": 2002,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-5/stdout.log",
+      "original_sha256": "665a9921599f5252b9198f2f64818f3382d68b9a10c8bc64122d7086ca7143b2",
+      "public_sha256": "bf807d35985557f67d9ae557a08eee6fceba021c27233a0a2cdd9e15b086909c",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "4c58a229d541e3fd628713d0b481617ac6b7ac751f0dcc6c0e3a70fbbfa65c6a",
+            "replacement": "external-reference/4c58a229d541e3fd/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-5/stderr.log",
+      "original_sha256": "4a498b48bb249debd0c5f630e6765dc5ab02d4af4ea441a5997dfd71d5b43cc5",
+      "public_sha256": "d88e0c8c2816d0a478edf8a2d7070187966f71f371db6ef71e4f2da3d240f48d",
+      "bytes": 769,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-5/disk-samples.json",
+      "original_sha256": "4f3cfd05c1b3da718e4b1948c8fbc870cfc5f69dea8a16327ddf744d2f9616f5",
+      "public_sha256": "ef19054611d75b07fddab6dbbf935226178994de1e9db655cda3d495d4e5a61b",
+      "bytes": 5473,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-5-stats/stdout.log",
+      "original_sha256": "890d720834f873d2bb50c6d5ad0a9cb5ba45d8007226d90c232032210e1e08e3",
+      "public_sha256": "d4a84884eb2f9e00e4531c638f78c2e7b1fc6ee89421a1fb751830378d987cf7",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-5-stats/stderr.log",
+      "original_sha256": "8fbe9ff944b9390c98659be8163a1df94760f5be8b10605fd732f9ce75e74097",
+      "public_sha256": "0d8fa317f0f95969387070cdcbd3402dc22ccf7525dface8e57e49c4263c2cae",
+      "bytes": 762,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-5-stats/disk-samples.json",
+      "original_sha256": "348ddbca3ce14d9255dff124af03b97b0739b6e3ec90e71be2503d72df09841a",
+      "public_sha256": "6768025a9eb44fd502df7ddaf7c87d953769d8f631c271d4ca50f6000536f080",
+      "bytes": 2501,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-6/stdout.log",
+      "original_sha256": "22cf15c1f83a17857dacc785d678fe1cbfe4cb4672fb972036cee50a4591176f",
+      "public_sha256": "1cd3489266977c9c775803d46e23ab2021d1f40c57cb15a5a4feabf2465a08ca",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "e4f6629ee73ae5379706338753778f6a0504d33a2e2d5ac98a3db2117f187b7a",
+            "replacement": "external-reference/e4f6629ee73ae537/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-6/stderr.log",
+      "original_sha256": "976c9232104b10f5763e154252751b3b2df817247eeaf75362fa9cabe4377558",
+      "public_sha256": "0d2790a414a984ed5cb19d0a7da912e721881076755a6410120cd97e8f60c8c7",
+      "bytes": 769,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-6/disk-samples.json",
+      "original_sha256": "b49c8c7bac0bb45a9ccd8353ebfa46430ec8c25a1d10802e632078daba62a32b",
+      "public_sha256": "b58f9699b34f5d72536842e2fca4bcc6d6800a03797737bca618082ddfcaa71b",
+      "bytes": 6169,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-6-stats/stdout.log",
+      "original_sha256": "6cb86b35f4bb329607c32cf82c6e5f6e966d1b87176f0750f23a64f1565355e2",
+      "public_sha256": "fc93ed8fbaa414162f37c96f32994dbeb1dd4ba2d56788ad54a5a9ec3ec25466",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-6-stats/stderr.log",
+      "original_sha256": "f74158eee89d809a97ef658c53842f578e7e23fbf0e99de5570d7cfa2c5ea8a6",
+      "public_sha256": "6986fcf11433dec8cb8a5f9246feda7e5fe12ebedbb338be8bd0a277f2037c5b",
+      "bytes": 762,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-6-stats/disk-samples.json",
+      "original_sha256": "b616667b6d88c320916488a93d8eb753901636b8a81006f10464b1f9d6219796",
+      "public_sha256": "2caa5659189f37f67aa54c973f36d39b6f0c8d05b181cd9854a8e1f27202c1a5",
+      "bytes": 2998,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-7/stdout.log",
+      "original_sha256": "ffdb2824f23e0f6a87435f92ace9cfef53bfab34d3ad9298308a0d61b60b4213",
+      "public_sha256": "3d040d4fc0f66d8588296bd19d0269c52e920b54073f819431889b24d6085b72",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "2c02be747fd2304419284547170fc8073d53d5a4488c35ef595ae11e99489cbb",
+            "replacement": "external-reference/2c02be747fd23044/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-7/stderr.log",
+      "original_sha256": "eceb0c7562ae38a816a8d5977b632c20ef98914c42a529b804edfe94aca76812",
+      "public_sha256": "1110822759ab8923eea11a012c839570e50f1c91b62297638f95c1d416189879",
+      "bytes": 770,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-7/disk-samples.json",
+      "original_sha256": "3e9540fc85f9b5d4e6149145fac0f624c169e1bde329f4ebc1c6e80135ff9f67",
+      "public_sha256": "7bdd5e7f157d37bad9a7deeecbc0df35b525cf0e65cd3b1d22b4b43f7f60d329",
+      "bytes": 7061,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-7-stats/stdout.log",
+      "original_sha256": "242da2df9ac4290d3d528d10a83df6d21eb3c23430ad94d884b733716accf2b4",
+      "public_sha256": "cf4522cf61f68675586506f9ee473723d9122603ceacee9a01db0f60d0b3568e",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-7-stats/stderr.log",
+      "original_sha256": "da2602414e1a09a4a1a9e2e14ddd63ff562b107920daa54d5975e7867016c3d4",
+      "public_sha256": "f3e12bf6126576e76af8fec4494fa339573342a0140c5004285689ff4b902d7d",
+      "bytes": 764,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-7-stats/disk-samples.json",
+      "original_sha256": "78b67a0666683078b611c36c99a860f7e3718fadaf26c44d1cd242463edf84fb",
+      "public_sha256": "88d5c7b8e6fa5c211f57e65fd38ee9d8e1c82100c9c08feb63acaf0890b4a66b",
+      "bytes": 3595,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-8/stdout.log",
+      "original_sha256": "653c0e967f829ec9f73695125c13892ee58159ec0270471f711ff8c92627a035",
+      "public_sha256": "b76d1cb6993327a1cd0ada66f8d55b2a57be0a53fc4409eb0012cfa401d61b8f",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "f4b884217987693a3f32da5489e201f6a8d9a99bf474f89c7f8bc778afa8cdb2",
+            "replacement": "external-reference/f4b884217987693a/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-8/stderr.log",
+      "original_sha256": "9598b741c07e3d8414c9283736a08c53f04448bdfcfe4ac8a8e78de5f0e28e99",
+      "public_sha256": "4f16a31a07b58cb623169c8ccea3cfb7a94f7842e4391a49d4c5a6225061687e",
+      "bytes": 770,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-8/disk-samples.json",
+      "original_sha256": "44ab5d731b1a8a17e6babed9afb9577d26af82b399baa2c2c53030b0b51b4048",
+      "public_sha256": "2f37acc1d7a3f0e62c33fc9bd1a91f27cfe068238fc9251ccd02af6ed194e850",
+      "bytes": 7962,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-8-stats/stdout.log",
+      "original_sha256": "9506e244a7ccfdc142273d6aad037b4d4cb783ac52a1b85291bb858cfa26c7dc",
+      "public_sha256": "ac555c817f93b23dbe0aacab5b23fd2f98b57a702bdc89718de6fd1cb78e85f7",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-8-stats/stderr.log",
+      "original_sha256": "1705941df12d7fea3bdad23da3d26e33c492f97643f7cf963f0d2951dfd69722",
+      "public_sha256": "3fb37fd5e2ae6ede94e042a41d0ad84cef13e30601030253e45dcda02d4df9bf",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-8-stats/disk-samples.json",
+      "original_sha256": "9977964550417fb41f86b7edc8ecf348c0605920f43c82c4835e16a0069f5e14",
+      "public_sha256": "060a38b8a4f3245cf510e63666742872ea483f1de9c59d3a196b405e71004268",
+      "bytes": 4193,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-9/stdout.log",
+      "original_sha256": "3686070a441e663527348cfb50e9bb37bc440f65f17c0d31fb86bb66511ab072",
+      "public_sha256": "1b7ba8868a661f220bba78350466a36211ebe51ff29907872ba8a789bde0a4e0",
+      "bytes": 849,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/result/manifest",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "334bbea9dd96557bb5fbbfd9c778e6bdf056436b93204e6a2e238ad0aaeb3069",
+            "replacement": "external-reference/334bbea9dd96557b/manifest.json"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/import-9/stderr.log",
+      "original_sha256": "739766fcd657f98088eb8a121ffc5854d3cbbb52f3b769b8816465dd90d26987",
+      "public_sha256": "f5a6d013bb49e02ca17f5f153c70c3c26f5a3887153104fdbf4861ed7a38f61d",
+      "bytes": 770,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-9/disk-samples.json",
+      "original_sha256": "6df6acdd7d83b81fae4913b010548f74af7d354e803150fe1f8aa09a8df4f811",
+      "public_sha256": "f0be1bf803363dfa08b76415cdfaf6d9b589e89617e0a017f1a1e2993ced7911",
+      "bytes": 9042,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-9-stats/stdout.log",
+      "original_sha256": "2c355991c4ebd34cf6ef1573e2424bfe8d9052c40fae5a1d93d0e1c1aa6eb8b8",
+      "public_sha256": "a285de1ca06e118c6b132452ce8e3be21af67250df33ffe64a5dae3dbabae3c6",
+      "bytes": 543,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/import-9-stats/stderr.log",
+      "original_sha256": "31fe2dfd17e9f7fa57545889243ce79c802fd4e881bee7cd436f646196d69a1a",
+      "public_sha256": "435015b57583571ba90b50dbe7e8eb306f1369d2197858d9320ef64d0c5fd0e9",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/import-9-stats/disk-samples.json",
+      "original_sha256": "b3e8d7ece3f60368f1a15bcc8ffa2856ff4c4d1ea9e8edcd96b5cdcfb064937c",
+      "public_sha256": "294d5eed4c5c44d9e58302e99faf0e30955bab19a73a904f058cfd8da17fdc62",
+      "bytes": 4792,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/open/stdout.log",
+      "original_sha256": "ffdd58c1a81d55f57f3e8d3b51647bd0bc9a8a9f820023c3dd34893f81509483",
+      "public_sha256": "ffdd58c1a81d55f57f3e8d3b51647bd0bc9a8a9f820023c3dd34893f81509483",
+      "bytes": 545,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/open/stderr.log",
+      "original_sha256": "a46cf226a7abcefc0cbac0e6f13865d6d5788092221cb2a99d96d885c8be2765",
+      "public_sha256": "081344e02d80a53fec6eec8e59d7662b871309f9fa5df7f2d1d912af45a77efc",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/open/disk-samples.json",
+      "original_sha256": "66e1946d36f555e42e0efb9b7cb8519b0c620f247019e9705b13a16faf921ba4",
+      "public_sha256": "2e6932e6d8e7ecdc86768df20b5e0dc62125d410051b939da6ae52bc2b0f536f",
+      "bytes": 9135,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/open-stats/stdout.log",
+      "original_sha256": "ca09ce4b5b6457fd5a2300e07ec56d5397b93e0215c51d35ba24cd1df8058b88",
+      "public_sha256": "e63221826bb27794441699bd62d76818cc052019b7626686b8625a9f98581fa2",
+      "bytes": 543,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/open-stats/stderr.log",
+      "original_sha256": "d6d890ba3d61e8170ea161cc7edcf40d6f2c35eec2661a9e51305625f8ecf664",
+      "public_sha256": "78dd27bc605ea9a164d26208e61f199f3d777f00d42302115c48a94fe6568ffa",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/open-stats/disk-samples.json",
+      "original_sha256": "0329279bbe8051d1e5c7fe1ad2b303ebf2be14d068162dcc33f02517b29efb4a",
+      "public_sha256": "e12de7a61758ffdc5377895c5ce4db254f05db380dbfd79a0d7bb1d697028278",
+      "bytes": 4790,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/initial-queries/stdout.log",
+      "original_sha256": "56c052876d8e4689af01170e504a2844e72626615370bf52f37c007c5a7aeec2",
+      "public_sha256": "56c052876d8e4689af01170e504a2844e72626615370bf52f37c007c5a7aeec2",
+      "bytes": 159900,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/initial-queries/stderr.log",
+      "original_sha256": "4ca55a629c4d43a37f5aa4396046699982febcabe8deb012476ef5228d4fc2a6",
+      "public_sha256": "20f64506d1e69463aa94c56bda5022812e7d527290faf45077146aefde0d96ee",
+      "bytes": 765,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/initial-queries/disk-samples.json",
+      "original_sha256": "62614b78fe735ad5be9251d18791592a7f1f9c993edd79142148b61b83e41db4",
+      "public_sha256": "a75f4ed1a15cc91dccf015b12cf36f0a95857d34757eb807027f4fb8d2833a8f",
+      "bytes": 10129,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/initial-queries/query-ledger.json",
+      "original_sha256": "b121351dbf7b8d727755eddeb375a324948c5a893a460c2a764201c21c2ee0c7",
+      "public_sha256": "ce8cfd3a85950815dbacdbdf8999ead21dc5cc88f25cda1931e301c77d514e4a",
+      "bytes": 3170,
+      "transformation": {
+        "kind": "Exact JSON numeric projection.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/initial-queries-stats/stdout.log",
+      "original_sha256": "8559c970b9412b424dca6bbd8942837def8c9326476cb043304af153e36e52c2",
+      "public_sha256": "456f1b43891c37fba84fdc4859b8ae686c5e508c75605df492e1d435f3020ff5",
+      "bytes": 543,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/initial-queries-stats/stderr.log",
+      "original_sha256": "a45c4c738a3f96c7a75dbf55986c7be1878fc478d0503efced80b8587337b66a",
+      "public_sha256": "f519ace77851e68560a88b1acb5d999a402daee4b682454247a66fa68a32c4e5",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/initial-queries-stats/disk-samples.json",
+      "original_sha256": "09e1c31d10317dfbdf48f5d35d92dae466a4838e70fcef935f93f923baf5f5bd",
+      "public_sha256": "3b25b85884a075eda4f058a6bfeb618604517f13abf973f3985a6941de879d6e",
+      "bytes": 4783,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/replace/stdout.log",
+      "original_sha256": "97e0e23aa30dc9f055a09806f9257d4f592bd520338af6e07e06abfccb83d54a",
+      "public_sha256": "97e0e23aa30dc9f055a09806f9257d4f592bd520338af6e07e06abfccb83d54a",
+      "bytes": 378487,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/replace/stderr.log",
+      "original_sha256": "d0e0de51a4dfb3ac624031389bade0d689d034898bc8ad157fef10bb81f6f1bb",
+      "public_sha256": "d35b3d2bb95a2c9aa531ee002da9aa6e790a389dc9964ddfb6b5360866660a6c",
+      "bytes": 772,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/replace/disk-samples.json",
+      "original_sha256": "91f00dc72edfb669164422b24fbebe559e9dc357733ca72eeb6dd2917c3ad7f8",
+      "public_sha256": "872a1e16dc35eab7a56ba83adff1c3c4414f08e598a062d1ea1bc8a291679dcb",
+      "bytes": 24690,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/replace/query-ledger.json",
+      "original_sha256": "44e0aa16d5ad53c82e1dd9abec55cfc7526e19606fb98b867c065295e77c6a72",
+      "public_sha256": "9f108d045687520eebe46486aaffb00660092787956b31fdfd70ffdb7ea650b7",
+      "bytes": 9487,
+      "transformation": {
+        "kind": "Exact JSON numeric projection.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/replace-stats/stdout.log",
+      "original_sha256": "58bac873c9bbf2a8a43efeda9cb30e8fd8faf28cf1b9c640853a2a3cedd549fe",
+      "public_sha256": "f3bd3ebaf6bc46b2f3cb42d4a78c8e8d27b5fc535b444be180b6435adf6c3ada",
+      "bytes": 551,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/replace-stats/stderr.log",
+      "original_sha256": "6961f2eed01efb1442df6e5835ccb2f453faa9370a4848b9319660fd9b676080",
+      "public_sha256": "adcaa61f8711ee5128bc31859d49368968dbcdc4dc60e3afd600e22dd88bbe19",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/replace-stats/disk-samples.json",
+      "original_sha256": "fc0d0996b59e5b609f7e03cab7251ceec7c8d2627118bc59f01c5111cf2393a4",
+      "public_sha256": "97c153bd6d94f18fbb647b7a58e4d72210c70b1890e59c494a40f0acabaf6775",
+      "bytes": 5182,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/delete-drop/stdout.log",
+      "original_sha256": "decf3ae7d0550442a575ba5a73aa79bd3542d2fe6932d74e854031f45dc860ed",
+      "public_sha256": "decf3ae7d0550442a575ba5a73aa79bd3542d2fe6932d74e854031f45dc860ed",
+      "bytes": 330674,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/delete-drop/stderr.log",
+      "original_sha256": "0f6a3f07865c75231d86e8dc8206b931c260734cb2f16874f626c5102d67cafa",
+      "public_sha256": "7ad80e1bf7666e05c3afc7be113ca0ccda340cd70c5de6821c9095152fa78cfd",
+      "bytes": 774,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/delete-drop/disk-samples.json",
+      "original_sha256": "32ce200570a9b16ff0b62b39f778cb6d821085b522f54d3d392b48d1c14b3cf1",
+      "public_sha256": "842c06c02016d6e3ab0fdcc95778b5fcb48c0c2693484a855ed71391374e4bbd",
+      "bytes": 30358,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/delete-drop/query-ledger.json",
+      "original_sha256": "0d272d5de736f84d736d7fb73f7aa181486bc21cacf8a93f604e5a02610beb34",
+      "public_sha256": "e2060ccf0f7b3a202721fa4a475a80ac64b34f874221331febacf91fd931f3ef",
+      "bytes": 10001,
+      "transformation": {
+        "kind": "Exact JSON numeric projection.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/delete-drop-stats/stdout.log",
+      "original_sha256": "8e8a3199300b07d72f99f6567ee303f7d57bb7c6627f5a557c8c22a83813bd2a",
+      "public_sha256": "96bbd865689599a05f6ef4d7c4d2329a02017b50abe00a956284a7d1f3638f53",
+      "bytes": 547,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/delete-drop-stats/stderr.log",
+      "original_sha256": "e35a9d51944fb5b00c474f8bbfb1b96323a574ea6cbb0a731da4d934a2af066d",
+      "public_sha256": "d540d499243646760a6f401a9049b3a63de1f853df81637b6dd1272ed4cb7831",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/delete-drop-stats/disk-samples.json",
+      "original_sha256": "0a097b36c7e0fd10de38a3356a62b54133640d1e8149435f66f8271e5811abb0",
+      "public_sha256": "2f32a61888970c7b6b31a1a631c8ea9f08bd43a3bb359f002cc60bf12cab209f",
+      "bytes": 4878,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/compact/stdout.log",
+      "original_sha256": "ccc0eb9a37e0ac2c1fc3662395c3f3e0a72b37708da6a5292e8ea4d4a8a2385a",
+      "public_sha256": "ccc0eb9a37e0ac2c1fc3662395c3f3e0a72b37708da6a5292e8ea4d4a8a2385a",
+      "bytes": 223032,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/compact/stderr.log",
+      "original_sha256": "a46a9fbaecfb119c6ebfcadb53abc7670fa019dcc39d9fd9ae4d545e2fd2c5b0",
+      "public_sha256": "fbb31542cb5a6730cc6224c552f5ec49490254628b61307cd561252ce517a2a5",
+      "bytes": 774,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/compact/disk-samples.json",
+      "original_sha256": "e75744a401e7e0b6da3ff56bb8d3c3fe2e499864fe82356c2c17b5a5d81c7ca9",
+      "public_sha256": "0fe72755faa787f6c46a044677eb60fafb4b8ba4bf198b56c8665cbf201f4c7f",
+      "bytes": 25875,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/compact/query-ledger.json",
+      "original_sha256": "8bc6d0d9692c802e0069563950d59cbacd5de23d6b969f4178a9364c02cc1d87",
+      "public_sha256": "f2e3e85c7b0c570ae46c840684c7b884a7301e25e954239a669e8a83a67dda8b",
+      "bytes": 8368,
+      "transformation": {
+        "kind": "Exact JSON numeric projection.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/compact-stats/stdout.log",
+      "original_sha256": "cfa347ebdea3c0d2981fca4644d5ee548d8a8a0e0916d94c9d287daa4e1043bb",
+      "public_sha256": "e09ed2503779eacfc3c00eb37d8579a3b39b4e1db33224ab4b0b8b43b6cb8eec",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/compact-stats/stderr.log",
+      "original_sha256": "f0942ff99b59bafa6f195c33750721e502806403981dff5dc0f52d36e0cc1aa0",
+      "public_sha256": "8e4a6181ca10caa993a79c76388b532198c6b80f9e33f2dd562faa86e39af25e",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/compact-stats/disk-samples.json",
+      "original_sha256": "f9411766251e5ca89f501aefad2fa0419363b572bb4654bca54cc5fee38ccf38",
+      "public_sha256": "1b1997cbd7a8e26e0c73e3d48c4df51ea0a89a00ca8b3f2ff6bbe4412090a5aa",
+      "bytes": 4190,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check/stdout.log",
+      "original_sha256": "b9794fbdbbf23ef2ca45dbbe0b6d17923a6a7551fd0749b303767a30a83b62e1",
+      "public_sha256": "223db878f77bbff82f485a00129f243c0bea9855342a501f70cb5c055064034d",
+      "bytes": 989,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "a4e8ecd182a9b2e05f5d2b17c28ab8fb464dcde7b773c8a1416cb415054d8b16",
+            "replacement": "external-reference/a4e8ecd182a9b2e0/data.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/check/stderr.log",
+      "original_sha256": "5b025f5f8f279f10382fcc6537f1a3a19c8a4603f70aeebe6f477dc25e7c41c1",
+      "public_sha256": "87d3ff86eed519abb3c8ac2688578c8e7fb8f6a35d3c3190dffdda0424f1e72b",
+      "bytes": 764,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/check/disk-samples.json",
+      "original_sha256": "ac88c64c807c0f851cdef4a8a8039a13a6383d5a5d4ec2628109c6529e63a002",
+      "public_sha256": "a976a11279dcbf7e7fcab243477463f89a4ee7dd81ba74fd928202eacc9bcafe",
+      "bytes": 6175,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check-stats/stdout.log",
+      "original_sha256": "f8bf799968b98f2c294aad5382a1fab22d68f1c815aca85e2edcfea553d39fae",
+      "public_sha256": "2a2760ee3bff9bd2f4960b97e0ac1103c119fc03d5ccb62cf6c6d1beefdc0e1c",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check-stats/stderr.log",
+      "original_sha256": "f1af5f62033dc1991d472fec35562e3b6228378820fe74d9f01a01018830bdbc",
+      "public_sha256": "8a90469e8869d270230074a878a90dac2a2320c52d89de63299f1e5ff08008f6",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/check-stats/disk-samples.json",
+      "original_sha256": "acc20d62dd8d821aa6fe2b264b3da7fc8e0b89bfa2c3c93bfdc571886ce97510",
+      "public_sha256": "5dc39512fd6a65719a99b3c01144e2203594f501a4976f34d739726517402bf0",
+      "bytes": 4196,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/export/stdout.log",
+      "original_sha256": "485d11eccd59d0fb2f4596fff4933f8a8c94b7c1c6d60aa77c5d81f2e6f3b308",
+      "public_sha256": "485d11eccd59d0fb2f4596fff4933f8a8c94b7c1c6d60aa77c5d81f2e6f3b308",
+      "bytes": 1023,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/export/stderr.log",
+      "original_sha256": "359c28d485af1b0ca8c5d4816c1488f8be926b6f0e6372f18a1c970e3592d747",
+      "public_sha256": "7a4d14e4340a2d932ea2338dd6597e49e817d9c3847c0bc501ab55a43f334c3b",
+      "bytes": 765,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/export/disk-samples.json",
+      "original_sha256": "b148d30009186c0e59df8d877f035033f2e545c83a9077b24f4b827782e973ac",
+      "public_sha256": "54e95c25a7b4efc9cd8b8157a701f2fe77ad070724a628a6706654971277fe7a",
+      "bytes": 4492,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/export-stats/stdout.log",
+      "original_sha256": "335b6e35ca0adede138abd4ee4edf4caff760ea3b5892d6b7ca205825c0fb923",
+      "public_sha256": "8a9a9e470d89f517cd08ab348552cb52b6eee006e834058dc08f122f7f0e93ae",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/export-stats/stderr.log",
+      "original_sha256": "9814f0559d16c727e7679bad0eefa4bc8b6a1687431ec5122d966e1c5660ff5c",
+      "public_sha256": "94bffba56cdf5f503fc15a002db9bd0b30253e187d548d88cff7f39860640df9",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/export-stats/disk-samples.json",
+      "original_sha256": "989381a70f9742c4332374b2ad78b78093cd8f2131b812f75ba52834bc067228",
+      "public_sha256": "f1dc6bfb2295cae6b388e6cb36e0a88e3d48482472190cc47130dd6c6ef2c406",
+      "bytes": 4096,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/safe-copy/stdout.log",
+      "original_sha256": "0f8b821194fa8e7525bdb5beda10d9af818a65b2c62c49363ac3e1330dbaf3b6",
+      "public_sha256": "3d8de43173a5d7c125eb73df812167ec64dea9989887a444859a8f6c310b79d8",
+      "bytes": 191,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/safe-copy/stderr.log",
+      "original_sha256": "2fc599fd36726aa5f51e9ece9b110ba69d805654539eec4f8dd9628c8942dfca",
+      "public_sha256": "e809fd64820eefc455f0869f36aaf44e1b4789118d6338920120a69d8ed08926",
+      "bytes": 765,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/safe-copy/disk-samples.json",
+      "original_sha256": "424d1a22d9e9eba5d7766fd217fc5b8322e7643338cb2d5e9896bb29a229989d",
+      "public_sha256": "68f5e46dd537fc6bf61140039109f3bde35f8502facc1c9a4408f8b1f55e1e9d",
+      "bytes": 1120,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/safe-copy-stats/stdout.log",
+      "original_sha256": "2fadba8e102dc940e749bfefbdebebd75c0b715dd82b2b98dcdee369c0b470d8",
+      "public_sha256": "4fec4c0adab17c1918fdcd6c98a3593237465197e0000b64919084efab375b4b",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/safe-copy-stats/stderr.log",
+      "original_sha256": "a7f3f7e158e514c3248698857f180a9ae5ebeec6eaa96f3cd592d3e666dfbcea",
+      "public_sha256": "e73db4abc361020544670ac53ee9cccf6b2239ac410c229e9cda424cf0346ef7",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/safe-copy-stats/disk-samples.json",
+      "original_sha256": "eabbe2fd4a157e9f127c9faa1ddab4050364bd948bff1ff1e04b160ce08a3d95",
+      "public_sha256": "aba96cc7709f78b848847a838be65129dc0b0420c4ffab17f940344d693076dd",
+      "bytes": 4276,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/reopen-copy/stdout.log",
+      "original_sha256": "8eda0fee6bf34314eea859fb5d928465d888f7dc53a017ea27376812a6149f96",
+      "public_sha256": "8eda0fee6bf34314eea859fb5d928465d888f7dc53a017ea27376812a6149f96",
+      "bytes": 111944,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/reopen-copy/stderr.log",
+      "original_sha256": "3df53120b3e2d07cb8f242ded15d9a0248e78d3867be0738498b2c6328641afa",
+      "public_sha256": "989302b673d25a7fb195da1bb43d827c52f698e6782c37c592531619e148bc25",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/reopen-copy/disk-samples.json",
+      "original_sha256": "d89fe7ff19a11dcdb5e62f9231a4ed720571c114710abf88f1775ef71b3a190f",
+      "public_sha256": "975840c04d7a79cda9d744a1944b69f7aa4ec68b131d592c13874736d11d2372",
+      "bytes": 9727,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/reopen-copy/query-ledger.json",
+      "original_sha256": "071d3e8981c28755fb715b144958c6f66416c193b78b2cf3827221b1d797f8bd",
+      "public_sha256": "126240c59e43213911209716a3b88f78e5af605ef7fbeb2fe1d1ac11e8b709f7",
+      "bytes": 3677,
+      "transformation": {
+        "kind": "Exact JSON numeric projection.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/reopen-copy-stats/stdout.log",
+      "original_sha256": "47b8f1814a75c827108e8464efc1f1a9422dccfd83efffd18e7ae532096cd740",
+      "public_sha256": "8d0a5a45b2ee22ea33f05e6faa271e606efcc1e5c13bc984be04ec9019a901ec",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/reopen-copy-stats/stderr.log",
+      "original_sha256": "2e0b003e6c1392a3692db197a537df0c480f87c4174ddd71cd13612799233b3b",
+      "public_sha256": "9145940ed0be0c25249f6889735a2e9f5be318fe27895987046c47d6385cbe76",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/reopen-copy-stats/disk-samples.json",
+      "original_sha256": "6fa06557c43a5775b663bcef504142bd56393ddfea08f4317ebd37c283df8bdb",
+      "public_sha256": "4dd1677d08dba4bd9f07dae0e9b6722ea59bc1003331db541571590272353ce9",
+      "bytes": 4169,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check-copy/stdout.log",
+      "original_sha256": "0fdba1a6dee3efe79082394651d482224d2d768625871dc0dd8f9bdd8373e27b",
+      "public_sha256": "f1b005a54ebd33135c9f532bb257d9897744f1efd86f35eefc087b284581a2c9",
+      "bytes": 994,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": [
+          {
+            "json_pointer": "/0/result/path",
+            "location_kind": "value_in_derived_document",
+            "original_value_sha256": "9ce43510d08f1ec69fe747047fdcdca6c3670d17e0a4de3a9e3cd5efcad305d2",
+            "replacement": "external-reference/9ce43510d08f1ec6/safe-copy.coffer"
+          }
+        ]
+      }
+    },
+    {
+      "artifact": "workers/check-copy/stderr.log",
+      "original_sha256": "d32fca76cc3d2e3ed72313a22fb00b87884668596ca378517ace9567fd386564",
+      "public_sha256": "57ba98e88f777ac41fb806b19c3116261447a19d78945ca19c77594cab3ead8f",
+      "bytes": 764,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/check-copy/disk-samples.json",
+      "original_sha256": "98841a68bfb89cf89104e91d7d59ee11e8bc046c4b99672280047d4d734d5560",
+      "public_sha256": "c017c15f7209d32674000d6f4ced923d50e8a15e32ce5d75d580af725f6301f0",
+      "bytes": 6304,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check-copy-stats/stdout.log",
+      "original_sha256": "f78e6083521d537a778ba1f605d27ab3dbebe6035284e3f4e1ea1d49962243ac",
+      "public_sha256": "202828ee900b64d5796d825e3358d1399424e62e384fcbed95700157b2af0a34",
+      "bytes": 539,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    },
+    {
+      "artifact": "workers/check-copy-stats/stderr.log",
+      "original_sha256": "73fb8c3464c15753f45de8006de51c836f9235c1bd853c52da0cc62cf47ae7c6",
+      "public_sha256": "06c9b302c822a48c25fc4cd5c99b236f8b26e855c9bd606b4ef9ddd0f530e28c",
+      "bytes": 763,
+      "transformation": "Only first command-description line replaced; all native resource lines remain byte-identical."
+    },
+    {
+      "artifact": "workers/check-copy-stats/disk-samples.json",
+      "original_sha256": "cccfc13e122f7dee549e867340b09f2d7b0d5d8c30448d17d8dc4d6780e1d8a7",
+      "public_sha256": "fbc918f3d58722938bc9b6f3e391f8f2a3658375b9c8f55f3993c1f5194d6ee5",
+      "bytes": 4278,
+      "transformation": {
+        "kind": "Exact JSON numeric projection; only declared private paths replaced.",
+        "replaced_references": []
+      }
+    }
+  ],
+  "limits": [
+    "60required queries in original scope; initial query group covers collections0and4 and export covers only0, not all collections.",
+    "100k total across10collections, maximum10k per collection; not single-collection100k quality or performance evidence.",
+    "Directory samples are non-atomic logical sums, not strict simultaneous physical disk peak or a guaranteed bound.",
+    "Per-stage maximum RSS and native CPU/FS counts retain original process scope. Separate stats processes are not added into inner operation timing.",
+    "Original x86_64 Linux officialRust1.80.0/glibc2.41 observations do not establish a glibc2.31 platform result.",
+    "Physical IO bytes and old-reader physical extents were unknown, not zero.",
+    "Frozen input assets and helper replay materials remain separate publication preparation, not established by these measurement projections."
+  ]
+}
