@@ -225,6 +225,89 @@ class Tests(unittest.TestCase):
             self.assertEqual(t.main(), 0)
         self.assertIn('NOT_EXECUTED', output.getvalue()); self.assertEqual(self.calls, [])
 
+    def installed_python_fixture(self, mode=0o775):
+        """Map only a provider's logical policy path to owned fixture storage.
+
+        Keep the real row/host_file/host_protection/host_limits and fd-based
+        reads, digest, X_OK and NOFOLLOW checks. No installed file is changed.
+        """
+        fixture = Path(self.snapshot['runtimes'][0]['binary']['path'])
+        fixture.chmod(mode)
+        provider = '/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python'
+        self.assertTrue(self.r.python_provider(provider))
+        self.assertFalse(self.r.python_provider(str(fixture)))
+        limits = self.r.host_limits
+        def mapped_limits(value, role, private_root=None):
+            selected = provider if str(value) == str(fixture) else value
+            return limits(selected, role, private_root)
+        patch.object(self.r, 'host_limits', side_effect=mapped_limits).start()
+        return fixture
+
+    def test_provider_775_uses_real_policy_at_initial_loop_and_final_readback(self):
+        self.installed_python_fixture()
+        with patch.object(self.r, 'row', wraps=self.r.row) as rows:
+            result = self.run_observer()
+        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(rows.call_count, 6)  # Initial + four pre-launch reads + final.
+        self.assertTrue(all(call.kwargs == {'executable': True, 'host_role': 'python'} for call in rows.call_args_list))
+        self.assertFalse(result['product_acceptance'])
+
+    def test_same_775_file_is_still_rejected_as_ordinary_input(self):
+        fixture = self.installed_python_fixture()
+        with self.assertRaisesRegex(ValueError, 'Protected bounded regular input'):
+            self.r.row({'path': str(fixture), 'sha256': t.sha(fixture.read_bytes())}, executable=True)
+        self.assertEqual(self.calls, [])
+
+    def test_unknown_provider_775_gets_no_exception(self):
+        fixture = Path(self.snapshot['runtimes'][0]['binary']['path']); fixture.chmod(0o775)
+        self.assertFalse(self.r.python_provider(str(fixture)))
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'):
+            self.run_observer()
+        self.assertEqual(self.calls, []); self.assertFalse(self.out.exists())
+
+    def test_unknown_provider_755_preserves_existing_fallback(self):
+        fixture = Path(self.snapshot['runtimes'][0]['binary']['path']); fixture.chmod(0o755)
+        self.assertFalse(self.r.python_provider(str(fixture)))
+        self.assertFalse(self.run_observer()['product_acceptance'])
+        self.assertEqual(len(self.calls), 4)
+
+    def test_provider_777_is_rejected_before_capture(self):
+        self.installed_python_fixture(0o777)
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'): self.run_observer()
+        self.assertEqual(self.calls, []); self.assertFalse(self.out.exists())
+
+    def test_provider_wrong_digest_is_rejected_before_capture(self):
+        self.installed_python_fixture()
+        self.snapshot['runtimes'][0]['binary']['sha256'] = 'a' * 64
+        with self.assertRaisesRegex(ValueError, 'File bytes changed'): self.run_observer()
+        self.assertEqual(self.calls, []); self.assertFalse(self.out.exists())
+
+    def test_provider_without_execute_permission_is_rejected(self):
+        self.installed_python_fixture(0o664)
+        with self.assertRaisesRegex(ValueError, 'Installed executable unavailable'): self.run_observer()
+        self.assertEqual(self.calls, []); self.assertFalse(self.out.exists())
+
+    def test_provider_link_is_rejected_before_capture(self):
+        fixture = self.installed_python_fixture()
+        target = fixture.with_name('owned-target'); target.write_bytes(fixture.read_bytes()); target.chmod(0o775)
+        fixture.unlink(); fixture.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, 'symlink'): self.run_observer()
+        self.assertEqual(self.calls, []); self.assertFalse(self.out.exists())
+
+    def test_provider_policy_is_rechecked_before_next_capture(self):
+        fixture = self.installed_python_fixture()
+        self.after_capture = lambda name: fixture.chmod(0o777) if name == 'cargo' else None
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'): self.run_observer()
+        self.assertEqual(len(self.calls), 1); self.assertTrue((self.out / 'HOLD.json').exists())
+        self.assertFalse((self.out / 'RESULT.json').exists())
+
+    def test_provider_policy_is_rechecked_after_last_capture(self):
+        fixture = self.installed_python_fixture()
+        self.after_capture = lambda name: fixture.chmod(0o777) if name == 'compiler' else None
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'): self.run_observer()
+        self.assertEqual(len(self.calls), 4); self.assertTrue((self.out / 'HOLD.json').exists())
+        self.assertFalse((self.out / 'RESULT.json').exists())
+
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(); p.add_argument('--helper-root', required=True); p.add_argument('--runtime-bridge', required=True)

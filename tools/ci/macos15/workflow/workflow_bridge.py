@@ -16,7 +16,7 @@ PINS = {
     'dynamic_inputs/dynamic_collect.py': '8ded06566d4854818cef66e1f9db488a7410f85da5cb00d83791839bad0e6cae',
     'native_dependencies/native_closure.py': 'f334fb3f04257a4d20e664ca524b972478a0d4dccebd838f16b71711dbb620dc',
     'launch_bridge/launch_bridge.py': '0b6fe86cce9651baf4585bab428a10ac9c3bd6a76dcb57dc990c78ed36fadb3e',
-    'tool_observer/tool_observer.py': 'b5514572dc0a073b707705d20c55fc5b718705eb2047606975e99339dce51998',
+    'tool_observer/tool_observer.py': '94f74a9454e2cd5bacc2500b63bea15a4464903eda8fa68d66b0c413d6a29093',
 }
 INPUT_MANIFEST = 'a05b71163a2b993676609200e53978e4d1f03f25cd26ba5a0cfe0086614eea18'
 WHOLE_SECONDS = 7200
