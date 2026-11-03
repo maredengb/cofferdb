@@ -93,7 +93,76 @@ def python_provider(value):
     return any(re.match(pattern, text) for pattern in patterns)
 
 
-def host_limits(value, role, private_root=None):
+def public_native_candidate(p):
+    """Return a fixed, non-secret relative label for known Framework aliases."""
+    for minor in (12, 13, 14):
+        version = f'3.{minor}'
+        expected = (Path('/Library/Frameworks/Python.framework/Versions') / version /
+                    'lib' / ('python' + version) / f'config-{version}-darwin')
+        if p.parent == expected and p.name in (f'libpython{version}.a', f'libpython{version}.dylib'):
+            return f'config-{version}-darwin/{p.name}'
+    return None
+
+
+def provider_diagnostic_identity(p):
+    """Return a fixed provider label and a hash of its path, never an arbitrary path."""
+    text = str(p)
+    for minor in (12, 13, 14):
+        version = f'3.{minor}'
+        framework_root = Path('/Library/Frameworks/Python.framework/Versions') / version
+        try:
+            rel = p.relative_to(framework_root)
+        except ValueError:
+            rel = None
+        if rel is not None:
+            if (rel.parts == ('bin', f'python{version}') or
+                    rel.parts == ('Resources', 'Python.app', 'Contents', 'MacOS', 'Python')):
+                return f'framework/{version}', f'framework/{version}/' + '/'.join(rel.parts)
+            return f'framework/{version}', None
+        homebrew = re.match(
+            rf'^/opt/homebrew/Cellar/python@{re.escape(version)}/{re.escape(version)}[.][0-9]+(?:_[0-9]+)?/Frameworks/Python[.]framework/Versions/{re.escape(version)}(?:/(.*))?$',
+            text)
+        if homebrew:
+            rel = tuple((homebrew.group(1) or '').split('/'))
+            if rel in (('bin', f'python{version}'),
+                       ('Resources', 'Python.app', 'Contents', 'MacOS', 'Python')):
+                return f'homebrew/{version}', f'homebrew/{version}/' + '/'.join(rel)
+            return f'homebrew/{version}', None
+        hosted = re.match(
+            rf'^/Users/runner/hostedtoolcache/Python/{re.escape(version)}[.][0-9]+/arm64/(.*)$',
+            text)
+        if hosted:
+            return f'hostedtoolcache/{version}/arm64', None
+    return None
+
+
+def native_rejection_detail(p, info):
+    if info is None:
+        return ''
+    identity = provider_diagnostic_identity(p)
+    if identity is None:
+        return ''
+    provider, known_label = identity
+    details = {
+        'provider': provider,
+        'path_sha256': digest(str(p).encode('utf-8')),
+        'regular': stat.S_ISREG(info.st_mode),
+        'mode': format(stat.S_IMODE(info.st_mode), '04o'),
+        'links': info.st_nlink,
+        'bytes': info.st_size,
+        'owner': 'root' if info.st_uid == 0 else 'current' if info.st_uid == os.getuid() else 'other',
+    }
+    safe_label = public_native_candidate(p) or known_label
+    if safe_label is not None:
+        details['known_path'] = safe_label
+    if p.suffix.lower() in ('.a', '.dylib', '.so'):
+        details['suffix'] = p.suffix.lower()
+    else:
+        details['suffix'] = 'none' if not p.suffix else 'other'
+    return ' (' + json.dumps(details, sort_keys=True, separators=(',', ':')) + ')'
+
+
+def host_limits(value, role, private_root=None, file_info=None):
     """Explicit installed-file roles; ordinary evidence never uses this policy."""
     p = path(str(value))
     if role in ('python', 'native'):
@@ -103,7 +172,12 @@ def host_limits(value, role, private_root=None):
             need(p.name in ('Python', 'python3.12', 'python3.13', 'python3.14'),
                  'Actual provider interpreter required')
         else:
-            need(p.name == 'Python' or p.suffix in ('.so', '.dylib'), 'Declared native file required')
+            label = public_native_candidate(p)
+            detail = native_rejection_detail(p, file_info)
+            if label and not detail:
+                detail = f' (fixed Framework candidate: {label})'
+            if not (p.name == 'Python' or p.suffix in ('.so', '.dylib')):
+                raise ValueError('Declared native file required' + detail)
         return 128 * 1024 ** 2, 0o002
     if role == 'compiler':
         selected = (re.fullmatch(r'/Applications/Xcode[A-Za-z0-9_.-]*[.]app/Contents/Developer/Toolchains/XcodeDefault[.]xctoolchain/usr/bin/clang(?:-[0-9]+)?', str(p))
@@ -118,7 +192,7 @@ def host_limits(value, role, private_root=None):
 
 
 def host_protection(value, info, role, private_root=None):
-    bound, forbidden_mode = host_limits(value, role, private_root)
+    bound, forbidden_mode = host_limits(value, role, private_root, info)
     checks = {'regular': stat.S_ISREG(info.st_mode), 'single_link': info.st_nlink == 1,
               'within_size': info.st_size <= bound,
               'protected_mode': not bool(info.st_mode & (forbidden_mode | 0o7000)),

@@ -16,8 +16,8 @@ import struct
 import time
 import types
 
-COLLECTOR_SHA = '8ded06566d4854818cef66e1f9db488a7410f85da5cb00d83791839bad0e6cae'
-PLAN_SHA = 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
+COLLECTOR_SHA = '8890e8f5008c97b2b178113141afbdb06ee396600b9325258cad90636e9ee60c'
+PLAN_SHA = '6778674109ad04ccf5235e65939d51657a5edef34d3aee93fdc92be46f97d0ce'
 FRAMEWORK_VERSIONS = Path('/Library/Frameworks/Python.framework/Versions')
 FRAMEWORK_ALIAS_OWNER = (0, 80)
 SYSTEM_ROOTS = ('/usr/lib', '/System/Library/Frameworks', '/System/Library/PrivateFrameworks')

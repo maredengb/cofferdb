@@ -237,9 +237,9 @@ class Tests(unittest.TestCase):
         self.assertTrue(self.r.python_provider(provider))
         self.assertFalse(self.r.python_provider(str(fixture)))
         limits = self.r.host_limits
-        def mapped_limits(value, role, private_root=None):
+        def mapped_limits(value, role, private_root=None, info=None):
             selected = provider if str(value) == str(fixture) else value
-            return limits(selected, role, private_root)
+            return limits(selected, role, private_root, info)
         patch.object(self.r, 'host_limits', side_effect=mapped_limits).start()
         return fixture
 

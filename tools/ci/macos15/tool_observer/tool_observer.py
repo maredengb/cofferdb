@@ -11,7 +11,7 @@ import stat
 import time
 import types
 
-BRIDGE_SHA = 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f'
+BRIDGE_SHA = '3909795ef8a29ce68e9d5eb2314306174139f242cff6e7b42bf31853ad130b88'
 KEYS = ('cargo', 'rustc', 'maturin', 'sandbox', 'compiler', 'prepare', 'builder')
 QUERIES = ('cargo', 'rustc', 'maturin', 'compiler')
 
