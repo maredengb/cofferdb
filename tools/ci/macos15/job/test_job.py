@@ -62,7 +62,7 @@ class Tests(unittest.TestCase):
             p = tools / name; p.write_bytes(b'NONEXECUTED SYNTHETIC TOOL'); p.chmod(0o500)
         self.value = {'checkout': str(self.checkout), 'source_commit': 'a' * 40, 'execution_reference': 'review-fixture-only',
                       'rustup_home': str(self.rustup), 'output': str(self.root / 'job')}
-        self.env = {'GITHUB_REPOSITORY_ID': '1422246026', 'GITHUB_REPOSITORY': 'maredengb/coffered',
+        self.env = {'GITHUB_REPOSITORY_ID': '1422246026', 'GITHUB_REPOSITORY': 'maredengb/cofferdb',
                     'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
         patch.dict(os.environ, self.env).start()
         self.budget = {'started': time.monotonic(), 'deadline': time.monotonic() + 7200, 'check': lambda: None}
@@ -91,7 +91,7 @@ class Tests(unittest.TestCase):
                 if name.endswith('-root'): return str(owner.checkout).encode()
                 if name.endswith('-head'): return b'a' * 40
                 if name.endswith('-tree'): return b'b' * 40
-                if name.endswith('-origin'): return b'https://github.com/maredengb/coffered.git'
+                if name.endswith('-origin'): return getattr(owner, 'origin', 'https://github.com/maredengb/cofferdb.git').encode()
                 if name.endswith('-status'): return b''
                 if name == 'rust-version': return b'rustc 1.97.1 (fixture)\nhost: aarch64-apple-darwin\n'
                 if name == 'pip-download': (owner.root / 'job/inputs' / t.PIP['name']).write_bytes(b'pip')
@@ -166,6 +166,13 @@ class Tests(unittest.TestCase):
         self.assertGreater(len(roles), 1)
         self.assertEqual(set(roles), {'compiler'})
 
+    def test_legacy_origin_stops_before_download_or_product_execution(self):
+        self.origin = 'https://github.com/maredengb/coffered.git'
+        with self.assertRaisesRegex(ValueError, 'Fixed clean public checkout required'):
+            self.execute()
+        self.assertNotIn('pip-download', self.events)
+        self.assertNotIn('existing-pipeline', self.events)
+
     def test_initial_source_failure_prevents_download(self):
         self.fail = 'initial-source-status'
         with self.assertRaisesRegex(ValueError, 'synthetic command'): self.execute()
@@ -184,7 +191,7 @@ class Tests(unittest.TestCase):
         self.assertNotIn('metadata-1', self.events); self.assertNotIn('existing-pipeline', self.events)
 
     def test_public_identity_rejects_retry_or_different_sha(self):
-        for key, changed in [('GITHUB_RUN_ATTEMPT', '2'), ('GITHUB_SHA', 'b' * 40), ('GITHUB_REPOSITORY_ID', '1')]:
+        for key, changed in [('GITHUB_RUN_ATTEMPT', '2'), ('GITHUB_SHA', 'b' * 40), ('GITHUB_REPOSITORY_ID', '1'), ('GITHUB_REPOSITORY', 'maredengb/coffered')]:
             env = {**self.env, key: changed}
             with self.assertRaises(ValueError): t.public_identity(self.value, env)
 

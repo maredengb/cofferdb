@@ -271,26 +271,23 @@
   ],
   "input_preparation": {
     "original_member_sha256": "37cb15b0c662cd5a08c03336c0e37ef1bed64b32483a07b51451588f1b35e790",
-    "public_sha256": "25e8e0eadbfe20c0bddb16f82c9d074bd823657663905a4517cac73fdea35634",
+    "public_sha256": "c83d15ff2c0c3ab6101e18ebacb3fd3ae8d711a67c37740d185ac3883004116b",
     "transformation": "Only private source reference replaced; other fields and all numeric values retained.",
     "replaced_references": [
       {
         "json_pointer": "/source",
         "location_kind": "value_in_derived_document",
-        "original_value_sha256": "ab1cfb98299440f4a70c45a7ccebbbe70febf440e7bcd6e7ff3bd8a855d1dd6d",
-        "replacement": "external-reference/ab1cfb98299440f4/export"
+        "replacement": "redacted-historical-reference-054"
       },
       {
         "json_pointer": "/prior_failed_preparations/0",
         "location_kind": "value_in_derived_document",
-        "original_value_sha256": "58d97be91b86e345ed9db519cfd5657fe7a11cdfdb24661d403d48eaf3dd837b",
-        "replacement": "external-reference/58d97be91b86e345/cofferdb-multicollection-100k-inputs-20261011.log"
+        "replacement": "redacted-historical-reference-055"
       },
       {
         "json_pointer": "/prior_failed_preparations/1",
         "location_kind": "value_in_derived_document",
-        "original_value_sha256": "229722442dd0b1f2d2727f4bdc1e18a98e7ad2bd591fa25e50a52a442dc64c59",
-        "replacement": "external-reference/229722442dd0b1f2/cofferdb-multicollection-100k-inputs-v2-20261011.log"
+        "replacement": "redacted-historical-reference-056"
       }
     ]
   },

@@ -4,8 +4,8 @@
     {
       "artifact": "frozen-method-protocol-derived.json",
       "original_sha256": "991a388fd3cb281c704197c20d90a8daad7a136dc2494940ca900f1f4758ea3d",
-      "public_sha256": "ef8b824c78bdb56863eb5df6490ab2af7afb71fd653e1c2e95dfca17602b1166",
-      "bytes": 842967,
+      "public_sha256": "5e78a101d08e4d42fe57a1e47163b65c1588431d8b285b22c0fc6b913c71e6d7",
+      "bytes": 838992,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -23,8 +23,8 @@
     {
       "artifact": "v1/execution-derived.json",
       "original_sha256": "811fed9c80cdc6ade2fb82f0e899a7586c268a2ef0b6e45c11e94b07664cf3dd",
-      "public_sha256": "1eae73f300520c2463772bbb150c16887d330d0d053ebc280e8bfcc5544ea5f7",
-      "bytes": 3887932,
+      "public_sha256": "3efbd7335e0691ff86226fbb39ad4d743aeea78285df6353b3a3972f55c45aca",
+      "bytes": 3887810,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -32,34 +32,30 @@
     {
       "artifact": "v1/round-1-balanced/result-derived.json",
       "original_sha256": "1c6a98357e23a324272d8cee20e102a9a7e5b739d3a9b31a0f7462a02cc56014",
-      "public_sha256": "8530875bf6cee35099a3f07347206e97c50351674efaaf2cebf21ac1d55027d7",
-      "bytes": 1069428,
+      "public_sha256": "e40de80006c3f034dba50a42bbae43492281d87acaf148f77b728586d5047e2b",
+      "bytes": 1069366,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "55abcd5e8b03f89de3ebd83b9c03298ca2b1620891f139070472d7c0d15c2de9",
-            "replacement": "external-reference/55abcd5e8b03f89d/data.coffer"
+            "replacement": "redacted-historical-reference-002"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "55abcd5e8b03f89de3ebd83b9c03298ca2b1620891f139070472d7c0d15c2de9",
-            "replacement": "external-reference/55abcd5e8b03f89d/data.coffer"
+            "replacement": "redacted-historical-reference-002"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "41e3efc091c5490dcbe1c9c4514c6b2259d1b0c78994b5e1ce13e6729b00e1b9",
-            "replacement": "external-reference/41e3efc091c5490d/result.json"
+            "replacement": "redacted-historical-reference-001"
           }
         ]
       }
@@ -67,22 +63,20 @@
     {
       "artifact": "v1/round-1-balanced/query-journal-derived.jsonl",
       "original_sha256": "4a0d57ec506c431a29cc264259f5074edb12d8abbe9783547db1de8ea0a2303a",
-      "public_sha256": "770391243aed613c27d18ba8e936a4cbb1202fe1d6ff8911499630c66eec0094",
-      "bytes": 2115478,
+      "public_sha256": "fbb55d9cda9b4ac7ad8c9957bb4254604fbabdaf3455f0d984349a0ab4d41a61",
+      "bytes": 2115450,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "55abcd5e8b03f89de3ebd83b9c03298ca2b1620891f139070472d7c0d15c2de9",
-            "replacement": "external-reference/55abcd5e8b03f89d/data.coffer"
+            "replacement": "redacted-historical-reference-002"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "41e3efc091c5490dcbe1c9c4514c6b2259d1b0c78994b5e1ce13e6729b00e1b9",
-            "replacement": "external-reference/41e3efc091c5490d/result.json"
+            "replacement": "redacted-historical-reference-001"
           }
         ]
       }
@@ -104,8 +98,8 @@
     {
       "artifact": "v2/execution-derived.json",
       "original_sha256": "5a71d306042f834c0592299ce2c2043dbe84c044e8ea29e97ce5b9a1b1be3ad6",
-      "public_sha256": "0d253f366c7a648fb3d898604bc12666252adf29adbf6eb02ce23b35675fcaac",
-      "bytes": 23452420,
+      "public_sha256": "5d4181fa31fbef3c9e069ea6397373834c1c71abd39a0cb924c676ef2184099b",
+      "bytes": 23451298,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -113,34 +107,30 @@
     {
       "artifact": "v2/round-1-balanced/result-derived.json",
       "original_sha256": "b28e253c313315a7e0bf983096a4c27059e3a404f6032b4d34c60e50c8cb386c",
-      "public_sha256": "105a28d17334a374e5194084038674f3870ed77779e7bfcd78effffa537a1b97",
-      "bytes": 1069216,
+      "public_sha256": "c4692ef6695bf75e9290a4b1ff96cdbb42ce93e03038d5366ae37baef29ae60a",
+      "bytes": 1069154,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6a9cf0a9003b1d5959c6660da1d64941b64f686057223214673dd15b16032f00",
-            "replacement": "external-reference/6a9cf0a9003b1d59/data.coffer"
+            "replacement": "redacted-historical-reference-004"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6a9cf0a9003b1d5959c6660da1d64941b64f686057223214673dd15b16032f00",
-            "replacement": "external-reference/6a9cf0a9003b1d59/data.coffer"
+            "replacement": "redacted-historical-reference-004"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "32b8ecccc68c40ee8b10fc44827f9daaa8289e71c73a781979628555586c79fc",
-            "replacement": "external-reference/32b8ecccc68c40ee/result.json"
+            "replacement": "redacted-historical-reference-003"
           }
         ]
       }
@@ -148,22 +138,20 @@
     {
       "artifact": "v2/round-1-balanced/query-journal-derived.jsonl",
       "original_sha256": "a9804938bd2fef71f93a36aaef29800b5a3dabbbb9a6e101e0346db81abaffd2",
-      "public_sha256": "dfc1b2330dc60db6afe6409582ea5bf0cdf5d95e98993873ab1a35810ed64db9",
-      "bytes": 2115207,
+      "public_sha256": "a7d183408c1fda57fd069cabbf8b66019c231a9f0dce8689076a8c6be4e14dcd",
+      "bytes": 2115179,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6a9cf0a9003b1d5959c6660da1d64941b64f686057223214673dd15b16032f00",
-            "replacement": "external-reference/6a9cf0a9003b1d59/data.coffer"
+            "replacement": "redacted-historical-reference-004"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "32b8ecccc68c40ee8b10fc44827f9daaa8289e71c73a781979628555586c79fc",
-            "replacement": "external-reference/32b8ecccc68c40ee/result.json"
+            "replacement": "redacted-historical-reference-003"
           }
         ]
       }
@@ -185,34 +173,30 @@
     {
       "artifact": "v2/round-1-expanded/result-derived.json",
       "original_sha256": "f114429155c5099af23717cf0c1542a8353b85c8a41b6e1e34680fed09e250d1",
-      "public_sha256": "705ee97511448b74bc3d5c3c0148e0975a5e39bc8d31899a084bc0bacff1bcba",
-      "bytes": 1069199,
+      "public_sha256": "1871aaf115f37f86ea1f5bfb83b859fc79c4d37bdd64b22501f586bf7862b0de",
+      "bytes": 1069137,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5a39e4f18ec39b38f667d473a9be20d1ce0c0f792650bc74e8de3ec9a0b025",
-            "replacement": "external-reference/ad5a39e4f18ec39b/data.coffer"
+            "replacement": "redacted-historical-reference-008"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5a39e4f18ec39b38f667d473a9be20d1ce0c0f792650bc74e8de3ec9a0b025",
-            "replacement": "external-reference/ad5a39e4f18ec39b/data.coffer"
+            "replacement": "redacted-historical-reference-008"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "a77d07eb526920743102038da02b2b2ea9a2b66d0bdc443cd307c3ec40463c54",
-            "replacement": "external-reference/a77d07eb52692074/result.json"
+            "replacement": "redacted-historical-reference-007"
           }
         ]
       }
@@ -220,22 +204,20 @@
     {
       "artifact": "v2/round-1-expanded/query-journal-derived.jsonl",
       "original_sha256": "7730653c21b01dcb56da32d2f65192a6c2acb6e51cd17eb2cf2558dae7022fb2",
-      "public_sha256": "29979aeb03acf29a7cee6be4fce8353dcb8c56c379535f41a8c75a1b351195f0",
-      "bytes": 2115146,
+      "public_sha256": "dfcae2be2c347fad1c71187faed6f219da4eeff2ab138b3e5202e95cff9c83f3",
+      "bytes": 2115118,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5a39e4f18ec39b38f667d473a9be20d1ce0c0f792650bc74e8de3ec9a0b025",
-            "replacement": "external-reference/ad5a39e4f18ec39b/data.coffer"
+            "replacement": "redacted-historical-reference-008"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "a77d07eb526920743102038da02b2b2ea9a2b66d0bdc443cd307c3ec40463c54",
-            "replacement": "external-reference/a77d07eb52692074/result.json"
+            "replacement": "redacted-historical-reference-007"
           }
         ]
       }
@@ -257,34 +239,30 @@
     {
       "artifact": "v2/round-1-constrained/result-derived.json",
       "original_sha256": "13bb9ea2375896b50aba511146fe8514e74a90223e4448ea738813570fcb3779",
-      "public_sha256": "a35a651b18714805744b39fdcbc2ae6ed9d3c0b34ce7736fdd60f29dab230885",
-      "bytes": 1069234,
+      "public_sha256": "0f22522622a2848709ec5208dc002b1a85802cbdb1dd4a6226a915c0442ae60d",
+      "bytes": 1069172,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "15ccfb11d26397a32fca505bbd551026b622e539baf148a3be5f7918ba066109",
-            "replacement": "external-reference/15ccfb11d26397a3/data.coffer"
+            "replacement": "redacted-historical-reference-006"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "15ccfb11d26397a32fca505bbd551026b622e539baf148a3be5f7918ba066109",
-            "replacement": "external-reference/15ccfb11d26397a3/data.coffer"
+            "replacement": "redacted-historical-reference-006"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "abc0bc6f09afe0290cdbb306a6c1722615a8c3c5aa1133d3fce22d325350e276",
-            "replacement": "external-reference/abc0bc6f09afe029/result.json"
+            "replacement": "redacted-historical-reference-005"
           }
         ]
       }
@@ -292,22 +270,20 @@
     {
       "artifact": "v2/round-1-constrained/query-journal-derived.jsonl",
       "original_sha256": "e271d707afe17d7e3088b5b1c65ea517fc234ceba74c73f288a9b60efc73b01e",
-      "public_sha256": "4b8dbb3f5124f47f9c0d7a01798c049270bbc9cac0d5b48d34b26485e7a88335",
-      "bytes": 2117439,
+      "public_sha256": "d9868ed5253ba599f83768d5fba762279563e864c2eb1280c3a3ceff837d2271",
+      "bytes": 2117411,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "15ccfb11d26397a32fca505bbd551026b622e539baf148a3be5f7918ba066109",
-            "replacement": "external-reference/15ccfb11d26397a3/data.coffer"
+            "replacement": "redacted-historical-reference-006"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "abc0bc6f09afe0290cdbb306a6c1722615a8c3c5aa1133d3fce22d325350e276",
-            "replacement": "external-reference/abc0bc6f09afe029/result.json"
+            "replacement": "redacted-historical-reference-005"
           }
         ]
       }
@@ -329,34 +305,30 @@
     {
       "artifact": "v2/round-2-constrained/result-derived.json",
       "original_sha256": "ac70e6e5f1a39df325a264d996ae8500fe7a2622538cf5339704fbee2095992b",
-      "public_sha256": "91f8905479098cf1425c417866f3723062182ad4e0b298bd049004c76a93c88a",
-      "bytes": 1069348,
+      "public_sha256": "de35a7d2ca1812413af9b6db0ee84b06307227872871e12533c3af048b59082d",
+      "bytes": 1069286,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "19dbabd7c2d3248d9999f2660e6fe8e1683a1c3d5051989bb7e1348eb91b9a9a",
-            "replacement": "external-reference/19dbabd7c2d3248d/data.coffer"
+            "replacement": "redacted-historical-reference-012"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "19dbabd7c2d3248d9999f2660e6fe8e1683a1c3d5051989bb7e1348eb91b9a9a",
-            "replacement": "external-reference/19dbabd7c2d3248d/data.coffer"
+            "replacement": "redacted-historical-reference-012"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "45cd7facd46db66cc9b264670b7250f2610b616d6c5d83b9bc7bd84adeddfdcb",
-            "replacement": "external-reference/45cd7facd46db66c/result.json"
+            "replacement": "redacted-historical-reference-011"
           }
         ]
       }
@@ -364,22 +336,20 @@
     {
       "artifact": "v2/round-2-constrained/query-journal-derived.jsonl",
       "original_sha256": "c7d96e8ce68db0ac41c709a30da0a422a6393c10e5e1c3c992363754ee192a7d",
-      "public_sha256": "d5744559878f80c276d972a73a67b2ad2e898a5d045d3ae0e5db849d081801f6",
-      "bytes": 2117587,
+      "public_sha256": "5c6d88db796343eaaf8d0bb917f11a3411f27d07c3f52e6e8337a07b98c21745",
+      "bytes": 2117559,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "19dbabd7c2d3248d9999f2660e6fe8e1683a1c3d5051989bb7e1348eb91b9a9a",
-            "replacement": "external-reference/19dbabd7c2d3248d/data.coffer"
+            "replacement": "redacted-historical-reference-012"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "45cd7facd46db66cc9b264670b7250f2610b616d6c5d83b9bc7bd84adeddfdcb",
-            "replacement": "external-reference/45cd7facd46db66c/result.json"
+            "replacement": "redacted-historical-reference-011"
           }
         ]
       }
@@ -401,34 +371,30 @@
     {
       "artifact": "v2/round-2-expanded/result-derived.json",
       "original_sha256": "0da0f91808570883cb43e6202148370f8ac5b58ca4b7cfa5735b061d8b68299a",
-      "public_sha256": "5f088c995e8c4ecffebcd50f4e939c942433837cf8386a84b631f78ac3568186",
-      "bytes": 1069288,
+      "public_sha256": "a0deb9357ba0c9c7f5d0c0110ed471ee5ad8d502e603090bb2df6f38a3f7515d",
+      "bytes": 1069226,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "8b447c85ec0b6ce6e501d2ff0881510a496bb5ceefde86843d82ce5f6cd74e13",
-            "replacement": "external-reference/8b447c85ec0b6ce6/data.coffer"
+            "replacement": "redacted-historical-reference-014"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "8b447c85ec0b6ce6e501d2ff0881510a496bb5ceefde86843d82ce5f6cd74e13",
-            "replacement": "external-reference/8b447c85ec0b6ce6/data.coffer"
+            "replacement": "redacted-historical-reference-014"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "e58f0da7d673aa387a5e38f472cd69d48056e20950753bfe003d5022b4642bf1",
-            "replacement": "external-reference/e58f0da7d673aa38/result.json"
+            "replacement": "redacted-historical-reference-013"
           }
         ]
       }
@@ -436,22 +402,20 @@
     {
       "artifact": "v2/round-2-expanded/query-journal-derived.jsonl",
       "original_sha256": "fa0e8919e949af0f0d2d2c817c22e8a421b4e857b6676d001505c8d4f692b78f",
-      "public_sha256": "5dcfbd858a5f20402ac8a51bf8d1447a40d3eba4c7864a583a0f33cb5e7f303f",
-      "bytes": 2115204,
+      "public_sha256": "18ae850e8b8dcd029abb66c0db2e8200dc015726b32990fc2731ef1843698905",
+      "bytes": 2115176,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "8b447c85ec0b6ce6e501d2ff0881510a496bb5ceefde86843d82ce5f6cd74e13",
-            "replacement": "external-reference/8b447c85ec0b6ce6/data.coffer"
+            "replacement": "redacted-historical-reference-014"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "e58f0da7d673aa387a5e38f472cd69d48056e20950753bfe003d5022b4642bf1",
-            "replacement": "external-reference/e58f0da7d673aa38/result.json"
+            "replacement": "redacted-historical-reference-013"
           }
         ]
       }
@@ -473,34 +437,30 @@
     {
       "artifact": "v2/round-2-balanced/result-derived.json",
       "original_sha256": "1d3beb7b64ed4a2491dea5799ae62044a7f1773d5987b9481866ee0b13a401ad",
-      "public_sha256": "2a78d362d51a464322686158e88cf2d3b815863715af145c1d54dcf90382f0e7",
-      "bytes": 1069439,
+      "public_sha256": "ef0467098f1b012e28c8fbd14133b181ca64e28c6f835aa9f6b459ac008c3c92",
+      "bytes": 1069377,
       "transformation": {
         "kind": "Only declared private path references replaced; exact numbers, ranks, scores, statuses and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/dataset_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "29211b05ff4a062393f6f029ef97534c537f0637a505525c4edd46a376ca4a8f",
-            "replacement": "external-reference/29211b05ff4a0623/public-quality-v1"
+            "replacement": "redacted-historical-reference-262"
           },
           {
             "json_pointer": "/import_context/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "9a670dca5e430ec3cb1a25609eaab240abd5fb57a0e6f03bb8160c5e7ff98c25",
-            "replacement": "external-reference/9a670dca5e430ec3/data.coffer"
+            "replacement": "redacted-historical-reference-010"
           },
           {
             "json_pointer": "/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "9a670dca5e430ec3cb1a25609eaab240abd5fb57a0e6f03bb8160c5e7ff98c25",
-            "replacement": "external-reference/9a670dca5e430ec3/data.coffer"
+            "replacement": "redacted-historical-reference-010"
           },
           {
             "json_pointer": "/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "477cc7a88a3f3e7dee23c6ed57f05426e4c6276830aca565e729a9d77ab05661",
-            "replacement": "external-reference/477cc7a88a3f3e7d/result.json"
+            "replacement": "redacted-historical-reference-009"
           }
         ]
       }
@@ -508,22 +468,20 @@
     {
       "artifact": "v2/round-2-balanced/query-journal-derived.jsonl",
       "original_sha256": "2f64d9dda15a6184f60184e2f74969c59215b09a817e0e950cb15dac870c193f",
-      "public_sha256": "5b0fc8295f5b2d1b9d151576410a20029183d621d875450f39ce1559b6bd37ed",
-      "bytes": 2115546,
+      "public_sha256": "1b5367e259b211754a4799977475f4a9bfd35cbafed36e38bec0445638882fef",
+      "bytes": 2115518,
       "transformation": {
         "kind": "All original journal events retained with exact numbers; only declared private paths replaced.",
         "replaced_references": [
           {
             "json_pointer": "/0/database_path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "9a670dca5e430ec3cb1a25609eaab240abd5fb57a0e6f03bb8160c5e7ff98c25",
-            "replacement": "external-reference/9a670dca5e430ec3/data.coffer"
+            "replacement": "redacted-historical-reference-010"
           },
           {
             "json_pointer": "/0/result_file",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "477cc7a88a3f3e7dee23c6ed57f05426e4c6276830aca565e729a9d77ab05661",
-            "replacement": "external-reference/477cc7a88a3f3e7d/result.json"
+            "replacement": "redacted-historical-reference-009"
           }
         ]
       }

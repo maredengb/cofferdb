@@ -29,8 +29,7 @@
       "transformation": {
         "kind": "Only the declared result path replaced; all numbers and other values preserved.",
         "json_pointer": "/result/manifest",
-        "replacement": "scale-input/import_manifest.json",
-        "original_value_sha256": "48906d8192928f618d632bb785d7eb4b7fd449fb44ab5bf538de49d6d88859b5"
+        "replacement": "scale-input/import_manifest.json"
       },
       "bytes": 873
     },
@@ -41,8 +40,7 @@
       "transformation": {
         "kind": "Only the declared result path replaced; all numbers and other values preserved.",
         "json_pointer": "/result/path",
-        "replacement": "scale-input/scale.coffer",
-        "original_value_sha256": "f042ef21041c6423a6c40d3798230b334fa3682b702eff02ff160c0270b48f83"
+        "replacement": "scale-input/scale.coffer"
       },
       "bytes": 968
     },

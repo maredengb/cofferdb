@@ -13,7 +13,7 @@ import stat
 import time
 import types
 
-INSTANTIATOR_SHA='d98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
+INSTANTIATOR_SHA='9f03114e40dfc827046b02adb6fbe3ce7258a230a7f46d32658bd86ce7e44f78'
 HERE=Path(__file__).absolute().parent
 
 def load_instantiator():
@@ -85,8 +85,58 @@ def compiler_bytes(value):
 def gate(deadline):
     if time.monotonic()>=deadline:raise ValueError('collection deadline')
 
+FRAMEWORK_VERSIONS = Path('/Library/Frameworks/Python.framework/Versions')
+FRAMEWORK_ALIAS_OWNER = (0, 80)
+
+
+def framework_alias(root, name, current, leaf, info, deadline):
+    """Index only the two fixed ordinary-ABI Framework installation aliases."""
+    root = Path(root)
+    versions = [f'3.{minor}' for minor in (12, 13, 14)]
+    version = next((v for v in versions if root == FRAMEWORK_VERSIONS / v / 'lib' / ('python' + v)), None)
+    allowed = [] if version is None else [f'config-{version}-darwin/libpython{version}.{suffix}' for suffix in ('a', 'dylib')]
+    if name not in allowed or (info.st_uid, info.st_gid) != FRAMEWORK_ALIAS_OWNER or info.st_nlink != 1 or info.st_size != 15:
+        raise ValueError('stdlib alias path or identity')
+    link = os.readlink(leaf, dir_fd=current)
+    if link != '../../../Python': raise ValueError('stdlib alias target')
+    target = FRAMEWORK_VERSIONS / version / 'Python'
+    target_parent = directory(target.parent)
+    try:
+        before = os.stat('Python', dir_fd=target_parent, follow_symlinks=False)
+        native_protection(target, before)
+        if not (stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_size <= MAX_FILE):
+            raise ValueError('stdlib alias bounded target')
+        gate(deadline)
+        target_fd = os.open('Python', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=target_parent)
+        try:
+            if signature(before) != signature(os.fstat(target_fd)): raise ValueError('stdlib alias target replacement')
+            chunks, size = [], 0
+            while True:
+                gate(deadline)
+                chunk = os.read(target_fd, 65536)
+                if not chunk: break
+                chunks.append(chunk); size += len(chunk)
+                if size > MAX_FILE: raise ValueError('stdlib alias target grew')
+            if signature(before) != signature(os.fstat(target_fd)): raise ValueError('stdlib alias target changed')
+            data = b''.join(chunks)
+        finally:
+            os.close(target_fd)
+        gate(deadline)
+        after = os.stat('Python', dir_fd=target_parent, follow_symlinks=False)
+        if signature(before) != signature(after) or len(data) != before.st_size:
+            raise ValueError('stdlib alias target drift')
+        if signature(info) != signature(os.stat(leaf, dir_fd=current, follow_symlinks=False)) or os.readlink(leaf, dir_fd=current) != link:
+            raise ValueError('stdlib alias drift')
+        return {'path': str(root / name), 'kind': 'framework_install_alias',
+                'bytes': len(data), 'mode': stat.S_IMODE(before.st_mode), 'sha256': hashlib.sha256(data).hexdigest(),
+                'alias': {'target': str(target), 'text': link, 'identity': list(signature(info)),
+                          'target_identity': list(signature(before))}}
+    finally:
+        os.close(target_parent)
+
+
 def index_tree(root,deadline):
-    """Observe complete bounded regular stdlib set, not a native dependency claim."""
+    """Observe bounded stdlib files and fixed Framework aliases, not native closure."""
     root=Path(root);parent=directory(root.parent);fd=None;rows=[];total=0;entries=0
     try:
         fd=os.open(root.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent);initial=os.fstat(fd)
@@ -106,6 +156,11 @@ def index_tree(root,deadline):
                         child=os.open(item.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
                         try:walk(child,os.fstat(child),current,item.name,name+'/',depth+1)
                         finally:os.close(child)
+                    elif stat.S_ISLNK(info.st_mode):
+                        row = framework_alias(root, name, current, item.name, info, deadline)
+                        total += row['bytes']
+                        if total > MAX_BYTES: raise ValueError('stdlib byte budget')
+                        rows.append(row)
                     else:
                         if not(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=MAX_FILE):raise ValueError('stdlib link/type/file bound')
                         total+=info.st_size

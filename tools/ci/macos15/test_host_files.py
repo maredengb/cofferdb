@@ -69,5 +69,97 @@ class HostFiles(unittest.TestCase):
         for tail in ('lib/config.json','lib/test.py'):
             with self.assertRaises(ValueError):r.host_protection(root+tail,self.info(),'native')
 
+    def test_bundled_tcl_tk_images_keep_native_metadata_protection(self):
+        paths = [f'/Library/Frameworks/Python.framework/Versions/3.{minor}/Frameworks/'
+                 f'{name}.framework/Versions/8.6/{name}'
+                 for minor in (12, 13, 14) for name in ('Tcl', 'Tk')]
+        self.assertEqual(set(paths), r.FRAMEWORK_NATIVE_IMAGES)
+        for value in paths:
+            with self.subTest(value=value):
+                self.assertEqual(r.host_protection(value, self.info(mode=0o575, size=4664640, uid=0),
+                                                   'native'), 128 * 1024**2)
+                for info in (self.info(mode=0o577), self.info(mode=0o4575),
+                             self.info(links=2), self.info(uid=987654),
+                             self.info(size=129 * 1024**2)):
+                    with self.assertRaises(ValueError): r.host_protection(value, info, 'native')
+                info = self.info(mode=0o575); info.st_mode = stat.S_IFDIR | 0o575
+                with self.assertRaises(ValueError): r.host_protection(value, info, 'native')
+                with self.assertRaises(ValueError): r.host_protection(value, self.info(), 'python')
+
+    def test_bundled_framework_name_exception_is_exactly_six_canonical_paths(self):
+        root = '/Library/Frameworks/Python.framework/Versions/3.13/'
+        fixed = root + 'Frameworks/Tcl.framework/Versions/8.6/Tcl'
+        rejected = [
+            fixed.replace('/8.6/', '/9.0/'), fixed.replace('/8.6/', '/8.6.14/'),
+            fixed.replace('/8.6/', '/Current/'), fixed.replace('/Tcl.framework/', '/Other.framework/'),
+            fixed.replace('/8.6/Tcl', '/8.6/Tk'), fixed.replace('/Frameworks/Tcl.', '/lib/Frameworks/Tcl.'),
+            fixed.replace('/Library/Frameworks/', '/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/'),
+            '/Users/runner/hostedtoolcache/Python/3.13.9/arm64/Frameworks/Tcl.framework/Versions/8.6/Tcl',
+            root + 'Frameworks/Tcl.framework/Versions/8.6/Unknown',
+            root + 'private-data', root + 'Frameworks/Tcl.framework/Versions/8.6/../8.6/Tcl',
+        ]
+        for value in rejected:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                r.host_protection(value, self.info(mode=0o775), 'native')
+
+        # Other Python versions do not receive the six-path Framework exception;
+        # host_limits applies its generic non-provider policy to them instead.
+        for minor in (11, 15):
+            value = fixed.replace('/3.13/', f'/3.{minor}/')
+            with self.subTest(value=value):
+                self.assertNotIn(value, r.FRAMEWORK_NATIVE_IMAGES)
+                self.assertFalse(r.python_provider(value))
+                self.assertEqual(r.host_limits(value, 'native'), (128 * 1024**2, 0o022))
+                self.assertEqual(r.host_protection(value, self.info(mode=0o755), 'native'),
+                                 128 * 1024**2)
+                with self.assertRaisesRegex(ValueError, r'"protected_mode": false'):
+                    r.host_protection(value, self.info(mode=0o775), 'native')
+
+    def test_native_rejection_names_only_fixed_framework_alias_candidates(self):
+        fixed = '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/config-3.12-darwin/libpython3.12.a'
+        with self.assertRaisesRegex(ValueError, r'config-3\.12-darwin/libpython3\.12\.a'):
+            r.host_limits(fixed, 'native')
+        unknown = '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/private-data.a'
+        with self.assertRaisesRegex(ValueError, 'Declared native file required') as caught:
+            r.host_limits(unknown, 'native')
+        self.assertNotIn('private-data', str(caught.exception))
+
+    def test_native_rejection_reports_only_safe_provider_label_and_open_fd_metadata(self):
+        value = '/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12'
+        info = self.info(mode=0o755, size=123456, links=1, uid=987654)
+        with self.assertRaisesRegex(ValueError, 'Declared native file required') as caught:
+            r.host_protection(value, info, 'native')
+        message = str(caught.exception)
+        self.assertIn('framework/3.12/bin/python3.12', message)
+        self.assertIn('"mode":"0755"', message)
+        self.assertIn('"links":1', message)
+        self.assertIn('"bytes":123456', message)
+        self.assertIn('"owner":"other"', message)
+        self.assertNotIn('/Library/Frameworks', message)
+        self.assertNotIn('987654', message)
+
+    def test_native_archive_candidate_rejection_reports_fixed_label_with_fd_metadata(self):
+        value = ('/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/'
+                 'config-3.12-darwin/libpython3.12.a')
+        with self.assertRaisesRegex(ValueError, 'Declared native file required') as caught:
+            r.host_protection(value, self.info(mode=0o644, size=12345), 'native')
+        message = str(caught.exception)
+        self.assertIn('config-3.12-darwin/libpython3.12.a', message)
+        self.assertIn('"provider":"framework/3.12"', message)
+        self.assertIn('"mode":"0644"', message)
+        self.assertNotIn('/Library/Frameworks', message)
+
+    def test_native_rejection_hashes_unrecognized_provider_path_name(self):
+        value = '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/private-data.a'
+        with self.assertRaisesRegex(ValueError, 'Declared native file required') as caught:
+            r.host_protection(value, self.info(mode=0o644, size=2345, links=2), 'native')
+        message = str(caught.exception)
+        self.assertIn('"provider":"framework/3.12"', message)
+        self.assertIn('"suffix":".a"', message)
+        self.assertIn('"links":2', message)
+        self.assertIn('"bytes":2345', message)
+        self.assertNotIn('private-data', message)
+        self.assertNotIn('/Library/Frameworks', message)
+
 
 if __name__=='__main__':unittest.main()

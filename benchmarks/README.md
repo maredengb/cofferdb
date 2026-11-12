@@ -1,9 +1,9 @@
 # Benchmark reproduction
 
 This directory provides a small, self-contained functional benchmark workflow.
-The [evaluation materials](evaluation-v1/README.md) contain a separate representative
-quality study, historical resource observations, complete results and replay
-limits. Running the tiny fixture below does not establish release acceptance,
+The evaluation materials at `benchmarks/evaluation-v1/README.md` in the complete
+source tree contain a separate representative quality study, historical
+resource observations, complete results and replay limits. Running the tiny fixture below does not establish release acceptance,
 semantic quality or comparative performance. The [README](../README.md) describes
 the engine's scope.
 

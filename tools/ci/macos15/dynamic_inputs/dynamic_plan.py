@@ -8,10 +8,10 @@ from pathlib import Path
 import re
 
 ACTIONS={'checkout':'11d5960a326750d5838078e36cf38b85af677262','upload_artifact':'cf430e030ddbb5b0abf93d22962f4752f3646cd9'}
-HELPERS={'runner.py':'2e6972ccfc45fb41c4145ff60a6933a767a4b18862dfcde5952fff95d5edc815',
+HELPERS={'runner.py':'295bffcbec564df6d3c743d8cf47a5dcd8a1061dd7650c9417a6233cb4193858',
  'probe.py':'c0cdbf1ce7271f7585bba59d58e51a2f22fc5e9c2a49eeb82d87ab2725b90c10',
- 'workflow_build.py':'ee1bdb098e292998179a1eb50cb721a9d3af16420c9d6ca4454f305d9cac1492',
- 'venv_prepare.py':'b6fa5a197d1e22d4c6e270b8243e0241444d0d6012740dd88b2b6961ae20e3c1',
+ 'workflow_build.py':'987d34bef453ba3d04f0e51f901521757e0f022087e68186b7bfb37e85df17cb',
+ 'venv_prepare.py':'d367e7db56946a337016465e32113413cc853c063fe7d99a85f9abd189c1ef61',
  'q_process_supervisor.py':'39d6c8842e1a9c972fd911feb4e3c483d1eb6947fc7291b65ac6f8a3bc778e51'}
 PROVIDERS=['/Users/runner/hostedtoolcache/Python','/Library/Frameworks/Python.framework/Versions',
  '/opt/homebrew/Cellar/python@3.12','/opt/homebrew/Cellar/python@3.13','/opt/homebrew/Cellar/python@3.14']
@@ -36,7 +36,7 @@ def configuration(p):
       'selection_method','native_closure_gate','driver_contract_sha256','candidate_manifest_sha256','native_closure_validator_sha256'}
     need(type(p) is dict and set(p)==fields and type(p['schema_version']) is int and p['schema_version']==1
         and p['kind']=='mac15_dynamic_input_config_1','configuration shape')
-    need(p['source_repository'] in ('maredengb/cofferdb','maredengb/coffered') and commit(p['source_commit']),'fixed public source identity')
+    need(p['source_repository'] == 'maredengb/cofferdb' and commit(p['source_commit']),'fixed public source identity')
     need(p['helper_sha256']==HELPERS and p['actions']==ACTIONS,'fixed existing helper/action bytes')
     need(p['python_providers']==PROVIDERS and p['selection_method']==METHOD,'fixed preinstalled selection')
     need(p['native_closure_gate']=='independent-exact-closure-input-v1','fixed closure method')

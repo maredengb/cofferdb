@@ -19,11 +19,11 @@
       "planned_sqlite_samples": 288,
       "status": "failed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/55abcd5e8b03f89d/data.coffer",
+        "redacted-historical-reference-002",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -31,7 +31,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/41e3efc091c5490d/result.json",
+        "redacted-historical-reference-001",
         "--require-baseline"
       ],
       "exit": 1,
@@ -51,7 +51,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/f7e563c3257f8574/cofferdb-benchmark-execution-53012-1792035022058808000-0.jsonl": "4a0d57ec506c431a29cc264259f5074edb12d8abbe9783547db1de8ea0a2303a"
+          "redacted-historical-reference-930": "4a0d57ec506c431a29cc264259f5074edb12d8abbe9783547db1de8ea0a2303a"
         },
         "raw_logs_sha256": {
           "stdout": "6817ba511d395882d8000b35b8b9c5740ec4bdb90be5d6dc58ee74e58e9d8d95",

@@ -12,13 +12,13 @@ import threading
 import types
 
 PINS = {
-    'runtime_bridge/runtime_bridge.py': 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f',
-    'dynamic_inputs/dynamic_collect.py': 'beef90c78e09b1ef059f6bec8712d11fa362b4fe8508f135e7f6e100f9c27006',
-    'native_dependencies/native_closure.py': '20a1e97dec3515ab9393e365ca5ded1e6b47de82e72a9c05255ea55f7e0f5e86',
-    'launch_bridge/launch_bridge.py': 'db7304c474dc107751eb7af53d6603ee2f48da07b325875ed143f0c838b17079',
-    'tool_observer/tool_observer.py': 'b5514572dc0a073b707705d20c55fc5b718705eb2047606975e99339dce51998',
+    'runtime_bridge/runtime_bridge.py': 'efc057aeaf8f0f4e74886928fa8a91ce779dc7c16412d8a155e3a4c3996ddf10',
+    'dynamic_inputs/dynamic_collect.py': 'f56a756a617a47363d04514f759ee7f76977cb6a0494430e43c854ab322c7ca4',
+    'native_dependencies/native_closure.py': '786d7878f645048d33eef23ae95a91f92390c3acdbb8f3b8fe2d5a87f1d42a3f',
+    'launch_bridge/launch_bridge.py': 'f1faa82b8b4e0bb2c850a92606ae48b53a60a17f226e0a9a1c6a3be32779524e',
+    'tool_observer/tool_observer.py': 'e0533b98e80cfd57ae6dd088dd4514872c510d8668393f83c9b7d0b08ba2f628',
 }
-INPUT_MANIFEST = '095dae5a01eb58086b076cda14644e89344f8f255d5c2e9189b6b9c50f10933e'
+INPUT_MANIFEST = '5bf396c0711b29f859154c87153476a7ab9812887ed9874363e8963721113c59'
 WHOLE_SECONDS = 7200
 
 
@@ -119,7 +119,7 @@ def input_document(b, filename, expected):
 
 def github_identity(value):
     need(os.environ.get('GITHUB_REPOSITORY_ID') == str(value['repository_id'])
-         and os.environ.get('GITHUB_REPOSITORY') in ('maredengb/coffered', 'maredengb/cofferdb')
+         and os.environ.get('GITHUB_REPOSITORY') == 'maredengb/cofferdb'
          and os.environ.get('GITHUB_SHA') == value['source_commit']
          and os.environ.get('GITHUB_RUN_ID', '').isdigit()
          and os.environ.get('GITHUB_RUN_ATTEMPT', '').isdigit(), 'Actual selected GitHub job identity differs')
@@ -182,7 +182,7 @@ def pipeline(value, modules, root, budget, recheck, *, retain_check=None):
                 b.identity(row); runner.row(row)
                 need(not runner.beneath(b.path(row['path']), out), 'External driver input overlaps mutable output')
         configuration = {'schema_version': 1, 'kind': 'mac15_dynamic_input_config_1',
-            'source_repository': 'maredengb/coffered', 'source_commit': value['source_commit'],
+            'source_repository': 'maredengb/cofferdb', 'source_commit': value['source_commit'],
             'helper_sha256': dict(plan.HELPERS), 'actions': dict(plan.ACTIONS),
             'python_providers': list(plan.PROVIDERS), 'selection_method': plan.METHOD,
             'native_closure_gate': 'independent-exact-closure-input-v1',

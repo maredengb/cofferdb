@@ -19,11 +19,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/6a9cf0a9003b1d59/data.coffer",
+        "redacted-historical-reference-004",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -31,7 +31,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/32b8ecccc68c40ee/result.json",
+        "redacted-historical-reference-003",
         "--require-baseline"
       ],
       "exit": 0,
@@ -51,7 +51,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "b28e253c313315a7e0bf983096a4c27059e3a404f6032b4d34c60e50c8cb386c",
       "journal": {
-        "path": "external-reference/ca72d8e8fb31c402/cofferdb-benchmark-execution-54920-1792035263966921000-0.jsonl",
+        "path": "redacted-historical-reference-792",
         "sha256": "a9804938bd2fef71f93a36aaef29800b5a3dabbbb9a6e101e0346db81abaffd2",
         "events": {
           "protocol": 1,
@@ -43846,7 +43846,7 @@
       "whole_process_peak_rss_bytes": 20594688,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/ca72d8e8fb31c402/cofferdb-benchmark-execution-54920-1792035263966921000-0.jsonl": "a9804938bd2fef71f93a36aaef29800b5a3dabbbb9a6e101e0346db81abaffd2"
+          "redacted-historical-reference-792": "a9804938bd2fef71f93a36aaef29800b5a3dabbbb9a6e101e0346db81abaffd2"
         },
         "raw_logs_sha256": {
           "stdout": "1d9e341582c1d147b7fcb7cd19803c4c4fb59ac6a0a8234c2c31a1a908b8887c",
@@ -93997,11 +93997,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/ad5a39e4f18ec39b/data.coffer",
+        "redacted-historical-reference-008",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -94009,7 +94009,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/a77d07eb52692074/result.json",
+        "redacted-historical-reference-007",
         "--require-baseline"
       ],
       "exit": 0,
@@ -94029,7 +94029,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "f114429155c5099af23717cf0c1542a8353b85c8a41b6e1e34680fed09e250d1",
       "journal": {
-        "path": "external-reference/7e17166abe32c007/cofferdb-benchmark-execution-55478-1792035267277949000-0.jsonl",
+        "path": "redacted-historical-reference-552",
         "sha256": "7730653c21b01dcb56da32d2f65192a6c2acb6e51cd17eb2cf2558dae7022fb2",
         "events": {
           "protocol": 1,
@@ -137824,7 +137824,7 @@
       "whole_process_peak_rss_bytes": 20709376,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/7e17166abe32c007/cofferdb-benchmark-execution-55478-1792035267277949000-0.jsonl": "7730653c21b01dcb56da32d2f65192a6c2acb6e51cd17eb2cf2558dae7022fb2"
+          "redacted-historical-reference-552": "7730653c21b01dcb56da32d2f65192a6c2acb6e51cd17eb2cf2558dae7022fb2"
         },
         "raw_logs_sha256": {
           "stdout": "0cb6688e017e74683816e05dda2eb3141a7305e19cc727bc055396d3598ecfc1",
@@ -187975,11 +187975,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/15ccfb11d26397a3/data.coffer",
+        "redacted-historical-reference-006",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -187987,7 +187987,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/abc0bc6f09afe029/result.json",
+        "redacted-historical-reference-005",
         "--require-baseline"
       ],
       "exit": 0,
@@ -188007,7 +188007,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "13bb9ea2375896b50aba511146fe8514e74a90223e4448ea738813570fcb3779",
       "journal": {
-        "path": "external-reference/b26d4a5bd3d5e9c4/cofferdb-benchmark-execution-56033-1792035270572930000-0.jsonl",
+        "path": "redacted-historical-reference-723",
         "sha256": "e271d707afe17d7e3088b5b1c65ea517fc234ceba74c73f288a9b60efc73b01e",
         "events": {
           "protocol": 1,
@@ -231802,7 +231802,7 @@
       "whole_process_peak_rss_bytes": 20463616,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/b26d4a5bd3d5e9c4/cofferdb-benchmark-execution-56033-1792035270572930000-0.jsonl": "e271d707afe17d7e3088b5b1c65ea517fc234ceba74c73f288a9b60efc73b01e"
+          "redacted-historical-reference-723": "e271d707afe17d7e3088b5b1c65ea517fc234ceba74c73f288a9b60efc73b01e"
         },
         "raw_logs_sha256": {
           "stdout": "76b87d310e2a14ca8638b378eb66c5070de7a6a5fa6d9c749aad343b0cb52d02",
@@ -281953,11 +281953,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/19dbabd7c2d3248d/data.coffer",
+        "redacted-historical-reference-012",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -281965,7 +281965,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/45cd7facd46db66c/result.json",
+        "redacted-historical-reference-011",
         "--require-baseline"
       ],
       "exit": 0,
@@ -281985,7 +281985,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "ac70e6e5f1a39df325a264d996ae8500fe7a2622538cf5339704fbee2095992b",
       "journal": {
-        "path": "external-reference/29a04c354443c021/cofferdb-benchmark-execution-56598-1792035274044949000-0.jsonl",
+        "path": "redacted-historical-reference-266",
         "sha256": "c7d96e8ce68db0ac41c709a30da0a422a6393c10e5e1c3c992363754ee192a7d",
         "events": {
           "protocol": 1,
@@ -325780,7 +325780,7 @@
       "whole_process_peak_rss_bytes": 22872064,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/29a04c354443c021/cofferdb-benchmark-execution-56598-1792035274044949000-0.jsonl": "c7d96e8ce68db0ac41c709a30da0a422a6393c10e5e1c3c992363754ee192a7d"
+          "redacted-historical-reference-266": "c7d96e8ce68db0ac41c709a30da0a422a6393c10e5e1c3c992363754ee192a7d"
         },
         "raw_logs_sha256": {
           "stdout": "be3962212afd72771cbf32d0ae57ba6ab78f49f0afb37b59f909eb6d48db84a4",
@@ -375931,11 +375931,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/8b447c85ec0b6ce6/data.coffer",
+        "redacted-historical-reference-014",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -375943,7 +375943,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/e58f0da7d673aa38/result.json",
+        "redacted-historical-reference-013",
         "--require-baseline"
       ],
       "exit": 0,
@@ -375963,7 +375963,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "0da0f91808570883cb43e6202148370f8ac5b58ca4b7cfa5735b061d8b68299a",
       "journal": {
-        "path": "external-reference/d4f2a4666d325059/cofferdb-benchmark-execution-57149-1792035277502224000-0.jsonl",
+        "path": "redacted-historical-reference-819",
         "sha256": "fa0e8919e949af0f0d2d2c817c22e8a421b4e857b6676d001505c8d4f692b78f",
         "events": {
           "protocol": 1,
@@ -419758,7 +419758,7 @@
       "whole_process_peak_rss_bytes": 21676032,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/d4f2a4666d325059/cofferdb-benchmark-execution-57149-1792035277502224000-0.jsonl": "fa0e8919e949af0f0d2d2c817c22e8a421b4e857b6676d001505c8d4f692b78f"
+          "redacted-historical-reference-819": "fa0e8919e949af0f0d2d2c817c22e8a421b4e857b6676d001505c8d4f692b78f"
         },
         "raw_logs_sha256": {
           "stdout": "5bbe69c8a517269188a40763ca305a54ba4a1c32b00253d69039dd8a8daf4a42",
@@ -469909,11 +469909,11 @@
       "planned_sqlite_samples": 288,
       "status": "passed",
       "command": [
-        "external-reference/01b01f74fcdaa61a/coffer",
+        "redacted-historical-reference-137",
         "benchmark",
-        "external-reference/9a670dca5e430ec3/data.coffer",
+        "redacted-historical-reference-010",
         "--dataset",
-        "external-reference/29211b05ff4a0623/public-quality-v1",
+        "redacted-historical-reference-262",
         "--collection",
         "benchmark",
         "--profile",
@@ -469921,7 +469921,7 @@
         "--durability",
         "commit",
         "--result-file",
-        "external-reference/477cc7a88a3f3e7d/result.json",
+        "redacted-historical-reference-009",
         "--require-baseline"
       ],
       "exit": 0,
@@ -469941,7 +469941,7 @@
       "supervision_limitations": "Deadlines are external observed journal durations plus reported search latency;20ms polling and host scheduling may delay observation/termination. Not a strict internal engine deadline.",
       "result_sha256": "1d3beb7b64ed4a2491dea5799ae62044a7f1773d5987b9481866ee0b13a401ad",
       "journal": {
-        "path": "external-reference/6738fc7fbe38a884/cofferdb-benchmark-execution-57709-1792035280851795000-0.jsonl",
+        "path": "redacted-historical-reference-478",
         "sha256": "2f64d9dda15a6184f60184e2f74969c59215b09a817e0e950cb15dac870c193f",
         "events": {
           "protocol": 1,
@@ -513736,7 +513736,7 @@
       "whole_process_peak_rss_bytes": 21086208,
       "sample_projection": {
         "raw_journals_sha256": {
-          "external-reference/6738fc7fbe38a884/cofferdb-benchmark-execution-57709-1792035280851795000-0.jsonl": "2f64d9dda15a6184f60184e2f74969c59215b09a817e0e950cb15dac870c193f"
+          "redacted-historical-reference-478": "2f64d9dda15a6184f60184e2f74969c59215b09a817e0e950cb15dac870c193f"
         },
         "raw_logs_sha256": {
           "stdout": "10973b8f7d468682f73c3ff2a73ec5bc2d2ff4ed218c37825e2ecea29f2c3c7d",

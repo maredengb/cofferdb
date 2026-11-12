@@ -24,7 +24,7 @@ jobs:
       - name: Check out the selected public source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: maredengb/coffered
+          repository: maredengb/cofferdb
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
           fetch-depth: 1

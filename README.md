@@ -4,7 +4,9 @@ A single-file, embedded Rust retrieval database for explainable local search and
 RAG applications. Use the Rust library in your application or the `coffer` CLI to
 import documents, search with keywords and externally supplied vectors, and
 inspect how each result was ranked. The experimental 0.1.1 sources also provide
-an in-process Python binding to the same engine.
+an in-process Python binding to the same engine. The Rust source crate does not
+include the Python binding source; use the complete matching source tree for
+Python source builds.
 
 For version 0.1.1, start with the
 [Rust/Python programming guides and reference index](docs/README.md). Install
@@ -12,11 +14,11 @@ Python from a matching wheel and verify its checksum. Consult the release
 record for artifact availability and the environments validated for that package.
 
 **Release status for 0.1.1:** Treat these sources and artifacts as **unreleased
-candidates** until the [matching published release record](https://github.com/maredengb/coffered/releases)
+candidates** until the [matching published release record](https://github.com/maredengb/cofferdb/releases)
 identifies their exact source revision and artifact checksums. A source checkout
 alone does not establish publication or validation.
 
-**Status: experimental.** Check the [releases page](https://github.com/maredengb/coffered/releases)
+**Status: experimental.** Check the [releases page](https://github.com/maredengb/cofferdb/releases)
 for published versions and downloadable artifacts. File-format compatibility across
 future releases and production durability are not guaranteed. Documented commit,
 recovery and integrity contracts still apply. Keep original inputs and export backups. No certified retrieval-quality
@@ -65,6 +67,88 @@ human-readable CLI output. Inspect the available commands and budget presets wit
 ./target/debug/coffer profile-help
 ```
 
+## Rust and Python quickstarts
+
+Each example creates a new `notes.coffer` file. Run them in separate fresh
+directories; neither example needs a model download or an external service.
+
+For Rust, use the published 0.1.0 crate with Rust 1.80 or later. In your
+application’s `Cargo.toml`, pin the dependency:
+
+```toml
+[dependencies]
+cofferdb = "=0.1.0"
+```
+
+The [Rust 0.1.0 guide](docs/rust-v0.1.0.md) describes the matching API.
+
+```rust
+use cofferdb::{
+    ChunkInput, CollectionConfig, Database, DatabaseConfig, DistanceMetric, DocumentInput,
+    JsonValue, VectorIndexConfig,
+};
+
+fn main() -> cofferdb::Result<()> {
+    let db = Database::create("notes.coffer", DatabaseConfig::default())?;
+    let notes = db.create_collection(CollectionConfig {
+        name: "notes".into(),
+        tokenizer: Default::default(),
+        embedding_dim: 2,
+        distance_metric: DistanceMetric::Cosine,
+        embedding_model: None,
+        vectors_normalized: false,
+        vector_index: VectorIndexConfig::Exact,
+    })?;
+    notes.insert_document(DocumentInput {
+        external_id: "field-notes".into(),
+        title: Some("Field notes".into()),
+        source_uri: None,
+        metadata: JsonValue::object(),
+        chunks: vec![ChunkInput {
+            chunk_external_id: "field-notes#1".into(),
+            ordinal: 0,
+            text: "Jade leaves grow near the river.".into(),
+            metadata: JsonValue::object(),
+            source_span: None,
+        }],
+    })?;
+    let found = notes.search().text("jade").top_k(1).execute()?;
+    let hit = found.results.first().expect("search returned no results");
+    println!("{}", notes.get_chunk(&hit.chunk_id)?.text);
+    drop(notes);
+    db.close()?;
+    Ok(())
+}
+```
+
+For Python, once a matching release wheel is available, install it as described
+in the [Python guide](docs/python-v0.1.1.md).
+
+```python
+from cofferdb import Database
+
+with Database.create("notes.coffer") as db:
+    notes = db.create_collection({
+        "name": "notes", "embedding_dim": 2, "distance_metric": "cosine",
+    })
+    notes.write_batch(
+        documents=[{"external_id": "field-notes", "title": "Field notes"}],
+        chunks=[{
+            "document_external_id": "field-notes",
+            "chunk_external_id": "field-notes#1",
+            "ordinal": 0,
+            "text": "Jade leaves grow near the river.",
+        }],
+    )
+    results = notes.search("jade", top_k=1)["results"]
+    if not results:
+        raise RuntimeError("search returned no results")
+    print(notes.get_chunk(results[0]["chunk_id"])["chunk"]["text"])
+```
+
+Both examples print `Jade leaves grow near the river.` for this input. They use
+text search and do not supply embeddings.
+
 ## Rust library and examples
 
 The library exposes `Database`, `CollectionConfig`, `SearchBuilder` and related
@@ -76,13 +160,16 @@ The [0.1.0 supplemental Rust guide](docs/rust-v0.1.0.md) describes the original
 published API. The [0.1.1 Rust guide](docs/rust-v0.1.1.md) also covers complete
 chunk/document reads from one view. The [Python guide](docs/python-v0.1.1.md)
 includes binary/offline installation, source-backed retrieval, input and error
-handling, thread/signal behavior and compatibility limits. Generated rustdoc and
-installed-package Sphinx references are delivered in a matching offline archive;
-their [source and build instructions](docs/reference.md) are included here.
+handling, thread/signal behavior and compatibility limits. The release is intended
+to include generated rustdoc and installed-package Sphinx references in a matching
+offline archive. Check the matching release record for availability; [source and
+build instructions](docs/reference.md) are included here.
 
-Run these from the same directory and shell as the quickstart:
+To run these examples, use a checkout of this source tree and start from its
+repository root. Create a fresh temporary directory for the example databases:
 
 ```sh
+coffer_demo_dir="$(mktemp -d)"
 cargo run --locked --example embedded
 cargo run --locked --example explain_troubleshooting -- "$coffer_demo_dir/explain.coffer"
 cargo run --locked --example real_corpus_demo -- "$coffer_demo_dir/real-corpus.coffer"

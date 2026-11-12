@@ -4,8 +4,8 @@
     {
       "artifact": "protocol-derived.json",
       "original_sha256": "40120dc0b3f3f9b421338be581693e8bee00f30520a74ecb72c84368bdf9c396",
-      "public_sha256": "a6e1c0859c4d6e6ad4b5ab6c4250197bd48e20daa5f9465c7980504ef41f8de3",
-      "bytes": 2419,
+      "public_sha256": "06bccc4c97cd7347bd108f934e20aad3d5ee6f7d3c08567f771f9a8728fec818",
+      "bytes": 2262,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -13,22 +13,20 @@
     {
       "artifact": "report-derived.json",
       "original_sha256": "4b5676d1fff953ecd3377ef97e13845cf5bd1ab516180a64534129b68e54c9bb",
-      "public_sha256": "02bddd3791c973af13a43264d20b932fe734b0e0db8bdf89dbeb43f0c3c231e5",
-      "bytes": 441,
+      "public_sha256": "89e5b5f7bc072f01016fd1702cae0e5210c88d5adc1865a9720e4ab04186ef15",
+      "bytes": 418,
       "transformation": {
         "kind": "Only declared private references replaced; all numbers and other fields retained, including stale running/started/not_run states.",
         "replaced_references": [
           {
             "json_pointer": "/stages/1/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6dec446446abbde3ab4fb80bb169c10cc09c203eb3854bbb38b5367ece67d770",
-            "replacement": "external-reference/6dec446446abbde3/worker"
+            "replacement": "redacted-historical-reference-497"
           },
           {
             "json_pointer": "/stages/1/command/5",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "2ac69203b6eaf1c88faa0b7ef2261db9471c9a03927cdb8bb3caa641c45c144d",
-            "replacement": "external-reference/2ac69203b6eaf1c8/data.coffer"
+            "replacement": "redacted-historical-reference-269"
           }
         ]
       }

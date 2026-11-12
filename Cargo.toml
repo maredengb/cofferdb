@@ -9,7 +9,7 @@ readme = "README.md"
 exclude = ["benchmarks/evaluation-v1/**"]
 keywords = ["database", "retrieval", "bm25", "rag", "embedded"]
 categories = ["database-implementations"]
-repository = "https://github.com/maredengb/coffered"
+repository = "https://github.com/maredengb/cofferdb"
 
 [features]
 # Native integration tests only; never enabled by ordinary product builds.

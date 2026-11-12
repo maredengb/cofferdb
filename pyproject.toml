@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/maredengb/coffered"
+Source = "https://github.com/maredengb/cofferdb"
 
 [tool.maturin]
 manifest-path = "bindings/python/Cargo.toml"

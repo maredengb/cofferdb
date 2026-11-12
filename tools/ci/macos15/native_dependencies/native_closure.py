@@ -16,8 +16,10 @@ import struct
 import time
 import types
 
-COLLECTOR_SHA = 'beef90c78e09b1ef059f6bec8712d11fa362b4fe8508f135e7f6e100f9c27006'
-PLAN_SHA = 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3'
+COLLECTOR_SHA = 'f56a756a617a47363d04514f759ee7f76977cb6a0494430e43c854ab322c7ca4'
+PLAN_SHA = '9f03114e40dfc827046b02adb6fbe3ce7258a230a7f46d32658bd86ce7e44f78'
+FRAMEWORK_VERSIONS = Path('/Library/Frameworks/Python.framework/Versions')
+FRAMEWORK_ALIAS_OWNER = (0, 80)
 SYSTEM_ROOTS = ('/usr/lib', '/System/Library/Frameworks', '/System/Library/PrivateFrameworks')
 MACH_MAGICS = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf')
 LOADS = {0xc: 'required', 0x80000018: 'weak', 0x8000001f: 'reexport',
@@ -186,9 +188,38 @@ def inspect_runtime(runtime, index, maximum_os, read_file, deadline, *, protecti
     stdlib = absolute(runtime['stdlib'])
     rows = [row for row in index if absolute(row['path']).is_relative_to(stdlib)]
     need(sha(canonical(rows)) == runtime['stdlib_index_sha256'], 'Runtime index digest differs')
-    original = {row['path']: row for row in rows}
-    need(len(original) == len(rows), 'Duplicate readonly index path')
-    cache, aliases, edges, states = {}, {}, [], set()
+    need(len({row['path'] for row in rows}) == len(rows), 'Duplicate readonly index path')
+    original, fixed_aliases, targets = {}, {}, {}
+    for row in rows:
+        if row.get('kind') != 'framework_install_alias':
+            need(set(row) == {'path', 'bytes', 'mode', 'sha256'}, 'Ordinary index row shape')
+            original[row['path']] = row
+            continue
+        version = f"3.{runtime['minor']}"
+        root = FRAMEWORK_VERSIONS / version
+        allowed = {str(root / 'lib' / ('python' + version) / f'config-{version}-darwin' / ('libpython' + version + '.' + suffix)) for suffix in ('a', 'dylib')}
+        need(runtime['minor'] in (12, 13, 14) and stdlib == root / 'lib' / ('python' + version)
+             and row['path'] in allowed and set(row) == {'path', 'kind', 'bytes', 'mode', 'sha256', 'alias'},
+             'Fixed Framework alias index required')
+        alias = row['alias']
+        need(type(alias) is dict and set(alias) == {'target', 'text', 'identity', 'target_identity'}
+             and alias['target'] == str(root / 'Python') and alias['text'] == '../../../Python', 'Fixed Framework alias target required')
+        link, target = alias['identity'], alias['target_identity']
+        need(type(link) is list and type(target) is list and len(link) == len(target) == 9
+             and all(type(v) is int for v in link + target), 'Framework alias metadata required')
+        need(stat.S_ISLNK(link[2]) and link[3:7] == [*FRAMEWORK_ALIAS_OWNER, 1, 15]
+             and stat.S_ISREG(target[2]) and target[5] == 1 and target[6] == row['bytes']
+             and stat.S_IMODE(target[2]) == row['mode'] and 0 <= row['bytes'] <= 32 * 2**20,
+             'Framework alias metadata differs')
+        checksum(row['sha256'])
+        target_path = alias['target']
+        if target_path in targets:
+            old = targets[target_path]
+            need(all(old[key] == row[key] for key in ('sha256', 'bytes', 'mode'))
+                 and old['alias']['target_identity'] == target, 'Framework aliases disagree')
+        targets[target_path] = row
+        fixed_aliases[row['path']] = target_path
+    cache, aliases, edges, states = {}, dict(fixed_aliases), [], set()
     read_bytes = 0
 
     def load(value):
@@ -208,6 +239,12 @@ def inspect_runtime(runtime, index, maximum_os, read_file, deadline, *, protecti
         digest = sha(data)
         if value == base:
             need(digest == runtime['binary']['sha256'], 'Interpreter identity changed')
+        if value in targets:
+            expected = targets[value]
+            identity = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+            need(digest == expected['sha256'] and len(data) == expected['bytes']
+                 and stat.S_IMODE(info.st_mode) == expected['mode']
+                 and identity == expected['alias']['target_identity'], 'Indexed Framework target changed')
         if value in original:
             need(digest == original[value]['sha256'] and len(data) == original[value]['bytes']
                  and stat.S_IMODE(info.st_mode) == original[value]['mode'], 'Indexed native file changed')
@@ -218,7 +255,7 @@ def inspect_runtime(runtime, index, maximum_os, read_file, deadline, *, protecti
 
     root_image = load(base)
     root_rpaths = tuple(expanded(value, base, base) for value in root_image['image']['rpaths'])
-    seeds = [base] + [row['path'] for row in rows if row['path'].endswith(('.so', '.dylib'))]
+    seeds = [base, *targets] + [row['path'] for row in rows if 'kind' not in row and row['path'].endswith(('.so', '.dylib'))]
     queue = [(seed, root_rpaths, 0) for seed in seeds]
     while queue:
         value, inherited, depth = queue.pop(0)

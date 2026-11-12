@@ -28,9 +28,9 @@ parent. The entry creates separate private data/work/evidence/venv/gate roots.
 
 The job environment must identify the selected repository ID, source SHA and
 actual run/attempt. These environment observations are not proof of a clean
-checkout. The unchanged `prepare_source.py` command independently enforces its
-origin, clean-HEAD and source-commit checks before the build. The retained
-`coffered` repository spelling is compatible with that original origin contract.
+checkout. The `prepare_source.py` command independently enforces its origin, clean-HEAD
+and source-commit checks before the build. Current checkout, configuration,
+package metadata, and output validation use `maredengb/cofferdb`.
 
 The entry pins the adopted component bytes and original helper package. The
 external driver contract binds its own installer, assertion driver, contexts

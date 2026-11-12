@@ -10,9 +10,9 @@ import sys
 import time
 import types
 
-WORKFLOW_SHA = 'cdbdd7d320da0985b5e8c205687e9b3705d19f125fbece510e58e9da670a0872'
+WORKFLOW_SHA = '57a341fff98e9da1f8ea60f2f3eb5c86f818673fa271abaae677e69a6c9cdb67'
 PREPARER_SHA = '99a394b4c5c247800f525aa716091872fd82ac3c2bb93168c3c92374f6419daf'
-INSTALLER_SHA = 'bb2899ac427808253bb5c201ae3fbb06f95bee74d14b330569e41ec989b00d8a'
+INSTALLER_SHA = 'e6a7faa56557df3fd1e0a2dfc335807a2ffe17695b5b3f7ea560e0a023bf832a'
 BUSINESS_SHA = '0db442b087a9a1b69dab32263f60ddc799c7a7ec5b3a3735fd73c0b4e6483152'
 PIP = {'name': 'pip-25.3-py3-none-any.whl', 'bytes': 1778622,
        'sha256': '9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd',
@@ -60,7 +60,7 @@ def public_identity(value, environment):
     need(re.fullmatch('[0-9a-f]{40}', value['source_commit']) and value['source_commit'] != '0' * 40,
          'Exact selected public commit')
     need(environment.get('GITHUB_REPOSITORY_ID') == '1422246026'
-         and environment.get('GITHUB_REPOSITORY') in ('maredengb/coffered', 'maredengb/cofferdb')
+         and environment.get('GITHUB_REPOSITORY') == 'maredengb/cofferdb'
          and environment.get('GITHUB_SHA') == value['source_commit']
          and re.fullmatch('[1-9][0-9]*', environment.get('GITHUB_RUN_ID', ''))
          and environment.get('GITHUB_RUN_ATTEMPT') == '1', 'Selected public job or first attempt differs')
@@ -187,8 +187,8 @@ def source_gate(captures, value, environment, label, git_tool):
                                 environment, 20).decode('utf-8').strip() for name, argv in queries}
     need(result['root'] == checkout and result['head'] == value['source_commit']
          and re.fullmatch('[0-9a-f]{40}', result['tree'])
-         and result['origin'] in ('https://github.com/maredengb/coffered',
-                                  'https://github.com/maredengb/coffered.git')
+         and result['origin'] in ('https://github.com/maredengb/cofferdb',
+                                  'https://github.com/maredengb/cofferdb.git')
          and result['status'] == '', 'Fixed clean public checkout required')
     cargo_config_gate(checkout)
     return result

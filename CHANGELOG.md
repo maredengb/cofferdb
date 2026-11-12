@@ -1,7 +1,7 @@
 # Changelog
 
 Entries describe version contents. The
-[releases page](https://github.com/maredengb/coffered/releases) records published
+[releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
 ## 0.1.1

@@ -4,8 +4,8 @@
     {
       "artifact": "mac/protocol-derived.json",
       "original_sha256": "8eb5248d66d198cce7349ff315777ddac98345a33373c064429a5b5e3862b316",
-      "public_sha256": "44c8f4e9558f6bb5b23a63aaa08a951fa85bde8d0896146e6b810413a4263cc3",
-      "bytes": 3247,
+      "public_sha256": "125ab817dce55110c18f7386d043faf062e7ddc6e85148650c592a8c63c4d704",
+      "bytes": 3180,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -13,82 +13,70 @@
     {
       "artifact": "mac/report-derived.json",
       "original_sha256": "8896e1ab5fbaaa99113ac670f4d69b4248ad547a77717407c9c3633086057b2a",
-      "public_sha256": "14088b58e9092347bf1db84a8b2d9d46307cb7d36f099fb0264b5454f83db056",
-      "bytes": 29858,
+      "public_sha256": "452167607070d3cfe47f5d7f2b1369a25b34f07baaca7a02101247e0ba32bd8a",
+      "bytes": 29630,
       "transformation": {
         "kind": "Derived metadata only; exact decimal numbers and all nonpath values retained.",
         "replaced_references": [
           {
             "json_pointer": "/trials/0/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/0/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           },
           {
             "json_pointer": "/trials/1/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/1/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           },
           {
             "json_pointer": "/trials/2/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/2/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           },
           {
             "json_pointer": "/trials/3/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/3/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           },
           {
             "json_pointer": "/trials/4/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/4/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           },
           {
             "json_pointer": "/trials/5/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "d5fbb743ce0f4581463418b2c25c7bb36ff65ae362bad2d1ccf8570e65123196",
-            "replacement": "external-reference/d5fbb743ce0f4581/scale-current-helper"
+            "replacement": "redacted-historical-reference-823"
           },
           {
             "json_pointer": "/trials/5/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7872dfb40fa70cf0439d3be85a544f1efed69201b255a65fbfcd34464b021739",
-            "replacement": "external-reference/7872dfb40fa70cf0/fresh.coffer"
+            "replacement": "redacted-historical-reference-542"
           }
         ],
         "limitation": "External-reference aliases are archive locators, not runnable installation paths."
@@ -181,8 +169,8 @@
     {
       "artifact": "linux/protocol-derived.json",
       "original_sha256": "fc0a1b3bcba698c4204a78bec55c2c72267a785c7968428e34abe70b13d4e10f",
-      "public_sha256": "f26fe5a1b745209f2992a09cb75288880edbbcd09da1b5a55b551a5d5d43d208",
-      "bytes": 4790,
+      "public_sha256": "59a452225db78e90171b747a6ed18dc1b8fbd39d46db5a8c06f610534e0a977a",
+      "bytes": 4680,
       "transformation": {
         "kind": "Presentation metadata revised; quantitative observations and source payloads unchanged. See publication notes."
       }
@@ -190,82 +178,70 @@
     {
       "artifact": "linux/report-derived.json",
       "original_sha256": "b98b9b9d549bf6c9253770d8bc62a645b37fe0082569e9211a4a8d04e8cbc4a6",
-      "public_sha256": "32540bd150558b51672bd26871b4d9f48007ebfcab1f77a24fed3fbb0edb8fd6",
-      "bytes": 36329,
+      "public_sha256": "c53a9672f2bd323dc278fd2fb2523da1e4b7f1dcb44023b561991ab1fdd0bdf8",
+      "bytes": 36149,
       "transformation": {
         "kind": "Derived metadata only; exact decimal numbers and all nonpath values retained.",
         "replaced_references": [
           {
             "json_pointer": "/trials/0/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/0/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           },
           {
             "json_pointer": "/trials/1/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/1/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           },
           {
             "json_pointer": "/trials/2/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/2/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           },
           {
             "json_pointer": "/trials/3/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/3/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           },
           {
             "json_pointer": "/trials/4/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/4/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           },
           {
             "json_pointer": "/trials/5/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ad5e05b9315f59f8421d3f9da5d4776f30c441ca273061f3db4b0a273aed66be",
-            "replacement": "external-reference/ad5e05b9315f59f8/scale-helper"
+            "replacement": "redacted-historical-reference-707"
           },
           {
             "json_pointer": "/trials/5/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "576a4b14632bd86aae4100768ddafcf0f956edc610260c993b9ac88fe6f71256",
-            "replacement": "external-reference/576a4b14632bd86a/input.coffer"
+            "replacement": "redacted-historical-reference-422"
           }
         ],
         "limitation": "External-reference aliases are archive locators, not runnable installation paths."

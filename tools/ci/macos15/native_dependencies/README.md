@@ -131,3 +131,5 @@ required/weak dependencies, aliases, whole-index additions, byte/mode/tool
 drift, shortened graph rejection, and inert defaults. Process spawning and
 network connections are forbidden by tripwires. These controls do not execute
 native bytes or substitute for a real macOS 15 build/install/runtime run.
+
+Framework installation aliases in the stdlib index map only to the fixed same-version Python core. The native graph reads and caches that canonical target once, verifies its indexed identity and digest, retains the indexed alias mappings, and includes the target in the runtime file set. Fresh validation rebuilds the stdlib index and graph; an alias or target change stops validation.

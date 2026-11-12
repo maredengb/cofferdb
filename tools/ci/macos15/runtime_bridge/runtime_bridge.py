@@ -15,12 +15,12 @@ import zipfile
 
 
 HELPERS = {
-    'runner.py': '2e6972ccfc45fb41c4145ff60a6933a767a4b18862dfcde5952fff95d5edc815',
+    'runner.py': '295bffcbec564df6d3c743d8cf47a5dcd8a1061dd7650c9417a6233cb4193858',
     'probe.py': 'c0cdbf1ce7271f7585bba59d58e51a2f22fc5e9c2a49eeb82d87ab2725b90c10',
-    'workflow_build.py': 'ee1bdb098e292998179a1eb50cb721a9d3af16420c9d6ca4454f305d9cac1492',
-    'venv_prepare.py': 'b6fa5a197d1e22d4c6e270b8243e0241444d0d6012740dd88b2b6961ae20e3c1',
+    'workflow_build.py': '987d34bef453ba3d04f0e51f901521757e0f022087e68186b7bfb37e85df17cb',
+    'venv_prepare.py': 'd367e7db56946a337016465e32113413cc853c063fe7d99a85f9abd189c1ef61',
     'q_process_supervisor.py': '39d6c8842e1a9c972fd911feb4e3c483d1eb6947fc7291b65ac6f8a3bc778e51',
-    'dynamic_inputs/dynamic_plan.py': 'd98c070430f7154565c9389eabfe874e5081932119e16c5c9cc7ee61e96e70a3',
+    'dynamic_inputs/dynamic_plan.py': '9f03114e40dfc827046b02adb6fbe3ce7258a230a7f46d32658bd86ce7e44f78',
 }
 DOCUMENTS = ('config', 'snapshot', 'layout', 'driver_contract', 'native_closure',
              'build_result', 'build_manifest', 'empty_venvs_result')
@@ -283,7 +283,7 @@ def instantiate(bundle, modules):
     metadata = manifest['source']
     need(type(metadata) is dict and metadata.get('sdk_version') == '0.1.1'
          and metadata.get('engine_version') == '0.1.1'
-         and metadata.get('repository') == 'https://github.com/maredengb/coffered',
+         and metadata.get('repository') == 'https://github.com/maredengb/cofferdb',
          'Source SDK/engine/repository identity differs')
     source = metadata.get('source')
     need(type(source) is dict and set(source) == {'kind', 'commit', 'tree'}

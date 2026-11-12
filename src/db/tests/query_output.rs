@@ -699,3 +699,68 @@ fn invalid_top_k_is_rejected_before_candidate_or_index_work() {
     drop((handle, db));
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn vector_only_candidates_fail_closed_when_score_completion_cannot_reserve() {
+    let path = large_query_cache_fixture("score-completion-reserve-failure");
+    let original = fs::read(&path).unwrap();
+    let db = Database::open_read_only(&path).unwrap();
+    let handle = db.collection("first").unwrap();
+    let context = db.json_context();
+    let text = "absent_from_all_fixture_chunks";
+    let text_only = handle.search().text(text).top_k(1).execute().unwrap();
+    assert!(text_only.results.is_empty());
+    drop(text_only);
+    let query = || {
+        handle
+            .search()
+            .text(text)
+            .vector(vec![1.0, 0.0])
+            .resource_profile(ResourceProfile::Constrained)
+            .top_k(1)
+            .execute()
+    };
+    let expected = {
+        let result = query().unwrap();
+        assert!(!result.results.is_empty());
+        assert!(result.query_context.execution_stats.fusion_candidate_count > 0);
+        result.to_json()
+    };
+    let (_, _, cached) = cache_for_preparation(&db);
+    assert!(cached > 0);
+    let baseline = context.available_workspace_bytes();
+    let held = Arc::new(Mutex::new(None));
+    let hook_held = Arc::clone(&held);
+    let hook_context = context.clone();
+    let hook_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_called_clone = Arc::clone(&hook_called);
+    db.lock().unwrap().query_output_hook = Some((
+        QueryOutputStage::Fusion,
+        Box::new(move || {
+            hook_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            let available = hook_context.available_workspace_bytes();
+            let mut blocker = hook_context.workspace_reservation();
+            blocker
+                .grow_to(available, available, "operation_scratch")
+                .unwrap();
+            assert_eq!(hook_context.available_workspace_bytes(), 0);
+            *hook_held.lock().unwrap() = Some(blocker);
+        }),
+    ));
+    let error = query().unwrap_err();
+    assert!(hook_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+    assert_eq!(
+        error_detail_value(&error, "operation"),
+        Some("operation_scratch")
+    );
+    assert!(held.lock().unwrap().is_some());
+    assert_eq!(db.temporary_work.used(), 0);
+    drop(held.lock().unwrap().take());
+    assert_eq!(context.available_workspace_bytes(), baseline);
+    assert_eq!(query().unwrap().to_json(), expected);
+    assert_eq!(context.available_workspace_bytes(), baseline);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    drop((handle, db));
+    fs::remove_file(path).unwrap();
+}

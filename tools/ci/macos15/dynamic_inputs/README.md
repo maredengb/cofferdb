@@ -6,9 +6,9 @@ The companion files are `dynamic_collect.py`, `dynamic_plan.py`, and `test_dynam
 
 ## Configuration and inputs
 
-A canonical JSON configuration has exactly these fields: `schema_version` (integer 1), `kind` (`mac15_dynamic_input_config_1`), `source_repository` (canonical `maredengb/cofferdb` or its registered legacy alias `maredengb/coffered`), fixed `source_commit` (40 lowercase hexadecimal characters), `helper_sha256`, `actions`, `python_providers`, `selection_method`, `native_closure_gate`, `driver_contract_sha256`, `candidate_manifest_sha256`, and `native_closure_validator_sha256`.
+A canonical JSON configuration has exactly these fields: `schema_version` (integer 1), `kind` (`mac15_dynamic_input_config_1`), `source_repository` (canonical `maredengb/cofferdb`), fixed `source_commit` (40 lowercase hexadecimal characters), `helper_sha256`, `actions`, `python_providers`, `selection_method`, `native_closure_gate`, `driver_contract_sha256`, `candidate_manifest_sha256`, and `native_closure_validator_sha256`.
 
-These two repository names refer to the same repository; actual checkout evidence must independently bind repository ID 1422246026 and the exact source commit. No other repository is accepted. This configuration compatibility does not change the existing prepare_source.py origin check or its clean-HEAD/source-commit checks; a workflow may retain repository=maredengb/coffered to match that existing origin contract.
+Current configuration and checkout evidence use `maredengb/cofferdb`, repository ID 1422246026, and the exact source commit. Package metadata and checkout origin must agree. Recorded legacy configurations retain their original bytes and are not inputs to a new canonical-source run. The clean-HEAD and source-commit checks remain required.
 
 The fixed helper digests and action commits are declared in `dynamic_plan.py`. The five existing helpers are runner.py, probe.py, workflow_build.py, venv_prepare.py, and q_process_supervisor.py. This extraction does not change them. Checkout and upload-artifact action pins describe workflow dependencies; this code never invokes either action. A manifest verifies these four companion files. Its digest identifies technical bytes; it grants no execution capability.
 
@@ -39,3 +39,5 @@ This is an input-capture and initial-plan component, not a complete workflow. A 
 Preserve the existing Mac15 same-profile requirements: compiler execution and reads and network access must be rejected in the actual sandbox used by the runtime driver. A synthetic plan, directory hash or successful JSON parse does not establish these capabilities. The intended platform matrix is unchanged; this tool does not add a private build prerequisite or claim platform acceptance.
 
 The local test file uses miniature filesystem fixtures and process/network tripwires. Its synthetic closure and driver data are not observed runner evidence. No platform collection or SDK action is part of these tests.
+
+The stdlib index records the two ordinary-ABI Framework installation aliases separately from regular files. Only matching CPython 3.12, 3.13, or 3.14 Framework roots, the corresponding config-directory names, and the exact ../../../Python target are accepted. Link metadata and the protected target digest are bound into the index and checked again before use. Other symlinks remain rejected; ordinary input and evidence readers do not follow links.

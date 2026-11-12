@@ -17,8 +17,10 @@ them. Never auto-load an extension named by imported data.
 ## Python binding and documentation
 
 The separate `bindings/python` crate selects PyO3 0.27.2 and its locked Cargo
-dependency graph. Its [source license inventory](bindings/python/licenses/inventory.json)
-identifies the binding lock and retains upstream notice hashes. The wheel
+dependency graph. Its source license inventory at
+`bindings/python/licenses/inventory.json` in the complete source tree identifies
+the binding lock and retains upstream notice hashes. The Rust source crate does
+not include that inventory. The wheel
 statically includes the engine and binding; it declares no third-party Python
 runtime requirements. Exact platform/toolchain binary notices remain part of
 artifact-specific review.

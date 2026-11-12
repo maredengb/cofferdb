@@ -63,12 +63,12 @@ class Tests(unittest.TestCase):
                     'inputs': [], 'no_detach_reviewed': True} for minor in (12, 13, 14)],
                   'network_probe': {'address': '1.1.1.1', 'port': 443}, 'command_seconds': 120}
         config = {'schema_version': 1, 'kind': 'mac15_dynamic_input_config_1',
-                  'source_repository': 'maredengb/coffered', 'source_commit': '1' * 40,
+                  'source_repository': 'maredengb/cofferdb', 'source_commit': '1' * 40,
                   'helper_sha256': self.d.HELPERS, 'actions': self.d.ACTIONS,
                   'python_providers': self.d.PROVIDERS, 'selection_method': self.d.METHOD,
                   'native_closure_gate': 'independent-exact-closure-input-v1',
                   'driver_contract_sha256': self.d.sha(self.d.raw(driver)),
-                  'candidate_manifest_sha256': '095dae5a01eb58086b076cda14644e89344f8f255d5c2e9189b6b9c50f10933e',
+                  'candidate_manifest_sha256': '5bf396c0711b29f859154c87153476a7ab9812887ed9874363e8963721113c59',
                   'native_closure_validator_sha256': '9' * 64}
         runtimes = []
         for minor in (12, 13, 14):
@@ -123,7 +123,7 @@ class Tests(unittest.TestCase):
                        'records': [receipt(argv, empty['evidence']) for argv in self.modules['venv_prepare.py'].commands(empty)],
                        'bindings': []}
         metadata = {'sdk_version': '0.1.1', 'engine_version': '0.1.1',
-                    'repository': 'https://github.com/maredengb/coffered',
+                    'repository': 'https://github.com/maredengb/cofferdb',
                     'source_input_sha256': 'd' * 64,
                     'source': {'kind': 'git_checkout', 'commit': '1' * 40, 'tree': '2' * 40}}
         self.write(Path(build['work']) / 'source/bindings/python/python/cofferdb/_source.json', m.canonical(metadata))

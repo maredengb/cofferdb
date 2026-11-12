@@ -16,7 +16,7 @@ def load(name):
     m=importlib.util.module_from_spec(s);s.loader.exec_module(m);return m
 m=load('dynamic_plan');c=load('dynamic_collect')
 def config():
-    return {'schema_version':1,'kind':'mac15_dynamic_input_config_1','source_repository':'maredengb/coffered','source_commit':'1'*40,
+    return {'schema_version':1,'kind':'mac15_dynamic_input_config_1','source_repository':'maredengb/cofferdb','source_commit':'1'*40,
       'helper_sha256':dict(m.HELPERS),'actions':dict(m.ACTIONS),'python_providers':list(m.PROVIDERS),'selection_method':m.METHOD,
       'native_closure_gate':'independent-exact-closure-input-v1','driver_contract_sha256':None,
       'candidate_manifest_sha256':'f'*64,'native_closure_validator_sha256':None}
@@ -49,10 +49,10 @@ class Tests(unittest.TestCase):
         p=config();p['unexpected']={}
         with self.assertRaises(m.Hold):m.configuration(p)
     def test_public_source_matches_fixed_repository(self):
-        for alias in ['maredengb/cofferdb','maredengb/coffered']:
-            p=config();p['source_repository']=alias;self.assertIs(m.configuration(p),p)
-        p=config();p['source_repository']='other/cofferdb'
-        with self.assertRaises(m.Hold):m.configuration(p)
+        p=config();self.assertIs(m.configuration(p),p)
+        for other in ['maredengb/coffered','other/cofferdb']:
+            p=config();p['source_repository']=other
+            with self.assertRaises(m.Hold):m.configuration(p)
     def test_missing_driver_and_native_never_sdk(self):
         p=config();result=m.derive(p,snapshot(p),layout())
         self.assertEqual(result['status'],'INPUT_MISSING');self.assertFalse(result['sdk_executed']);self.assertEqual(result['plans'],{})
@@ -99,6 +99,67 @@ class Tests(unittest.TestCase):
         rows=c.index_tree(root,c.time.monotonic()+5);self.assertEqual(len(rows),1);self.assertEqual(rows[0]['sha256'],m.sha(b'pass\n'))
         (root/'escape').symlink_to(self.root/'outside')
         with self.assertRaises(ValueError):c.index_tree(root,c.time.monotonic()+5)
+    def framework_stdlib_fixture(self, minor=12):
+        versions = self.root / 'Framework/Versions'
+        base = versions / f'3.{minor}'
+        root = base / 'lib' / f'python3.{minor}'
+        config = root / f'config-3.{minor}-darwin'
+        config.mkdir(parents=True)
+        target = base / 'Python'; target.write_bytes(b'fixture native bytes'); target.chmod(0o755)
+        for suffix in ('a', 'dylib'):
+            (config / f'libpython3.{minor}.{suffix}').symlink_to('../../../Python')
+        return versions, root, config, target
+    def framework_index(self, versions, root):
+        def protection(path, info, **kwargs):
+            if not c.stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o002:
+                raise ValueError('fixture protected native target')
+        with patch.object(c, 'FRAMEWORK_VERSIONS', versions), patch.object(c, 'FRAMEWORK_ALIAS_OWNER', (root.stat().st_uid, root.stat().st_gid)), patch.object(c, 'native_protection', side_effect=protection):
+            return c.index_tree(root, c.time.monotonic() + 5)
+    def test_exact_framework_aliases_and_target_are_indexed_and_fresh(self):
+        for minor in (12, 13, 14):
+            versions, root, config, target = self.framework_stdlib_fixture(minor)
+            target.chmod(0o775)
+            rows = self.framework_index(versions, root)
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row['kind'] == 'framework_install_alias' and row['alias']['target'] == str(target) for row in rows))
+            self.assertEqual(rows, self.framework_index(versions, root))
+            target.write_bytes(b'changed native bytes')
+            self.assertNotEqual(rows, self.framework_index(versions, root))
+    def test_framework_unknown_alias_and_wrong_target_rejected(self):
+        versions, root, config, target = self.framework_stdlib_fixture()
+        alias = config / 'libpython3.12.a'
+        alias.unlink(); alias.symlink_to('../../../Other')
+        with self.assertRaises(ValueError): self.framework_index(versions, root)
+        alias.unlink(); alias.symlink_to('../../../Python')
+        (config / 'unknown.dylib').symlink_to('../../../Python')
+        with self.assertRaises(ValueError): self.framework_index(versions, root)
+    def test_framework_target_symlink_hardlink_and_writable_rejected(self):
+        versions, root, config, target = self.framework_stdlib_fixture()
+        target.chmod(0o777)
+        with self.assertRaises(ValueError): self.framework_index(versions, root)
+        target.chmod(0o755); hard = target.parent / 'hard'; c.os.link(target, hard)
+        with self.assertRaises(ValueError): self.framework_index(versions, root)
+        hard.unlink(); target.unlink(); target.symlink_to('Other')
+        with self.assertRaises((ValueError, OSError)): self.framework_index(versions, root)
+    def test_framework_alias_outside_fixed_root_and_cross_version_rejected(self):
+        versions, root, config, target = self.framework_stdlib_fixture()
+        with patch.object(c, 'FRAMEWORK_VERSIONS', self.root / 'elsewhere'):
+            with self.assertRaises(ValueError): c.index_tree(root, c.time.monotonic() + 5)
+        alias = config / 'libpython3.12.a'; alias.unlink(); alias.symlink_to('../../../Python')
+        alias.rename(config / 'libpython3.13.a')
+        with self.assertRaises(ValueError): self.framework_index(versions, root)
+    def test_framework_alias_replacement_during_target_read_rejected(self):
+        versions, root, config, target = self.framework_stdlib_fixture()
+        original = c.os.read
+        def changed(fd, count):
+            value = original(fd, count)
+            if value and not changed.done:
+                changed.done = True
+                alias = config / 'libpython3.12.a'; alias.unlink(); alias.symlink_to('../../../Other')
+            return value
+        changed.done = False
+        with patch.object(c.os, 'read', side_effect=changed):
+            with self.assertRaises(ValueError): self.framework_index(versions, root)
     def provider_fixture(self):
         cache=self.root/'hostedtoolcache/Python'
         framework=self.root/'Python.framework/Versions'

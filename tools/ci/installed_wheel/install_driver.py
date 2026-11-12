@@ -21,7 +21,7 @@ import time
 import types
 import zipfile
 
-BRIDGE_SHA = 'e4a4978671957b18dc92fbd1cd8ea1d928ff46db2b88c36062d8b80f231fc4c4'
+BRIDGE_SHA = 'efc057aeaf8f0f4e74886928fa8a91ce779dc7c16412d8a155e3a4c3996ddf10'
 MAX_FILE = 128 * 1024 ** 2
 
 

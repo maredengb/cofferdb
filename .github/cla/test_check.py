@@ -19,7 +19,8 @@ import urllib.parse
 SPEC = importlib.util.spec_from_file_location("cla_check", Path(__file__).with_name("check.py"))
 check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check)
-REPO = "maredengb/coffered"
+REPO = "maredengb/cofferdb"
+SIGNED_REPO = "maredengb/coffered"
 PREFIX = "/repos/" + REPO
 REPOSITORY_ID = 1422246026
 OWNER_ID = 167590852
@@ -37,16 +38,16 @@ DOCUMENTS = {"CLA.md": b"Synthetic agreement bytes\n", "CLA-PRIVACY.md": b"Synth
 
 def config():
     return {
-        "schema_version": 1, "enabled": True, "repository": REPO,
+        "schema_version": 1, "enabled": True, "repository": SIGNED_REPO,
         "repository_id": REPOSITORY_ID, "recipient_id": OWNER_ID,
         "default_branch": "main", "issue_number": 17, "issue_id": 900017,
         "recipient_reference_time": "2020-01-01T00:00:00Z",
         "effective_at": "2020-01-02T00:00:00Z",
         "privacy_ready": True, "owner_records_ready": True,
         "agreement": {"version": "1.0", "sha256": check.digest(DOCUMENTS["CLA.md"]),
-                      "url": f"https://github.com/{REPO}/blob/{BASE}/CLA.md"},
+                      "url": f"https://github.com/{SIGNED_REPO}/blob/{BASE}/CLA.md"},
         "notice": {"version": "1.0", "sha256": check.digest(DOCUMENTS["CLA-PRIVACY.md"]),
-                   "url": f"https://github.com/{REPO}/blob/{BASE}/CLA-PRIVACY.md"},
+                   "url": f"https://github.com/{SIGNED_REPO}/blob/{BASE}/CLA-PRIVACY.md"},
     }
 
 
@@ -223,6 +224,26 @@ class CheckerTests(OfflineTestCase):
             self.assertEqual(reason, result["reason"])
         self.assertNotIn("success", [body["state"] for _, body in self.api.statuses])
         return result
+
+    def test_canonical_transport_preserves_exact_signed_configuration(self):
+        before = check.config_digest(self.c)
+        text = check.confirmation(self.c, 1, SHA1)
+        self.assertIn("maredengb/coffered", text)
+        self.assertNotIn("maredengb/cofferdb", text)
+        self.assertEqual(PREFIX, self.checker.prefix)
+        self.checker.verify_repository()
+        with mock.patch.object(self.api, "post", wraps=self.api.post) as post:
+            self.checker.pr_authors(1)
+        graphql = [call.args[1] for call in post.call_args_list if call.args[0] == "/graphql"]
+        self.assertTrue(graphql)
+        self.assertTrue(all(body["variables"]["name"] == "cofferdb" for body in graphql))
+        self.assertEqual(before, check.config_digest(self.c))
+        self.assertEqual(text, check.confirmation(self.c, 1, SHA1))
+
+    def test_canonical_route_still_rejects_an_unexpected_repository_name(self):
+        self.api.repo["full_name"] = SIGNED_REPO
+        with self.assertRaisesRegex(check.Hold, "repository_identity_changed"):
+            self.checker.verify_repository_identity()
 
     def test_changed_recipient_control_never_writes_a_status(self):
         self.api.repo["owner"]["id"] = BOB["id"]
@@ -678,7 +699,7 @@ class ActivationTests(OfflineTestCase):
         super().setUp()
         self.c = config()
         self.api = FakeApi(self.c)
-        self.checker = check.Checker(self.c, self.api, "https://github.com/maredengb/coffered/actions/runs/123")
+        self.checker = check.Checker(self.c, self.api, "https://github.com/maredengb/cofferdb/actions/runs/123")
 
     def held(self):
         with self.assertRaises(check.Hold):
@@ -846,7 +867,7 @@ class ConfigurationAndEntrypointTests(OfflineTestCase):
     def test_document_urls_must_be_fixed_repository_commit_urls(self):
         with tempfile.TemporaryDirectory() as directory:
             root, path, c = self.config_files(directory)
-            for url in ("https://example.invalid/CLA.md", f"https://github.com/{REPO}/blob/main/CLA.md"):
+            for url in ("https://example.invalid/CLA.md", f"https://github.com/{SIGNED_REPO}/blob/main/CLA.md"):
                 with self.subTest(url=url):
                     c["agreement"]["url"] = url
                     path.write_text(json.dumps(c))
@@ -982,6 +1003,12 @@ class ApiBoundaryTests(OfflineTestCase):
         for path in paths:
             with self.subTest(path=path), self.assertRaises(check.Hold):
                 self.api.post(path, {})
+        self.api.opener.open.assert_not_called()
+
+    def test_legacy_repository_api_routes_are_refused_without_redirect(self):
+        for path in ["/repos/" + SIGNED_REPO, "/repos/" + SIGNED_REPO + "/issues/17"]:
+            with self.subTest(path=path), self.assertRaisesRegex(check.Hold, "invalid_api_path"):
+                self.api.get(path)
         self.api.opener.open.assert_not_called()
 
     def test_api_errors_are_redacted(self):

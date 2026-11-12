@@ -18,6 +18,8 @@ import urllib.parse
 import urllib.request
 
 CONTEXT = "cofferdb/cla"
+# Transport follows the current repository name; signed configuration stays immutable.
+RUNTIME_REPOSITORY = "maredengb/cofferdb"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 LOGIN = re.compile(r"[A-Za-z0-9-]+(?:\[bot\])?\Z")
@@ -163,11 +165,11 @@ class Api:
         require(method in ("GET", "POST"), "unsupported_method")
         require(path.startswith("/") and not path.startswith("//") and
                 not any(c in path for c in "\r\n#"), "invalid_api_path")
-        require(path == "/graphql" or path.startswith("/repos/maredengb/coffered/") or
-                path == "/repos/maredengb/coffered" or
+        require(path == "/graphql" or path.startswith("/repos/maredengb/cofferdb/") or
+                path == "/repos/maredengb/cofferdb" or
                 re.fullmatch(r"/users/[A-Za-z0-9-]+(?:%5Bbot%5D)?", path), "invalid_api_path")
         require(method == "GET" or path == "/graphql" or
-                re.fullmatch(r"/repos/maredengb/coffered/statuses/[0-9a-f]{40}", path),
+                re.fullmatch(r"/repos/maredengb/cofferdb/statuses/[0-9a-f]{40}", path),
                 "write_endpoint_refused")
         self.requests += 1
         require(self.requests <= MAX_REQUESTS and time.monotonic()-self.started < RUN_SECONDS,
@@ -213,7 +215,7 @@ AUTHORS_QUERY = """query($owner:String!,$name:String!,$oid:String!,$after:String
 class Checker:
     def __init__(self, config, api, run_url, dry_run=False):
         self.c, self.api, self.run_url, self.dry_run = config, api, run_url, dry_run
-        self.prefix = "/repos/"+config["repository"]
+        self.prefix = "/repos/"+RUNTIME_REPOSITORY
         self.authors_cache = {}
         self.account_cache = {}
         self.pr_cache = {}
@@ -276,7 +278,7 @@ class Checker:
     def verify_repository_identity(self):
         repo = self.api.get(self.prefix)
         require(repo.get("id") == self.c["repository_id"] and
-                repo.get("full_name") == self.c["repository"] and
+                repo.get("full_name") == RUNTIME_REPOSITORY and
                 repo.get("default_branch") == "main" and
                 repo.get("owner", {}).get("id") == self.c["recipient_id"],
                 "repository_identity_changed")
@@ -287,7 +289,7 @@ class Checker:
         self.verify_repository_identity()
         issue = self.api.get(f'{self.prefix}/issues/{self.c["issue_number"]}')
         require(issue.get("id") == self.c["issue_id"] and "pull_request" not in issue and
-                issue.get("html_url") == f'https://github.com/{self.c["repository"]}/issues/{self.c["issue_number"]}' and
+                issue.get("html_url") == f'https://github.com/{RUNTIME_REPOSITORY}/issues/{self.c["issue_number"]}' and
                 issue.get("state") == "open" and not issue.get("locked"), "confirmation_issue_unavailable")
         require(timestamp(self.c["effective_at"]) <= dt.datetime.now(dt.timezone.utc),
                 "activation_not_effective")
@@ -354,7 +356,7 @@ class Checker:
         message = primary = None
         for _ in range(2):
             data = self.api.post("/graphql", {"query": AUTHORS_QUERY, "variables": {
-                "owner": "maredengb", "name": "coffered", "oid": sha, "after": after}})
+                "owner": "maredengb", "name": "cofferdb", "oid": sha, "after": after}})
             repo = data.get("repository")
             require(isinstance(repo, dict) and repo.get("databaseId") == self.c["repository_id"],
                     "graphql_repository_mismatch")
@@ -435,7 +437,7 @@ class Checker:
             require(self.activation_record is not None and
                     timestamp(self.activation_record["created_at"]) < created,
                     "confirmation_before_opening")
-        require(comment.get("html_url") == f'https://github.com/{self.c["repository"]}/issues/{self.c["issue_number"]}#issuecomment-{comment["id"]}',
+        require(comment.get("html_url") == f'https://github.com/{RUNTIME_REPOSITORY}/issues/{self.c["issue_number"]}#issuecomment-{comment["id"]}',
                 "confirmation_wrong_thread")
         require(comment.get("issue_url") == f'https://api.github.com{self.prefix}/issues/{self.c["issue_number"]}',
                 "confirmation_wrong_thread")
@@ -636,10 +638,10 @@ def main(argv=None):
                     SHA.fullmatch(os.environ.get("GITHUB_WORKFLOW_SHA", "")), "untrusted_workflow_ref")
             run_id = os.environ.get("GITHUB_RUN_ID", "")
             require(run_id.isdigit(), "invalid_run_identity")
-            run_url = f'https://github.com/{c["repository"]}/actions/runs/{run_id}'
+            run_url = f'https://github.com/{RUNTIME_REPOSITORY}/actions/runs/{run_id}'
         else:
             require(args.dry_run, "local_status_writes_refused")
-            run_url = f'https://github.com/{c["repository"]}/issues/{c["issue_number"]}'
+            run_url = f'https://github.com/{RUNTIME_REPOSITORY}/issues/{c["issue_number"]}'
         checker = Checker(c, Api(os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")), run_url, args.dry_run)
         results = checker.run()
         if args.export_dir:

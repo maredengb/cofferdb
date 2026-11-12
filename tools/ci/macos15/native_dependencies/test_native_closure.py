@@ -1,5 +1,6 @@
 """Tiny synthetic Mach-O and file graphs, never executed as native code."""
 import argparse
+import json
 import copy
 import importlib.util
 import io
@@ -36,7 +37,7 @@ def image(deps=(), rpaths=(), minimum=(11, 0, 0), cpu=0x0100000c, kind=6, extra=
 
 def config():
     return {'schema_version': 1, 'kind': 'mac15_dynamic_input_config_1',
-            'source_repository': 'maredengb/coffered', 'source_commit': '1' * 40,
+            'source_repository': 'maredengb/cofferdb', 'source_commit': '1' * 40,
             'helper_sha256': dict(PLAN.HELPERS), 'actions': dict(PLAN.ACTIONS),
             'python_providers': list(PLAN.PROVIDERS), 'selection_method': PLAN.METHOD,
             'native_closure_gate': 'independent-exact-closure-input-v1',
@@ -210,6 +211,82 @@ class Tests(unittest.TestCase):
             base = runtime['binary']['path']
             self.assertIn((base, base), calls)
 
+    def installed_framework_graph_fixture(self):
+        policy = OBSERVER.installed_policy(); limits = policy.host_limits; calls = []
+
+        def fixture_limits(value, role, private_root=None, file_info=None):
+            # Translate only the synthetic filesystem namespace. The real
+            # classification, fd reader and metadata protection remain active.
+            selected = Path(value)
+            if selected.is_relative_to(self.root / 'Library'):
+                value = '/' + str(selected.relative_to(self.root))
+            calls.append((str(value), role))
+            return limits(value, role, private_root, file_info)
+
+        selected = patch.object(policy, 'host_limits', side_effect=fixture_limits)
+        selected.start(); self.addCleanup(selected.stop)
+        selected = patch.object(OBSERVER, 'installed_policy', return_value=policy)
+        selected.start(); self.addCleanup(selected.stop)
+        self.snapshot['runtimes'] = []; self.index = []; images = []
+        for minor in (12, 13, 14):
+            provider = self.root / 'Library/Frameworks/Python.framework/Versions' / f'3.{minor}'
+            stdlib = provider / f'lib/python3.{minor}'; stdlib.mkdir(parents=True)
+            tcl = provider / 'Frameworks/Tcl.framework/Versions/8.6/Tcl'
+            tk = provider / 'Frameworks/Tk.framework/Versions/8.6/Tk'
+            self.put(tcl, image(deps=[(0xc, '/usr/lib/libSystem.B.dylib')]))
+            self.put(tk, image(deps=[(0xc, str(tcl))]))
+            tcl.chmod(0o575); tk.chmod(0o575); images += [tcl, tk]
+            binary = provider / f'bin/python3.{minor}'; self.put(binary, image(kind=2)); binary.chmod(0o755)
+            self.put(stdlib / '_tkinter.so', image(kind=8, deps=[(0xc, str(tk))]))
+            rows = OBSERVER.index_tree(stdlib, time.monotonic() + 5); self.index += rows
+            self.snapshot['runtimes'].append({'minor': minor, 'micro': 1, 'releaselevel': 'final',
+                'implementation': 'cpython', 'free_threaded': False, 'binary': self.file_row(binary),
+                'stdlib': str(stdlib), 'stdlib_index_sha256': n.sha(n.canonical(rows)), 'runtime_files': []})
+        self.snapshot['readonly_index_sha256'] = n.sha(n.canonical(self.index))
+        return policy, calls, images
+
+    def test_real_installed_reader_accepts_only_bundled_framework_graph_images(self):
+        policy, calls, images = self.installed_framework_graph_fixture()
+        result = self.inspect()
+        for runtime in result['snapshot']['runtimes']:
+            self.assertEqual(len(runtime['runtime_files']), 2)
+            for row in runtime['runtime_files']:
+                self.assertIn(Path(row['path']), images)
+                self.assertEqual(policy.row(row, host_role='native'), Path(row['path']))
+        self.assertEqual(n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)['status'],
+                         'DECLARED_INPUTS_FRESH_NOT_EXECUTED')
+        for selected in images:
+            self.assertIn(('/' + str(selected.relative_to(self.root)), 'native'), calls)
+
+    def test_bundled_framework_graph_still_rejects_metadata_bytes_links_and_read_mutation(self):
+        policy, calls, images = self.installed_framework_graph_fixture()
+        result = self.inspect(); selected = images[2]; original = selected.read_bytes()
+        selected.chmod(0o577)
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'):
+            n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
+        selected.chmod(0o675)
+        self.put(selected, image(minimum=(12, 0, 0))); selected.chmod(0o575)
+        with self.assertRaisesRegex(ValueError, 'graph changed'):
+            n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
+        selected.chmod(0o675); self.put(selected, original); selected.chmod(0o575)
+        link = selected.with_name('hardlink'); os.link(selected, link)
+        with self.assertRaisesRegex(ValueError, 'Protected installed-file metadata'):
+            policy.host_file(str(selected), role='native')
+        link.unlink(); alias = selected.with_name('alias'); alias.symlink_to(selected.name)
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            policy.host_file(str(alias), role='native')
+        read = os.read; changed = False; inode = selected.stat().st_ino
+        def replace_during_read(fd, bound):
+            nonlocal changed
+            data = read(fd, bound)
+            if not changed and data and os.fstat(fd).st_ino == inode:
+                changed = True; selected.chmod(0o675)
+                selected.write_bytes(b'x' * len(original)); selected.chmod(0o575)
+            return data
+        with patch.object(policy.os, 'read', side_effect=replace_during_read):
+            with self.assertRaisesRegex(ValueError, 'changed during read'):
+                policy.host_file(str(selected), role='native')
+
     def test_stdlib_addition_or_byte_mutation_fails_fresh(self):
         result = self.inspect()
         self.put(self.root / 'cp312/stdlib/late.py', b'late')
@@ -289,6 +366,42 @@ class Tests(unittest.TestCase):
             result = self.inspect()
             with self.assertRaises(ValueError): n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
 
+    def framework_graph_fixture(self):
+        versions = self.root / 'Framework/Versions'; base = versions / '3.12'
+        stdlib = base / 'lib/python3.12'; config_dir = stdlib / 'config-3.12-darwin'
+        config_dir.mkdir(parents=True)
+        core = base / 'Python'; self.put(core, image(deps=[(0xc, '/usr/lib/libSystem.B.dylib')]))
+        binary = base / 'bin/python3.12'; self.put(binary, image(kind=2))
+        for suffix in ('a', 'dylib'):
+            (config_dir / ('libpython3.12.' + suffix)).symlink_to('../../../Python')
+        owner = (stdlib.stat().st_uid, stdlib.stat().st_gid)
+        with patch.object(OBSERVER, 'FRAMEWORK_VERSIONS', versions), patch.object(OBSERVER, 'FRAMEWORK_ALIAS_OWNER', owner), patch.object(OBSERVER, 'native_protection'):
+            index = OBSERVER.index_tree(stdlib, time.monotonic() + 5)
+        runtime = {'minor': 12, 'binary': self.file_row(binary), 'stdlib': str(stdlib), 'stdlib_index_sha256': n.sha(n.canonical(index))}
+        return versions, runtime, index, core, owner
+    def test_framework_aliases_use_one_canonical_native_seed(self):
+        versions, runtime, index, core, owner = self.framework_graph_fixture()
+        read = []
+        def reader(path, bound):
+            read.append(path); return OBSERVER.bytes_(path, bound)
+        with patch.object(n, 'FRAMEWORK_VERSIONS', versions), patch.object(n, 'FRAMEWORK_ALIAS_OWNER', owner):
+            graph = n.inspect_runtime(runtime, index, [15, 0, 0], reader, time.monotonic() + 5)
+        self.assertEqual(read.count(str(core)), 1)
+        self.assertEqual(len(graph['aliases']), 2)
+        self.assertTrue(all(target == str(core) for target in graph['aliases'].values()))
+        self.assertIn(str(core), [row['path'] for row in graph['runtime_files']])
+        self.assertFalse(any('/config-' in path for path in read))
+    def test_framework_native_target_bytes_or_alias_record_change_rejected(self):
+        versions, runtime, index, core, owner = self.framework_graph_fixture()
+        with patch.object(n, 'FRAMEWORK_VERSIONS', versions), patch.object(n, 'FRAMEWORK_ALIAS_OWNER', owner):
+            bad = json.loads(json.dumps(index)); bad[0]['alias']['text'] = '../../../Other'
+            runtime['stdlib_index_sha256'] = n.sha(n.canonical(bad))
+            with self.assertRaisesRegex(ValueError, 'alias target'):
+                n.inspect_runtime(runtime, bad, [15, 0, 0], OBSERVER.bytes_, time.monotonic() + 5)
+            runtime['stdlib_index_sha256'] = n.sha(n.canonical(index))
+            self.put(core, image(deps=[(0xc, '/usr/lib/libobjc.A.dylib')]))
+            with self.assertRaisesRegex(ValueError, 'Framework target changed'):
+                n.inspect_runtime(runtime, index, [15, 0, 0], OBSERVER.bytes_, time.monotonic() + 5)
     def test_native_graph_deadline_and_read_bound_fail_closed(self):
         runtime = self.snapshot['runtimes'][0]
         with self.assertRaisesRegex(ValueError, 'deadline'):

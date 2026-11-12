@@ -18,16 +18,15 @@
     {
       "artifact": "stages/import-0/stdout",
       "original_sha256": "ec8edcaafc0c200191f322aaf745941bbcb3d6bc2973bee587090fa3001507b5",
-      "public_sha256": "ea5604fb8e8ac8a4791c0587f327c306f52cda289d249e3773949e2962bc7294",
-      "bytes": 857,
+      "public_sha256": "9dec83e157c654c1e7e71e07e94145ebf49925633a10df09ac04393f4f68f1e8",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "834f287becc20a9f57ba849a7b67a1fb334f8104491f43a5d65b02b36622bde4",
-            "replacement": "external-reference/834f287becc20a9f/manifest-current.json"
+            "replacement": "redacted-historical-reference-044"
           }
         ]
       }
@@ -42,16 +41,15 @@
     {
       "artifact": "stages/import-1/stdout",
       "original_sha256": "3c3b37da21c39e078cd897fee606ea1981e4a1f0df14299fe5c33f5eb0619de0",
-      "public_sha256": "ebfe8654b81ed28fa83fe3517ca56b3f9f1a7318f17c0950f5ebba94dacaa975",
-      "bytes": 857,
+      "public_sha256": "bb142cf5935f65fc1b7efe585df521959117c02b4e058fe9d21392fcf992f4c4",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ed2fea81674cb02778022843f2a55a198a717eb36e2539a0e3696adf604423b0",
-            "replacement": "external-reference/ed2fea81674cb027/manifest-current.json"
+            "replacement": "redacted-historical-reference-045"
           }
         ]
       }
@@ -66,16 +64,15 @@
     {
       "artifact": "stages/import-2/stdout",
       "original_sha256": "6dbfc27212d796b4f429f099570c5fcfe4ba23c863f5dff561eef84a5981586a",
-      "public_sha256": "fb838ab9a9847a4cc59f96e900fd8126b401bcf2b3c796655248440da209ecf2",
-      "bytes": 857,
+      "public_sha256": "eca29e61757f51458ab6c9b776d18107e47bfd4502d82b3c0514e2cbc5480783",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6586ec6d90f1fc1cc7a806d698cd615e77b39d513546ed266650a740bd6732d7",
-            "replacement": "external-reference/6586ec6d90f1fc1c/manifest-current.json"
+            "replacement": "redacted-historical-reference-046"
           }
         ]
       }
@@ -90,16 +87,15 @@
     {
       "artifact": "stages/import-3/stdout",
       "original_sha256": "c47a3880f1cbbdf1e40fff1615491c5a4bb1cf9fdf52b47fada5a80fab5e54c7",
-      "public_sha256": "26beb99c58e3c7805757c024c373410c36790aa6bf882267027cd27c86a4598d",
-      "bytes": 857,
+      "public_sha256": "4cffae4d3628d6351ee4501e283a5419f316c5215c063154903ed07d5f9abb2c",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ea4c648835195a630be66859d26489915c938c1dad4104bc0ed3490efae10986",
-            "replacement": "external-reference/ea4c648835195a63/manifest-current.json"
+            "replacement": "redacted-historical-reference-047"
           }
         ]
       }
@@ -114,16 +110,15 @@
     {
       "artifact": "stages/import-4/stdout",
       "original_sha256": "76d07233734b9a5432c2eb8e4ab374a891e041f0f2fbf25f05799829fec52ebd",
-      "public_sha256": "99b2d1e311824f6c1841187e084e564bb1e26424655dc6242c155a13218bd506",
-      "bytes": 857,
+      "public_sha256": "adb950c13397d068907b0160071136edd5395edba0abfbd405db7c813ff5d7a8",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "33940fe304c232943ed0be556525b1d0ce2b66d44e94eecb23ebdf4b13d484c3",
-            "replacement": "external-reference/33940fe304c23294/manifest-current.json"
+            "replacement": "redacted-historical-reference-048"
           }
         ]
       }
@@ -138,16 +133,15 @@
     {
       "artifact": "stages/import-5/stdout",
       "original_sha256": "93f7e5f4381850defa4782c45d67f7c87e7893990e81b048adfc0683c7059b97",
-      "public_sha256": "7174744c148d4e615a883bbf57b628a3812e02cd638ccdb697d35cfe9bc44a77",
-      "bytes": 857,
+      "public_sha256": "e8a492fcb39d976b1c3653d441b5d73a42467e1192c5b25af02909bede2a2f0b",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "85a63ebc76271953e4811e053328ddac36229932a4d5b004d2d82ab64b400940",
-            "replacement": "external-reference/85a63ebc76271953/manifest-current.json"
+            "replacement": "redacted-historical-reference-049"
           }
         ]
       }
@@ -162,16 +156,15 @@
     {
       "artifact": "stages/import-6/stdout",
       "original_sha256": "8409466a417d9b82b1464ccdc2de00db54c9157b1c0c33a7789e8067d306d2d5",
-      "public_sha256": "34ab3a6f25bd74b1eff2b19e956081fc63e6715867c41fbd8ce359afd4bba7f2",
-      "bytes": 857,
+      "public_sha256": "f3c204bcbb9ba55d9769d6425eadaa713177e1c9992acd87c02cb7e810cbf8f6",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "0d231db76bb0df6d8ff48bf93db571b400f5c590a3a5d8cb610ee4b645e89dbe",
-            "replacement": "external-reference/0d231db76bb0df6d/manifest-current.json"
+            "replacement": "redacted-historical-reference-050"
           }
         ]
       }
@@ -186,16 +179,15 @@
     {
       "artifact": "stages/import-7/stdout",
       "original_sha256": "ab2596cbcb0a7dc0286bc3657cb7313897be85db9fe039019e700071c816cb53",
-      "public_sha256": "6e25ddd397c4b093680b4d2c0e81b9c14cf865f86a8c3e543b6767a82538d129",
-      "bytes": 857,
+      "public_sha256": "05c570338975873f759597aba1b4678fd9881746b9519b70f9e2f52942836eb2",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7de26c323437758081fa4fe934867d33dcf84f07fede4928c05e601733e42405",
-            "replacement": "external-reference/7de26c3234377580/manifest-current.json"
+            "replacement": "redacted-historical-reference-051"
           }
         ]
       }
@@ -210,16 +202,15 @@
     {
       "artifact": "stages/import-8/stdout",
       "original_sha256": "4ace34320d9bcfdb76ec07f553566835bc0dbe6ddd0beff4308eb3ef249beffd",
-      "public_sha256": "c33a8ab3717bb145ee732399de4e4d60bf3f3cd3408c58d4f512abe845dc8e71",
-      "bytes": 857,
+      "public_sha256": "e70f5d4668a6ed094fc269142e6e1b2a0aebbeb796a42e118690f216a2f3b38c",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "c597dc413532e8e85272724c6636a8fbdcc28e95bb5d1a1237f9fc7d6502d1b4",
-            "replacement": "external-reference/c597dc413532e8e8/manifest-current.json"
+            "replacement": "redacted-historical-reference-052"
           }
         ]
       }
@@ -234,16 +225,15 @@
     {
       "artifact": "stages/import-9/stdout",
       "original_sha256": "bc2bff33f2d50344e67e660fed6e529deb3217ab05bc28cf0844f44c3db681b6",
-      "public_sha256": "4fab38c91ed23ef36c19100db86809662806d5d1df14f6e49851f70db55a1026",
-      "bytes": 857,
+      "public_sha256": "e3fff2eb4a2a72fb188f818dd8d9b58ae167313bf320a12cd6859ddf7b3cac7c",
+      "bytes": 833,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/result/manifest",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "8b70d6db0db79a8fb65a6235db1c8c5e8f08bcccad211d6e928de251a74ddd21",
-            "replacement": "external-reference/8b70d6db0db79a8f/manifest-current.json"
+            "replacement": "redacted-historical-reference-053"
           }
         ]
       }
@@ -314,16 +304,15 @@
     {
       "artifact": "stages/check/stdout",
       "original_sha256": "b71a1b372779cd3aa6ce59dfd06b4d5092639b58df8f3db744696153416b141e",
-      "public_sha256": "cc882daf0b40d2773047bfc45fd6217c42a51e6c1bce656e7e9601a223f34e90",
-      "bytes": 988,
+      "public_sha256": "8b8ebd3945113a619b2b4480e962bf56993b65ff4f85f6d01ae6d8c3741efb61",
+      "bytes": 975,
       "transformation": {
         "kind": "Only declared private paths replaced; exact numeric values, IDs, scores and all other fields retained.",
         "replaced_references": [
           {
             "json_pointer": "/0/result/path",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           }
         ]
       }
@@ -366,298 +355,250 @@
     {
       "artifact": "execution-derived.json",
       "original_sha256": "ad5b752069a8fb28c62db811c968595ebc648ae43593981e3b61bb2585aa53f4",
-      "public_sha256": "13ef5e5f5edfee7cbea9b568c447394034895b2b65695b701d2637aa1728b6c3",
-      "bytes": 4555,
+      "public_sha256": "018915ce2e81b74ac0c9eba05dbda175ba19892401331e961009af8e154945f5",
+      "bytes": 3738,
       "transformation": {
         "kind": "Only private argv paths replaced; original per-stage exits/wall values and copy hashes retained.",
         "replaced_references": [
           {
             "json_pointer": "/0/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/0/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/1/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/1/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/1/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "834f287becc20a9f57ba849a7b67a1fb334f8104491f43a5d65b02b36622bde4",
-            "replacement": "external-reference/834f287becc20a9f/manifest-current.json"
+            "replacement": "redacted-historical-reference-044"
           },
           {
             "json_pointer": "/2/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/2/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/2/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ed2fea81674cb02778022843f2a55a198a717eb36e2539a0e3696adf604423b0",
-            "replacement": "external-reference/ed2fea81674cb027/manifest-current.json"
+            "replacement": "redacted-historical-reference-045"
           },
           {
             "json_pointer": "/3/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/3/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/3/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "6586ec6d90f1fc1cc7a806d698cd615e77b39d513546ed266650a740bd6732d7",
-            "replacement": "external-reference/6586ec6d90f1fc1c/manifest-current.json"
+            "replacement": "redacted-historical-reference-046"
           },
           {
             "json_pointer": "/4/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/4/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/4/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "ea4c648835195a630be66859d26489915c938c1dad4104bc0ed3490efae10986",
-            "replacement": "external-reference/ea4c648835195a63/manifest-current.json"
+            "replacement": "redacted-historical-reference-047"
           },
           {
             "json_pointer": "/5/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/5/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/5/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "33940fe304c232943ed0be556525b1d0ce2b66d44e94eecb23ebdf4b13d484c3",
-            "replacement": "external-reference/33940fe304c23294/manifest-current.json"
+            "replacement": "redacted-historical-reference-048"
           },
           {
             "json_pointer": "/6/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/6/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/6/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "85a63ebc76271953e4811e053328ddac36229932a4d5b004d2d82ab64b400940",
-            "replacement": "external-reference/85a63ebc76271953/manifest-current.json"
+            "replacement": "redacted-historical-reference-049"
           },
           {
             "json_pointer": "/7/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/7/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/7/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "0d231db76bb0df6d8ff48bf93db571b400f5c590a3a5d8cb610ee4b645e89dbe",
-            "replacement": "external-reference/0d231db76bb0df6d/manifest-current.json"
+            "replacement": "redacted-historical-reference-050"
           },
           {
             "json_pointer": "/8/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/8/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/8/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "7de26c323437758081fa4fe934867d33dcf84f07fede4928c05e601733e42405",
-            "replacement": "external-reference/7de26c3234377580/manifest-current.json"
+            "replacement": "redacted-historical-reference-051"
           },
           {
             "json_pointer": "/9/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/9/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/9/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "c597dc413532e8e85272724c6636a8fbdcc28e95bb5d1a1237f9fc7d6502d1b4",
-            "replacement": "external-reference/c597dc413532e8e8/manifest-current.json"
+            "replacement": "redacted-historical-reference-052"
           },
           {
             "json_pointer": "/10/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "01b01f74fcdaa61ad38b483d87791a64f6ec44462ac1e947c7460beba07f5407",
-            "replacement": "external-reference/01b01f74fcdaa61a/coffer"
+            "replacement": "redacted-historical-reference-137"
           },
           {
             "json_pointer": "/10/command/2",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/10/command/4",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "8b70d6db0db79a8fb65a6235db1c8c5e8f08bcccad211d6e928de251a74ddd21",
-            "replacement": "external-reference/8b70d6db0db79a8f/manifest-current.json"
+            "replacement": "redacted-historical-reference-053"
           },
           {
             "json_pointer": "/11/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/11/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/12/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/12/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/12/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "84cf20183bc7f808445766dae2cfc099ec2672c48e2058c14c8fe7278a9e10e5",
-            "replacement": "external-reference/84cf20183bc7f808/manifest-current.json"
+            "replacement": "redacted-historical-reference-580"
           },
           {
             "json_pointer": "/13/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/13/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/14/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/14/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/15/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/15/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/16/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/16/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "b3380757ef421bc363ad1ef4153d22245aa960150e4281dcb9cbbe9bbd1929f4",
-            "replacement": "external-reference/b3380757ef421bc3/run.coffer"
+            "replacement": "redacted-historical-reference-043"
           },
           {
             "json_pointer": "/16/command/3",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "647d0d2c520f70f9e76080df53ae712e898f23323fc33fa18f173ab8570a5c90",
-            "replacement": "external-reference/647d0d2c520f70f9/export"
+            "replacement": "redacted-historical-reference-467"
           },
           {
             "json_pointer": "/18/command/0",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "098a40b4cd9b89749bd1c779c15164350aafd0e1414f81c6f0d6b83d211ae9b4",
-            "replacement": "external-reference/098a40b4cd9b8974/lifecycle-helper-current-v1"
+            "replacement": "redacted-historical-reference-162"
           },
           {
             "json_pointer": "/18/command/1",
             "location_kind": "value_in_derived_document",
-            "original_value_sha256": "95dabd4c22469833970354f00477d2b2d5a5482a977d05be02a72cba4a0744d9",
-            "replacement": "external-reference/95dabd4c22469833/copy.coffer"
+            "replacement": "redacted-historical-reference-643"
           }
         ]
       }

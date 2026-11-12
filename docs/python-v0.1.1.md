@@ -1,8 +1,10 @@
 # Python 0.1.1 programming guide
 
-This source contains an experimental synchronous, in-process Python API.
-There is no 0.1.0 Python API. Use a matching 0.1.1 wheel and its checksum from
-the [release record](https://github.com/maredengb/coffered/releases).
+The complete source tree contains an experimental synchronous, in-process
+Python API; the Rust source crate does not include the binding source. There is
+no 0.1.0 Python API. Version 0.1.1 is experimental. Treat a matching wheel as
+unreleased until it and its checksum are identified in the
+[release record](https://github.com/maredengb/cofferdb/releases).
 `cofferdb.__version__` identifies the SDK;
 `cofferdb.engine_version` identifies the statically linked engine.
 
@@ -34,12 +36,14 @@ python -c "import cofferdb; print(cofferdb.__version__, cofferdb.engine_version)
 The wheel has no third-party Python runtime dependencies. Rust, maturin, a CLI,
 model downloads and provider keys are not required for binary use. An offline
 source build is a different workflow and requires the toolchain and locked
-build dependencies. See [source build details](../bindings/python/README.md).
+build dependencies. See `bindings/python/README.md` in the complete matching
+source tree for source build details.
 
 ## Run the complete source-backed example
 
 Unpack the matching source/example material next to a new working directory.
-With the wheel installed, run from the product root:
+With the wheel installed, run from the product root with Python assertions
+enabled; do not use `-O` or set `PYTHONOPTIMIZE` for this example:
 
 ```console
 python examples/code_retrieval.py /a/new/path/code.coffer
@@ -62,8 +66,109 @@ The immutable Rust by Example source commit, BAAI/bge-m3 model revision,
 data, not executable code. This small example checks functionality, not general
 semantic recall. No example text is silently changed while keeping old vectors.
 
-For finite direct writes, the [batch quickstart](../bindings/python/examples/quickstart.py)
-creates a small collection and validates returned data and explain. Its small
+### Reopen after removing the example source
+
+This walkthrough shows that stored text and source coordinates remain available
+after removing the source files used by this example. Prepare the matching
+wheel and complete source/example material first. Run from the product root in
+a Python session with assertions enabled, without `-O` or `PYTHONOPTIMIZE`.
+Disconnect the network before importing, searching and reopening the database.
+The new `human-demo` directory is disposable; the distributed original is not
+modified. If the directory already exists, choose a new name instead of
+removing its contents.
+
+Enter each block in the same Python session. In the standard prompt, enter an
+entire top-level compound statement, including nested blocks, before ending it
+with a blank line. Wait for `>>>` before continuing. If a step fails, stop and
+keep the output for diagnosis.
+
+```python
+from pathlib import Path
+from shutil import copytree
+import json
+import os
+import tempfile
+from cofferdb import Database
+from examples.code_retrieval import load_bundle, check_content
+
+work = Path("human-demo")
+work.mkdir()  # requires a new, empty name
+fixtures = work / "real_corpus"
+copytree(Path("examples/data/real_corpus"), fixtures)
+provenance, documents, chunks, query = load_bundle(fixtures)
+db_path = work / "example.coffer"
+
+with Database.create(str(db_path)) as db:
+    db.import_jsonl(str(fixtures / "code/import_manifest.json"))
+    collection = db.collection("real_code")
+    result = collection.search(text=query["text"], filter={"doc.lang": "rust"}, top_k=5)
+    assert result["results"]
+    print(json.dumps({"query": query["text"], "result": result}, ensure_ascii=False))
+    selected = None
+    for hit in result["results"]:
+        content = collection.get_chunk(hit["chunk_id"])
+        assert "weights" in hit["explain"]
+        if len(content["chunk"]["text"]) > len(hit["snippet"]):
+            selected = (hit, content)
+            break
+    assert selected is not None, "no full-text result longer than its snippet"
+    hit, before = selected
+    external_id = hit["chunk_external_id"]
+    check_content(before, chunks, documents)
+    expected_chunk = chunks[external_id]
+    expected_document = documents[expected_chunk["document_external_id"]]
+    expected_bytes = expected_chunk["text"].encode("utf-8")
+    expected_metadata = expected_chunk["metadata"]
+    expected_span = expected_chunk["source_span"]
+    print("Selected:", external_id, "full characters:", len(before["chunk"]["text"]),
+          "snippet characters:", len(hit["snippet"]))
+
+```
+
+Keep the Python session open. Move only the source snapshot in this disposable
+copy to the new holding directory. The original path will be absent during the
+reopen check; other copies on the computer may remain accessible.
+
+```python
+original_source = fixtures / "source_snapshot"
+held_dir = Path(tempfile.mkdtemp(prefix="source-hold-", dir=work))
+held_source = held_dir / "source_snapshot"
+print("Holding location:", held_source)
+assert original_source.is_dir() and not os.path.lexists(held_source)
+source_stat = original_source.stat()
+print("Source identity:", source_stat.st_dev, source_stat.st_ino)
+original_source.rename(held_source)
+held_stat = held_source.stat()
+assert (held_stat.st_dev, held_stat.st_ino) == (source_stat.st_dev, source_stat.st_ino)
+assert not os.path.lexists(original_source)
+print("Original example source path is absent:", original_source)
+```
+
+Keep the source in the holding directory during the reopen and do not supply
+it or another source file to the database. The in-memory fixture values are
+used only to compare the returned data.
+
+```python
+with Database.open(str(db_path), read_only=True) as db:
+    after = db.collection("real_code").get_chunk_by_external_id(external_id)
+    assert after["chunk"]["text"].encode("utf-8") == expected_bytes
+    for field in ("external_id", "title", "source_uri", "metadata"):
+        assert after["document"][field] == expected_document[field]
+    assert after["chunk"]["metadata"] == expected_metadata
+    assert after["chunk"]["source_span"] == expected_span
+    assert after["chunk"]["document_id"] == after["document"]["document_id"]
+    print("Full text, document fields, metadata and source span match after reopen.")
+```
+
+The comparison checks UTF-8 text, document fields and association, chunk
+metadata and source span. Afterward, retain the disposable work directory and
+holding location if you need to inspect the result. If an operation fails or a
+path is unexpectedly occupied, stop and preserve the output; do not overwrite
+or delete files to continue. The original distributed example is unchanged.
+
+For finite direct writes, the batch quickstart at
+`bindings/python/examples/quickstart.py` in the complete source tree creates a
+small collection and validates returned data and explain. Its small
 two-dimensional vector is explicitly synthetic.
 
 ## Data, configuration and ownership

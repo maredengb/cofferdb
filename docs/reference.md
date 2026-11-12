@@ -1,10 +1,13 @@
 # Source and offline reference builds (0.1.1)
 
-The source tree contains the engine, Python binding, locked inputs, notices,
-guides and executable examples. The root `pyproject.toml` is the canonical
+The complete source tree contains the engine, Python binding, locked inputs,
+notices, guides and executable examples. The Rust source crate omits the Python
+binding; obtain the complete matching source tree for the workflows below. The
+root `pyproject.toml` is the canonical
 Python packaging entry; it points to `bindings/python/Cargo.toml`. Run maturin
 from this root so the complete project layout and README paths are retained.
-Published archives and their checksums are listed in the matching release record.
+Treat 0.1.1 material and reference archives as unreleased until their exact
+source identity and checksums are identified in the matching release record.
 
 ## Prepare source without carrying repository history
 

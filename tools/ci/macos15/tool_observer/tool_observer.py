@@ -11,7 +11,7 @@ import stat
 import time
 import types
 
-BRIDGE_SHA = 'f60fdc6217fbf705291b6781630b46921d4c0e278166fd498fa32b2e68285b4f'
+BRIDGE_SHA = 'efc057aeaf8f0f4e74886928fa8a91ce779dc7c16412d8a155e3a4c3996ddf10'
 KEYS = ('cargo', 'rustc', 'maturin', 'sandbox', 'compiler', 'prepare', 'builder')
 QUERIES = ('cargo', 'rustc', 'maturin', 'compiler')
 
@@ -120,7 +120,7 @@ def observe(b, helper_root, snapshot, selected, checkout, output, *, clock=time.
                       for name in b.HELPERS if name != 'dynamic_inputs/dynamic_plan.py'}
     need(snapshot['helper_paths'] == expected_paths, 'Observed helper paths differ')
     need([x['minor'] for x in snapshot['runtimes']] == [12, 13, 14], 'Three ordered observed runtimes')
-    python = snapshot['runtimes'][0]['binary']; r.row(python, executable=True)
+    python = snapshot['runtimes'][0]['binary']; r.row(python, executable=True, host_role='python')
     rows = selected_rows(b, selected, checkout)
     out = b.path(output)
     immutable = [b.path(checkout), b.path(b.__file__), root, root.parent / 'q_process_supervisor.py']
@@ -141,7 +141,7 @@ def observe(b, helper_root, snapshot, selected, checkout, output, *, clock=time.
             input_check()
             need(clock() + 3 < deadline, 'Tool observation deadline before launch')
             need(selected_rows(b, selected, checkout) == rows, 'Selected tool bytes changed')
-            r.row(python, executable=True)
+            r.row(python, executable=True, host_role='python')
             need(sha(b.read_file(b.__file__, 131072)) == BRIDGE_SHA, 'Bridge changed')
             b.load_helpers(helper_root)
             need(clock() + 3 < deadline, 'Tool observation deadline after readback')
@@ -160,7 +160,7 @@ def observe(b, helper_root, snapshot, selected, checkout, output, *, clock=time.
             records.append(receipt)
         input_check()
         need(selected_rows(b, selected, checkout) == rows, 'Final tool bytes changed')
-        r.row(python, executable=True); host_matches(snapshot)
+        r.row(python, executable=True, host_role='python'); host_matches(snapshot)
         for name, receipt in zip(QUERIES, records):
             sealed_streams(b, evidence, name, receipt)
         need(clock() < deadline, 'Tool observation deadline after final readback')

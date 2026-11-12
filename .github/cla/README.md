@@ -5,6 +5,10 @@ This checker verifies GitHub account confirmations of the
 Apache-2.0. Read the [data notice](../../CLA-PRIVACY.md) and
 [contribution guide](../../CONTRIBUTING.md).
 
+When this v0.1.1 source snapshot was prepared, the automated CLA workflow was
+paused. Contact the maintainers for its current status and how confirmations
+are handled.
+
 ## Confirmation text
 
 For your first covered contribution, personally post the complete confirmation

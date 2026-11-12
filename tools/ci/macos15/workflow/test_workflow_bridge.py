@@ -53,7 +53,7 @@ class Tests(unittest.TestCase):
                       'selected_tools': self.tools, 'driver_contract': {'path': str(self.contract), 'sha256': t.sha(self.contract.read_bytes())},
                       'output': str(self.root / 'output')}
         self.events = []; self.actuals = []
-        self.job = {'GITHUB_REPOSITORY_ID': '1422246026', 'GITHUB_REPOSITORY': 'maredengb/coffered',
+        self.job = {'GITHUB_REPOSITORY_ID': '1422246026', 'GITHUB_REPOSITORY': 'maredengb/cofferdb',
                     'GITHUB_SHA': '1' * 40, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
         patch.dict(os.environ, self.job).start()
         patch.object(self.r, 'host_gate', return_value={'synthetic': True}).start()

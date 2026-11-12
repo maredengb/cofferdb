@@ -62,6 +62,10 @@ Apache-2.0 permissions and third-party license obligations remain in force.
 
 The CLA does not grant additional rights in older unrelated contributions.
 
+When this v0.1.1 source snapshot was prepared, the automated CLA workflow was
+paused. Contact the maintainers for its current status and how confirmations
+are handled.
+
 1. Read the agreement and [confirmation-data notice](CLA-PRIVACY.md).
    Review the highlighted commercial licensing, patent, future-contribution and
    succession terms, and ask any questions before agreeing.
@@ -69,9 +73,9 @@ The CLA does not grant additional rights in older unrelated contributions.
    text using your GitHub account in the designated thread. It identifies the
    agreement version and hash, notice hash, and your initial PR and commit. No
    separate legal-name, contact-information or identity-document form is required.
-3. For subsequent contributions, the checker reuses your existing confirmation
-   for that agreement version. It does not sign for you. A new agreement needs
-   new consent.
+3. When the checker is enabled, it can reuse your existing confirmation for
+   that agreement version. It does not sign for you. A new agreement needs new
+   consent.
 
 Each relevant contributor must be covered. Identify third-party sources, preserve
 license and attribution notices, and submit only material you have authority to
@@ -86,8 +90,8 @@ posting private material; the affected submission waits for an agreed process.
 The confirmation process adds no DCO sign-off requirement.
 
 The owner makes the final acceptance decision and manually merges accepted
-changes. Automated tools only prepare and check them; a CLA check neither merges
-code nor guarantees acceptance or copyright ownership.
+changes. When enabled, automated tools only prepare and check them; a CLA check
+neither merges code nor guarantees acceptance or copyright ownership.
 
-See the [confirmation checker](.github/cla/README.md) for text-generation commands
-and technical details.
+See `.github/cla/README.md` in the complete source checkout for
+text-generation commands and technical details.
