@@ -193,6 +193,39 @@ class Tests(unittest.TestCase):
         with patch.object(t.platform, 'system', return_value='Linux'):
             self.assertEqual(self.run_execute()['status'], 'EXACT_OFFLINE_INSTALL_AND_DRIVER_COMPLETED')
 
+    def test_linux_artifact_matching_bytes_reaches_substituted_install(self):
+        self.source['source'] = {'kind': 'git_checkout', 'commit': 'a' * 40, 'tree': 'b' * 40}
+        self.source_raw = t.canonical(self.source); self.source_path.write_bytes(self.source_raw)
+        self.files['cofferdb/_source.json'] = self.source_raw
+        self.files[self.dist + 'RECORD'] = record(self.files, self.dist + 'RECORD')
+        self.write_wheel(); self.args.wheel_sha256 = t.sha(self.wheel.read_bytes())
+        selected = self.inputs / 'linux-artifact.json'
+        value = {'schema_version': 1, 'public_sha': 'a' * 40, 'build_manifest_sha256': 'b' * 64,
+                 'wheel': self.wheel.name, 'wheel_size_bytes': len(self.wheel.read_bytes()),
+                 'wheel_sha256': self.args.wheel_sha256, 'native_sha256': self.args.native_sha256,
+                 'source_metadata_sha256': t.sha(self.source_raw), 'source_input_sha256': self.args.source_input_sha256,
+                 'sdk_version': self.args.sdk_version, 'engine_version': self.args.engine_version,
+                 'minor': sys.version_info.minor}
+        selected.write_bytes(t.canonical(value)); self.args.linux_artifact = str(selected)
+        self.args.linux_artifact_sha256 = t.sha(selected.read_bytes())
+        self.assertEqual(self.run_execute()['status'], 'EXACT_OFFLINE_INSTALL_AND_DRIVER_COMPLETED')
+
+    def test_linux_artifact_rejects_wrong_size_and_tamper(self):
+        selected = self.inputs / 'linux-artifact.json'
+        record = {'schema_version': 1, 'public_sha': 'a' * 40, 'build_manifest_sha256': 'b' * 64,
+                  'wheel': self.wheel.name, 'wheel_size_bytes': len(self.wheel.read_bytes()) + 1,
+                  'wheel_sha256': self.args.wheel_sha256, 'native_sha256': self.args.native_sha256,
+                  'source_metadata_sha256': t.sha(self.source_raw), 'source_input_sha256': self.args.source_input_sha256,
+                  'sdk_version': self.args.sdk_version, 'engine_version': self.args.engine_version,
+                  'minor': sys.version_info.minor}
+        selected.write_bytes(t.canonical(record)); self.args.linux_artifact = str(selected)
+        self.args.linux_artifact_sha256 = t.sha(selected.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'Linux artifact differs'): self.run_execute()
+        self.assertEqual(self.calls, [])
+        selected.write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'Linux artifact original changed'): self.run_execute()
+        self.assertEqual(self.calls, [])
+
     def test_installer_failure_stops_no_sdk_load(self):
         def failed(argv, **kw): self.calls.append((argv, kw)); return types.SimpleNamespace(returncode=1)
         with self.assertRaisesRegex(ValueError, 'installer failed'): self.run_execute(process=failed)

@@ -273,6 +273,29 @@ def execute(args):
              and identity['installer_sha256'] == sha(b.read_file(identity['installer_path'], 131072)),
              'Wheel identity record differs from actual inputs')
         b.checksum(identity['build_manifest_sha256'])
+    linux_artifact = getattr(args, 'linux_artifact', None)
+    linux_digest = getattr(args, 'linux_artifact_sha256', None)
+    need((linux_artifact is None) == (linux_digest is None), 'Linux artifact path and digest required together')
+    if linux_artifact is not None:
+        b.checksum(linux_digest)
+        linux_raw = b.read_file(linux_artifact, b.MAX_JSON)
+        need(sha(linux_raw) == linux_digest, 'Linux artifact original changed')
+        linux_record = b.decode(linux_raw)
+        fields = {'schema_version', 'public_sha', 'build_manifest_sha256', 'wheel', 'wheel_size_bytes',
+                  'wheel_sha256', 'native_sha256', 'source_metadata_sha256', 'source_input_sha256',
+                  'sdk_version', 'engine_version', 'minor'}
+        need(type(linux_record) is dict and set(linux_record) == fields
+             and type(linux_record['schema_version']) is int and linux_record['schema_version'] == 1
+             and type(linux_record['minor']) is int and linux_record['minor'] == sys.version_info.minor
+             and linux_record['wheel'] == wheel.name and type(linux_record['wheel_size_bytes']) is int
+             and linux_record['wheel_size_bytes'] == len(wheel_raw) and linux_record['wheel_sha256'] == args.wheel_sha256
+             and linux_record['native_sha256'] == args.native_sha256
+             and linux_record['source_metadata_sha256'] == sha(source_raw)
+             and linux_record['source_input_sha256'] == args.source_input_sha256
+             and linux_record['sdk_version'] == args.sdk_version and linux_record['engine_version'] == args.engine_version,
+             'Linux artifact differs from actual consumer inputs')
+        b.checksum(linux_record['build_manifest_sha256'])
+        need(json.loads(source_raw)['source']['commit'] == linux_record['public_sha'], 'Linux public source differs')
     payload = wheel_payload(wheel_raw, args.wheel_sha256, args.native_sha256, source_raw,
                             args.source_input_sha256, args.sdk_version, args.engine_version, tag)
     context = b.decode(context_raw)
@@ -289,6 +312,8 @@ def execute(args):
     inputs = [b.path(x) for x in (args.wheel, args.source_metadata, args.driver, args.context, args.runtime_bridge, args.fixtures, args.pip_wheel)]
     if identity_path is not None:
         inputs.append(b.path(identity_path))
+    if linux_artifact is not None:
+        inputs.append(b.path(linux_artifact))
     need(all(p != root and root not in p.parents and p not in root.parents for p in inputs for root in (work, state, b.path(args.venv))),
          'Mutable outputs overlap frozen inputs')
     need(not any(p.is_symlink() for p in (work.parent, *work.parent.parents)), 'Literal output parent')
@@ -297,6 +322,8 @@ def execute(args):
          'context_sha256': args.context_sha256, 'pip_wheel_sha256': PIP_SHA, 'started_monotonic': started, 'deadline_monotonic': deadline,
          'product_acceptance': False})
     def fresh():
+        if linux_artifact is not None:
+            need(sha(b.read_file(linux_artifact, b.MAX_JSON)) == linux_digest, 'Linux artifact original changed')
         if identity_path is not None:
             need(sha(b.read_file(identity_path, b.MAX_JSON)) == identity_sha, 'Wheel identity record changed')
         for p, digest, bound in [(args.wheel, args.wheel_sha256, MAX_FILE), (args.driver, args.driver_sha256, 131072),
@@ -366,7 +393,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', nargs='?', choices=['verify', 'run'], default='verify')
     for key in ('runtime-bridge', 'wheel', 'wheel-sha256', 'native-sha256', 'source-metadata', 'source-input-sha256',
-                'sdk-version', 'engine-version', 'pip-wheel', 'venv', 'identity-path', 'identity-sha256', 'driver', 'driver-sha256', 'context', 'context-sha256', 'fixtures', 'work'):
+                'sdk-version', 'engine-version', 'pip-wheel', 'venv', 'linux-artifact', 'linux-artifact-sha256', 'identity-path', 'identity-sha256', 'driver', 'driver-sha256', 'context', 'context-sha256', 'fixtures', 'work'):
         parser.add_argument('--' + key)
     args = parser.parse_args()
     if args.action == 'verify':
