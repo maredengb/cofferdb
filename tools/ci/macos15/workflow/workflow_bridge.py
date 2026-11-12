@@ -12,11 +12,11 @@ import threading
 import types
 
 PINS = {
-    'runtime_bridge/runtime_bridge.py': 'efc057aeaf8f0f4e74886928fa8a91ce779dc7c16412d8a155e3a4c3996ddf10',
+    'runtime_bridge/runtime_bridge.py': 'a0e9dfdc3e3555a71fe31796a8940ca1b1140f375b9bdf0a6be32b062db60cb5',
     'dynamic_inputs/dynamic_collect.py': 'f56a756a617a47363d04514f759ee7f76977cb6a0494430e43c854ab322c7ca4',
     'native_dependencies/native_closure.py': '786d7878f645048d33eef23ae95a91f92390c3acdbb8f3b8fe2d5a87f1d42a3f',
-    'launch_bridge/launch_bridge.py': 'f1faa82b8b4e0bb2c850a92606ae48b53a60a17f226e0a9a1c6a3be32779524e',
-    'tool_observer/tool_observer.py': 'e0533b98e80cfd57ae6dd088dd4514872c510d8668393f83c9b7d0b08ba2f628',
+    'launch_bridge/launch_bridge.py': '9a3a3cd8785637063474e45879cb0ef8687cd81495417ac7ecc6dd05097a7727',
+    'tool_observer/tool_observer.py': '759acd418a685e74e5e0d53441ff11b4425e32f6aca4bf4bcc2a714d1b20fc8f',
 }
 INPUT_MANIFEST = '5bf396c0711b29f859154c87153476a7ab9812887ed9874363e8963721113c59'
 WHOLE_SECONDS = 7200
@@ -174,7 +174,7 @@ def pipeline(value, modules, root, budget, recheck, *, retain_check=None):
              and type(driver['runtime_drivers']) is list and len(driver['runtime_drivers']) == 3,
              'Complete external driver contract required')
         placeholders = ('wheel', 'wheel_sha256', 'native_sha256', 'venv', 'source_metadata',
-                        'source_input_sha256', 'sdk_version', 'engine_version', 'smoke_work')
+                        'source_input_sha256', 'sdk_version', 'engine_version', 'smoke_work', 'identity_path', 'identity_sha256')
         for item, minor in zip(driver['runtime_drivers'], (12, 13, 14)):
             # Structural only: these tokens are not recorded as actual artifacts.
             b.runtime_driver(item, {'{' + key + '}': 'uninstantiated' for key in placeholders}, [], minor)
@@ -256,12 +256,16 @@ def pipeline(value, modules, root, budget, recheck, *, retain_check=None):
                   'build_manifest': manifest_ref,
                   'empty_venvs_result': empty_result}
         write('data/runtime-inputs.json', bundle)
-        actual = step('runtime-plans', lambda: b.instantiate(bundle, originals))
+        actual = step('runtime-plans', lambda: b.instantiate(bundle, originals, save_identity=lambda minor, record: write('data/cp3%d-wheel-identity.json' % minor, record)))
         need(actual['status'] == 'RUNTIME_PLANS_DERIVED_NOT_EXECUTED'
              and set(actual['plans']) == {'cp312', 'cp313', 'cp314'}, 'Three actual runtime plans required')
+        # Persist the observed identities and exact consumer plans before the first runtime.
+        runtime_plans_ref = write('data/runtime-plans.json', actual)
         runtime_results = {}
         for minor in (12, 13, 14):
             name = 'cp3' + str(minor); entry = actual['plans'][name]
+            need(read(runtime_plans_ref) == actual, 'Original runtime plans changed before consumption')
+            read(actual['observed'][minor - 12]['identity'])
             need(sha(runner.canonical(entry['plan'])) == entry['plan_sha256'], 'Derived runtime digest differs')
             runtime_results[name] = original('runtime', name, entry['plan'])
         def verify_outputs():

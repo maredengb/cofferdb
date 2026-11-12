@@ -109,8 +109,10 @@ class Tests(unittest.TestCase):
             for item, minor in zip(contract['runtime_drivers'], (12, 13, 14)):
                 self.modules['runtime'].runtime_driver(item, {"{" + key + "}": 'fixture' for key in
                     ('wheel', 'wheel_sha256', 'native_sha256', 'venv', 'source_metadata', 'source_input_sha256',
-                     'sdk_version', 'engine_version', 'smoke_work')}, [], minor)
+                     'sdk_version', 'engine_version', 'smoke_work', 'identity_path', 'identity_sha256')}, [], minor)
                 self.assertIn('--pip-wheel', item['arguments'])
+                self.assertIn('{identity_path}', item['arguments'])
+                self.assertIn('{identity_sha256}', item['arguments'])
                 context_ref = next(x for x in item['inputs'] if x['path'].endswith('-context.json'))
                 context = json.loads(Path(context_ref['path']).read_bytes())
                 self.assertEqual(context['cell_id'], 'N%02d' % (minor - 11))

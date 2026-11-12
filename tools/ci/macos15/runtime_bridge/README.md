@@ -1,6 +1,6 @@
 # Mac15 runtime plan bridge
 
-`runtime_bridge.py` joins the results of the existing three-ABI build and empty-venv helpers to the existing sandbox runner. It does not build, install, execute an interpreter, import the SDK or driver, start a subprocess, access the network, or create output directories. Its default `verify` action performs no input reads. The explicit `instantiate` action reads only declared local inputs and prints three plans with their exact raw JSON digests.
+`runtime_bridge.py` joins the results of the existing three-ABI build and empty-venv helpers to the existing sandbox runner. It does not build, install, execute an interpreter, import the SDK or driver, start a subprocess, access the network, or create output directories. Its default `verify` action performs no input reads. The explicit `instantiate` action reads only declared local inputs and prints three plans with their exact raw JSON digests. For a driver template containing the identity placeholders, the caller must additionally select an existing owned 0700 directory with `--identity-dir`; the bridge exclusively creates and reads back one identity record per ABI in that directory before emitting plans. Without this option the original read-only behavior remains available for templates without those placeholders. A failure may leave records for earlier ABIs; preserve and assess them as partial evidence.
 
 This is one component of the Mac15 execution chain. It is **not an executable workflow** or a platform acceptance result. Native closure collection, fresh input checks at every actual SDK command boundary, tool acquisition, installer/driver behavior and workflow dispatch remain separate components. No successful JSON assertion supplies its own provenance.
 
@@ -37,6 +37,7 @@ Only whole argument tokens are substituted:
 
 - `{wheel}` and `{wheel_sha256}` are mandatory and select the actual matching artifact.
 - `{native_sha256}`, `{source_metadata}`, `{source_input_sha256}`, `{sdk_version}`, and `{engine_version}` bind actual build identities.
+- `{identity_path}` and `{identity_sha256}`, when selected together, bind an actual identity record as a driver input.
 - `{venv}` selects the actual new environment; `{smoke_work}` selects a new child of the runner's future work directory.
 
 Unknown or embedded brace expressions are rejected. There is no shell interpolation. Literal arguments are retained. The actual wheel and prepared source metadata are added to the exact driver input list; a conflicting predeclared digest is rejected. Any additional pip wheel, fixture, adapter or assertion file must already be in the external template's input set. The bridge does not grant directory-wide reads for these files.

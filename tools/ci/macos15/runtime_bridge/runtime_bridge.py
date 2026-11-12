@@ -183,6 +183,7 @@ def actual_wheel(filename, record, metadata):
         need(len(native) == 1 and 'cofferdb/_source.json' in names, 'Native/source wheel members missing')
         need(sha(bundle.read(native[0])) == record['native_sha256'], 'Native wheel member identity differs')
         need(decode(bundle.read('cofferdb/_source.json')) == metadata, 'Wheel source metadata differs')
+    return len(raw)
 
 
 def actual_binding(value, expected, r):
@@ -242,12 +243,13 @@ def runtime_driver(template, replacements, required_inputs, minor):
         identity(row)
         need(row['path'] not in inputs or inputs[row['path']] == row, 'Conflicting driver input identity')
         inputs[row['path']] = row
+    need(len(inputs) <= 64, 'Combined unique driver inputs exceed runner limit')
     result['arguments'] = arguments
     result['inputs'] = [inputs[name] for name in sorted(inputs)]
     return result
 
 
-def instantiate(bundle, modules):
+def instantiate(bundle, modules, *, save_identity=None):
     fields = {'schema_version', 'kind', *DOCUMENTS}
     need(type(bundle) is dict and set(bundle) == fields and type(bundle['schema_version']) is int
          and bundle['schema_version'] == 1 and bundle['kind'] == 'mac15_runtime_bridge_inputs_1',
@@ -314,8 +316,22 @@ def instantiate(bundle, modules):
         need(record.get('wheel') == filename and record.get('source_input_sha256') == metadata['source_input_sha256'],
              'Artifact filename/source differs')
         wheel = Path(build['work']) / 'wheels' / ('cp3' + str(minor)) / filename
-        actual_wheel(wheel, record, metadata)
+        wheel_size = actual_wheel(wheel, record, metadata)
         python = actual_binding(bindings[index], empty['runtimes'][index], r)
+        identity_ref = None
+        if save_identity is not None:
+            need(callable(save_identity), 'Identity writer required')
+            template = docs['driver_contract']['runtime_drivers'][index]
+            identity_value = {'schema_version': 1, 'minor': minor, 'wheel': str(wheel),
+                'wheel_size_bytes': wheel_size, 'wheel_sha256': record['sha256'],
+                'native_sha256': record['native_sha256'], 'source_input_sha256': metadata['source_input_sha256'],
+                'source_metadata_sha256': sha(source_raw), 'venv': bindings[index]['venv'],
+                'installer_path': template['path'], 'installer_sha256': template['sha256'],
+                'build_manifest_sha256': bundle['build_manifest']['sha256'],
+                'run_identity': docs['snapshot']['run_identity']}
+            identity_ref = save_identity(minor, identity_value)
+            identity(identity_ref)
+            need(bound_json(identity_ref) == identity_value, 'Original wheel identity changed')
         work = docs['layout']['work_parent'] + '/runtime-cp3' + str(minor)
         evidence = docs['layout']['evidence_parent'] + '/runtime-cp3' + str(minor)
         replacements = {'{wheel}': str(wheel), '{wheel_sha256}': record['sha256'],
@@ -323,8 +339,13 @@ def instantiate(bundle, modules):
                         '{source_metadata}': source_path, '{source_input_sha256}': metadata['source_input_sha256'],
                         '{sdk_version}': metadata['sdk_version'], '{engine_version}': metadata['engine_version'],
                         '{smoke_work}': work + '/smoke'}
+        if identity_ref is not None:
+            replacements.update({'{identity_path}': identity_ref['path'], '{identity_sha256}': identity_ref['sha256']})
+            need({'{identity_path}', '{identity_sha256}'} <= set(template['arguments']),
+                 'Runtime driver must bind the original wheel identity')
         driver = runtime_driver(docs['driver_contract']['runtime_drivers'][index], replacements,
-            [{'path': str(wheel), 'sha256': record['sha256']}, {'path': source_path, 'sha256': sha(source_raw)}], minor)
+            [{'path': str(wheel), 'sha256': record['sha256']}, {'path': source_path, 'sha256': sha(source_raw)}]
+            + ([identity_ref] if identity_ref is not None else []), minor)
         plan = {'schema_version': 1, 'kind': 'macos15_python_runtime_isolation_1',
                 'python': python, 'stdlib': selected['stdlib'], 'dependencies': [],
                 'runtime_files': selected['runtime_files'], 'venv': bindings[index]['venv'],
@@ -340,7 +361,10 @@ def instantiate(bundle, modules):
             r.no_link(path(destination), missing=True)
             need(not os.path.lexists(destination), 'New runtime output already exists')
         plans['cp3' + str(minor)] = {'plan': plan, 'plan_sha256': sha(r.canonical(plan))}
-        observed.append({'minor': minor, 'wheel': str(wheel), 'wheel_sha256': record['sha256'],
+        observed.append({'minor': minor, 'wheel': str(wheel), 'wheel_size_bytes': wheel_size,
+                         'wheel_sha256': record['sha256'], 'native_sha256': record['native_sha256'],
+                         'source_input_sha256': metadata['source_input_sha256'],
+                         'runtime_plan_sha256': plans['cp3' + str(minor)]['plan_sha256'], 'identity': identity_ref,
                          'pyvenv_cfg_sha256': bindings[index]['pyvenv_cfg_sha256']})
     # Re-read all bound documents at the end. This is a bounded observation,
     # not a promise of an atomic filesystem snapshot or a fresh runtime gate.
@@ -353,12 +377,61 @@ def instantiate(bundle, modules):
             'fresh_native_closure_gate_required_before_execution': True}
 
 
+def check_identity_directory(directory, bundle, inputs_path, helper_root, runner):
+    """Keep CLI output separate from selected inputs and future execution roots."""
+    need(type(bundle) is dict and set(bundle) == {'schema_version', 'kind', *DOCUMENTS},
+         'Exact bridge input schema required')
+    layout = bound_json(bundle['layout'])
+    need(type(layout) is dict and set(layout) == {'checkout', 'cargo_home', 'work_parent', 'evidence_parent', 'venv_parent'},
+         'Exact path layout required')
+    protected = [path(inputs_path), path(helper_root)]
+    protected += [path(bundle[name]['path']) for name in DOCUMENTS]
+    protected += [path(value) for value in layout.values()]
+    snapshot = bound_json(bundle['snapshot'])
+    need(type(snapshot) is dict and type(snapshot.get('runtimes')) is list
+         and len(snapshot['runtimes']) == 3 and type(snapshot.get('tools')) is dict
+         and type(snapshot.get('helper_paths')) is dict, 'Snapshot paths required')
+    for runtime in snapshot['runtimes']:
+        need(type(runtime) is dict and type(runtime.get('runtime_files')) is list,
+             'Snapshot runtime paths required')
+        protected.append(path(runtime['stdlib']))
+        identity(runtime['binary']); protected.append(path(runtime['binary']['path']))
+        for row in runtime['runtime_files']:
+            identity(row); protected.append(path(row['path']))
+    for row in snapshot['tools'].values():
+        if row is not None:
+            identity(row); protected.append(path(row['path']))
+    protected.extend(path(value) for value in snapshot['helper_paths'].values())
+    driver = bound_json(bundle['driver_contract'])
+    need(type(driver) is dict and set(driver) == {'runtime_drivers', 'network_probe', 'command_seconds'}
+         and type(driver['runtime_drivers']) is list and len(driver['runtime_drivers']) == 3,
+         'Exact driver contract required')
+    for minor, template in zip((12, 13, 14), driver['runtime_drivers']):
+        need(type(template) is dict and set(template) == {'minor', 'path', 'sha256', 'arguments', 'inputs', 'no_detach_reviewed'}
+             and type(template['minor']) is int and template['minor'] == minor
+             and type(template['inputs']) is list and type(template['arguments']) is list,
+             'Exact ordered driver template required')
+        identity({'path': template['path'], 'sha256': template['sha256']})
+        protected.append(path(template['path']))
+        for row in template['inputs']:
+            identity(row); protected.append(path(row['path']))
+        # Literal absolute argument paths can designate directory inputs such as fixtures.
+        for argument in template['arguments']:
+            need(type(argument) is str and '\0' not in argument, 'Literal driver argument required')
+            candidate = argument if argument.startswith('/') else argument.partition('=')[2]
+            if candidate.startswith('/'):
+                protected.append(path(candidate))
+    need(all(not runner.beneath(directory, item) and not runner.beneath(item, directory) for item in protected),
+         'Identity directory overlaps protected input or execution root')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', nargs='?', choices=['verify', 'instantiate'], default='verify')
     parser.add_argument('--inputs')
     parser.add_argument('--inputs-sha256')
     parser.add_argument('--helper-root')
+    parser.add_argument('--identity-dir')
     args = parser.parse_args()
     if args.action == 'verify':
         result = {'status': 'RUNTIME_BRIDGE_NOT_EXECUTED', 'sdk_executed': False}
@@ -366,7 +439,23 @@ def main():
         checksum(args.inputs_sha256)
         raw = read_file(args.inputs, MAX_JSON)
         need(sha(raw) == args.inputs_sha256, 'Bridge input root digest differs')
-        result = instantiate(decode(raw), load_helpers(args.helper_root))
+        modules = load_helpers(args.helper_root)
+        bundle = decode(raw)
+        save_identity = None
+        if args.identity_dir is not None:
+            directory = path(args.identity_dir)
+            modules['runner.py'].no_link(directory)
+            info = directory.stat()
+            need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                 and stat.S_IMODE(info.st_mode) == 0o700, 'Owned private identity directory required')
+            check_identity_directory(directory, bundle, args.inputs, args.helper_root, modules['runner.py'])
+            def save_identity(minor, value):
+                selected = directory / ('cp3%d-wheel-identity.json' % minor)
+                modules['runner.py'].save(selected, value)
+                reference = {'path': str(selected), 'sha256': sha(canonical(value))}
+                need(bound_json(reference) == value, 'Written wheel identity differs')
+                return reference
+        result = instantiate(bundle, modules, save_identity=save_identity)
     print(canonical(result).decode(), end='')
     return 0
 

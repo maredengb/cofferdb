@@ -21,7 +21,7 @@ import time
 import types
 import zipfile
 
-BRIDGE_SHA = 'efc057aeaf8f0f4e74886928fa8a91ce779dc7c16412d8a155e3a4c3996ddf10'
+BRIDGE_SHA = 'a0e9dfdc3e3555a71fe31796a8940ca1b1140f375b9bdf0a6be32b062db60cb5'
 MAX_FILE = 128 * 1024 ** 2
 
 
@@ -252,6 +252,27 @@ def execute(args):
     need(b.path(args.pip_wheel).name == PIP_NAME and len(pip_raw) == PIP_BYTES and sha(pip_raw) == PIP_SHA, 'Fixed pip 25.3 wheel identity')
     driver_raw = b.read_file(args.driver, 131072); context_raw = b.read_file(args.context, b.MAX_JSON)
     need(sha(driver_raw) == args.driver_sha256 and sha(context_raw) == args.context_sha256, 'External driver/context differs')
+    identity_path = getattr(args, 'identity_path', None)
+    identity_sha = getattr(args, 'identity_sha256', None)
+    need((identity_path is None) == (identity_sha is None), 'Identity path and digest required together')
+    if identity_path is not None:
+        b.checksum(identity_sha)
+        identity_raw = b.read_file(identity_path, b.MAX_JSON)
+        need(sha(identity_raw) == identity_sha, 'Wheel identity record changed')
+        identity = b.decode(identity_raw)
+        fields = {'schema_version', 'minor', 'wheel', 'wheel_size_bytes', 'wheel_sha256', 'native_sha256',
+                  'source_input_sha256', 'source_metadata_sha256', 'venv', 'installer_path',
+                  'installer_sha256', 'build_manifest_sha256', 'run_identity'}
+        need(type(identity) is dict and set(identity) == fields and type(identity['schema_version']) is int and identity['schema_version'] == 1
+             and type(identity['minor']) is int and identity['minor'] == sys.version_info.minor
+             and identity['wheel'] == args.wheel and type(identity['wheel_size_bytes']) is int
+             and identity['wheel_size_bytes'] == len(wheel_raw) and identity['wheel_sha256'] == args.wheel_sha256
+             and identity['native_sha256'] == args.native_sha256 and identity['source_input_sha256'] == args.source_input_sha256
+             and identity['source_metadata_sha256'] == sha(source_raw) and identity['venv'] == args.venv
+             and identity['installer_path'] == str(Path(__file__).absolute())
+             and identity['installer_sha256'] == sha(b.read_file(identity['installer_path'], 131072)),
+             'Wheel identity record differs from actual inputs')
+        b.checksum(identity['build_manifest_sha256'])
     payload = wheel_payload(wheel_raw, args.wheel_sha256, args.native_sha256, source_raw,
                             args.source_input_sha256, args.sdk_version, args.engine_version, tag)
     context = b.decode(context_raw)
@@ -259,8 +280,15 @@ def execute(args):
     need(type(context) is dict and set(context) == fields and type(context['files_sha256']) is dict,
          'Exact caller driver context required')
     need(all(type(context[key]) is str and context[key].strip() for key in fields - {'files_sha256'}), 'Actual caller context required')
+    if identity_path is not None:
+        run = identity['run_identity']
+        need(type(run) is dict and set(run) == {'run_id', 'attempt', 'nonce'}
+             and context['attempt_id'] == str(run['run_id']) + '-' + str(run['attempt']),
+             'Wheel identity and consumer attempt differ')
     for name, digest in context['files_sha256'].items(): member(name); b.checksum(digest)
     inputs = [b.path(x) for x in (args.wheel, args.source_metadata, args.driver, args.context, args.runtime_bridge, args.fixtures, args.pip_wheel)]
+    if identity_path is not None:
+        inputs.append(b.path(identity_path))
     need(all(p != root and root not in p.parents and p not in root.parents for p in inputs for root in (work, state, b.path(args.venv))),
          'Mutable outputs overlap frozen inputs')
     need(not any(p.is_symlink() for p in (work.parent, *work.parent.parents)), 'Literal output parent')
@@ -269,6 +297,8 @@ def execute(args):
          'context_sha256': args.context_sha256, 'pip_wheel_sha256': PIP_SHA, 'started_monotonic': started, 'deadline_monotonic': deadline,
          'product_acceptance': False})
     def fresh():
+        if identity_path is not None:
+            need(sha(b.read_file(identity_path, b.MAX_JSON)) == identity_sha, 'Wheel identity record changed')
         for p, digest, bound in [(args.wheel, args.wheel_sha256, MAX_FILE), (args.driver, args.driver_sha256, 131072),
                                  (args.context, args.context_sha256, b.MAX_JSON), (args.source_metadata, sha(source_raw), b.MAX_JSON),
                                  (args.runtime_bridge, BRIDGE_SHA, 131072), (args.pip_wheel, PIP_SHA, PIP_BYTES)]:
@@ -336,7 +366,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', nargs='?', choices=['verify', 'run'], default='verify')
     for key in ('runtime-bridge', 'wheel', 'wheel-sha256', 'native-sha256', 'source-metadata', 'source-input-sha256',
-                'sdk-version', 'engine-version', 'pip-wheel', 'venv', 'driver', 'driver-sha256', 'context', 'context-sha256', 'fixtures', 'work'):
+                'sdk-version', 'engine-version', 'pip-wheel', 'venv', 'identity-path', 'identity-sha256', 'driver', 'driver-sha256', 'context', 'context-sha256', 'fixtures', 'work'):
         parser.add_argument('--' + key)
     args = parser.parse_args()
     if args.action == 'verify':

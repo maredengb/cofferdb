@@ -184,6 +184,25 @@ class Tests(unittest.TestCase):
             self.assertEqual(value['plan_sha256'], m.sha(self.r.canonical(value['plan'])))
             self.assertEqual(value['plan']['dependencies'], [])
 
+    def test_identity_record_binds_bytes_and_runtime_plan(self):
+        for template in self.docs['driver_contract']['runtime_drivers']:
+            template['arguments'] += ['{identity_path}', '{identity_sha256}']
+        self.docs['config']['driver_contract_sha256'] = self.d.sha(self.d.raw(self.docs['driver_contract']))
+        self.docs['snapshot']['config_sha256'] = self.d.sha(self.d.raw(self.docs['config']))
+        self.docs['native_closure']['snapshot_sha256'] = self.d.sha(self.d.raw(self.docs['snapshot']))
+        self.refresh()
+        def save_identity(minor, value):
+            return self.write(self.root / ('identity-%d.json' % minor), m.canonical(value), 0o600)
+        result = m.instantiate(self.bundle, self.modules, save_identity=save_identity)
+        for observed in result['observed']:
+            reference = observed['identity']
+            data = json.loads(Path(reference['path']).read_bytes())
+            self.assertEqual(data['wheel_size_bytes'], len(Path(data['wheel']).read_bytes()))
+            self.assertEqual(data['wheel_sha256'], m.sha(Path(data['wheel']).read_bytes()))
+            plan = result['plans']['cp3' + str(data['minor'])]['plan']
+            self.assertIn(reference, plan['driver']['inputs'])
+            self.assertIn(reference['sha256'], plan['driver']['arguments'])
+
     def test_failed_or_boolean_exit_cannot_become_plan(self):
         for code in (1, -15, False, None):
             self.docs['build_result']['records'][0]['actual_command_exit_code'] = code
@@ -290,6 +309,17 @@ class Tests(unittest.TestCase):
                                  '{source_metadata}': '/some/source', '{smoke_work}': '/some/work'},
                              [{'path': '/some/wheel', 'sha256': 'b' * 64}], 12)
 
+    def test_unique_input_limit_includes_required_inputs(self):
+        template = copy.deepcopy(self.docs['driver_contract']['runtime_drivers'][0])
+        template['arguments'] = ['{wheel}', '{wheel_sha256}']
+        template['inputs'] = [{'path': '/input/%02d' % i, 'sha256': 'a' * 64} for i in range(62)]
+        replacements = {'{wheel}': '/wheel', '{wheel_sha256}': 'b' * 64}
+        required = [{'path': '/required/%d' % i, 'sha256': 'b' * 64} for i in range(3)]
+        with self.assertRaisesRegex(ValueError, 'Combined unique'):
+            m.runtime_driver(template, replacements, required, 12)
+        required[2] = template['inputs'][0]
+        self.assertEqual(len(m.runtime_driver(template, replacements, required, 12)['inputs']), 64)
+
     def test_existing_runtime_output_rejected(self):
         (self.root / 'work/runtime-cp312').mkdir()
         with self.assertRaisesRegex(ValueError, 'output already exists'):
@@ -312,6 +342,121 @@ class Tests(unittest.TestCase):
         alias.symlink_to(selected)
         with self.assertRaises(OSError):
             m.read_file(str(alias))
+
+    def cli_with_identity_dir(self, directory, action):
+        raw = m.canonical({'fixture': True})
+        args = argparse.Namespace(action='instantiate', inputs='/synthetic', inputs_sha256=m.sha(raw),
+                                  helper_root='/synthetic', identity_dir=str(directory))
+        with patch.object(m.argparse.ArgumentParser, 'parse_args', return_value=args), \
+             patch.object(m, 'read_file', return_value=raw), \
+             patch.object(m, 'load_helpers', return_value={'runner.py': self.r}), \
+             patch.object(m, 'instantiate', side_effect=action), \
+             patch.object(m, 'check_identity_directory'), \
+             patch('sys.stdout', new=io.StringIO()):
+            return m.main()
+
+    def test_cli_identity_writer_saves_and_binds_actual_bytes(self):
+        directory = self.root / 'identity'; directory.mkdir(mode=0o700)
+        def instantiate(_bundle, _modules, *, save_identity):
+            ref = save_identity(12, {'value': 'synthetic'})
+            raw = Path(ref['path']).read_bytes()
+            self.assertEqual(ref['sha256'], m.sha(raw))
+            self.assertEqual(json.loads(raw), {'value': 'synthetic'})
+            return {'synthetic': True}
+        # Only substitute the bundle read; record readback must access real bytes.
+        original_read = m.read_file
+        def read(value, *args):
+            return m.canonical({'fixture': True}) if value == '/synthetic' else original_read(value, *args)
+        with patch.object(m, 'read_file', side_effect=read):
+            # cli_with_identity_dir supplies its own read mock, so exercise via explicit CLI mocks here.
+            args = argparse.Namespace(action='instantiate', inputs='/synthetic', inputs_sha256=m.sha(m.canonical({'fixture': True})),
+                                      helper_root='/synthetic', identity_dir=str(directory))
+            with patch.object(m.argparse.ArgumentParser, 'parse_args', return_value=args), \
+                 patch.object(m, 'load_helpers', return_value={'runner.py': self.r}), \
+                 patch.object(m, 'instantiate', side_effect=instantiate), patch.object(m, 'check_identity_directory'), patch('sys.stdout', new=io.StringIO()):
+                self.assertEqual(m.main(), 0)
+
+    def test_identity_directory_rejects_all_protected_overlaps(self):
+        layout = self.docs['layout']
+        for value in layout.values():
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'overlaps protected'):
+                    m.check_identity_directory(Path(value), self.bundle, str(self.root / 'bundle.json'),
+                                               str(self.root / 'helpers'), self.r)
+        with self.assertRaisesRegex(ValueError, 'overlaps protected'):
+            m.check_identity_directory(Path(self.bundle['config']['path']).parent, self.bundle,
+                                       str(self.root / 'bundle.json'), str(self.root / 'helpers'), self.r)
+        m.check_identity_directory(self.root / 'isolated', self.bundle, str(self.root / 'bundle.json'),
+                                   str(self.root / 'helpers'), self.r)
+
+    def test_identity_directory_rejects_driver_and_declared_inputs(self):
+        contract = self.docs['driver_contract']
+        template = contract['runtime_drivers'][0]
+        for field in ('driver', 'input', 'directory_argument'):
+            with self.subTest(field=field):
+                template['path'] = str(self.root / 'external/driver.py')
+                template['inputs'] = [{'path': str(self.root / 'external/fixture.json'), 'sha256': 'a' * 64}]
+                template['arguments'] = ['{wheel}', '{wheel_sha256}', '--fixtures', str(self.root / 'external/fixtures')]
+                self.refresh()
+                selected = {'driver': self.root / 'external', 'input': self.root / 'external/fixture.json',
+                            'directory_argument': self.root / 'external/fixtures'}[field]
+                with self.assertRaisesRegex(ValueError, 'overlaps protected'):
+                    m.check_identity_directory(selected, self.bundle, str(self.root / 'bundle.json'),
+                                               str(self.root / 'helpers'), self.r)
+        template['arguments'] = ['{wheel}', '{wheel_sha256}', '--fixtures=' + str(self.root / 'external/fixtures')]
+        self.refresh()
+        with self.assertRaisesRegex(ValueError, 'overlaps protected'):
+            m.check_identity_directory(self.root / 'external/fixtures', self.bundle, str(self.root / 'bundle.json'),
+                                       str(self.root / 'helpers'), self.r)
+        contract_path = Path(self.bundle['driver_contract']['path'])
+        contract_path.write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'Bound input digest'):
+            m.check_identity_directory(self.root / 'isolated', self.bundle, str(self.root / 'bundle.json'),
+                                       str(self.root / 'helpers'), self.r)
+
+    def test_identity_directory_rejects_snapshot_runtime_and_tool_paths(self):
+        snapshot = self.docs['snapshot']
+        runtime = snapshot['runtimes'][0]
+        runtime['runtime_files'] = [{'path': str(self.root / 'other/native/module.so'), 'sha256': 'd' * 64}]
+        self.refresh()
+        selected = [runtime['stdlib'], str(Path(runtime['stdlib']).parent), runtime['binary']['path'],
+                    runtime['runtime_files'][0]['path'], snapshot['tools']['cargo']['path'],
+                    next(iter(snapshot['helper_paths'].values()))]
+        for value in selected:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, 'overlaps protected'):
+                    m.check_identity_directory(Path(value), self.bundle, str(self.root / 'bundle.json'),
+                                               str(self.root / 'helpers'), self.r)
+        snapshot_path = Path(self.bundle['snapshot']['path']); snapshot_path.write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'Bound input digest'):
+            m.check_identity_directory(self.root / 'isolated', self.bundle, str(self.root / 'bundle.json'),
+                                       str(self.root / 'helpers'), self.r)
+
+    def test_cli_rejects_public_and_symlink_identity_directories(self):
+        directory = self.root / 'public'; directory.mkdir(mode=0o755); directory.chmod(0o755)
+        with self.assertRaises(ValueError): self.cli_with_identity_dir(directory, lambda *a, **kw: {})
+        private = self.root / 'private'; private.mkdir(mode=0o700)
+        link = self.root / 'link'; link.symlink_to(private)
+        with self.assertRaises((ValueError, OSError)): self.cli_with_identity_dir(link, lambda *a, **kw: {})
+
+    def test_cli_partial_record_remains_on_next_write_failure(self):
+        directory = self.root / 'identity'; directory.mkdir(mode=0o700)
+        # Existing second file causes exclusive creation to fail after the first succeeds.
+        (directory / 'cp313-wheel-identity.json').write_text('original')
+        original_read = m.read_file
+        def read(value, *args):
+            return m.canonical({'fixture': True}) if value == '/synthetic' else original_read(value, *args)
+        def instantiate(_bundle, _modules, *, save_identity):
+            save_identity(12, {'value': 12}); save_identity(13, {'value': 13})
+        args = argparse.Namespace(action='instantiate', inputs='/synthetic', inputs_sha256=m.sha(m.canonical({'fixture': True})),
+                                  helper_root='/synthetic', identity_dir=str(directory))
+        with patch.object(m.argparse.ArgumentParser, 'parse_args', return_value=args), \
+             patch.object(m, 'read_file', side_effect=read), \
+             patch.object(m, 'load_helpers', return_value={'runner.py': self.r}), \
+             patch.object(m, 'instantiate', side_effect=instantiate), patch.object(m, 'check_identity_directory'), patch('sys.stdout', new=io.StringIO()):
+            with self.assertRaises(FileExistsError): m.main()
+        self.assertEqual(json.loads((directory / 'cp312-wheel-identity.json').read_bytes()), {'value': 12})
+        self.assertEqual((directory / 'cp313-wheel-identity.json').read_text(), 'original')
 
     def test_default_verify_is_inert(self):
         args = argparse.Namespace(action='verify')

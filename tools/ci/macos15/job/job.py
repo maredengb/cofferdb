@@ -10,9 +10,9 @@ import sys
 import time
 import types
 
-WORKFLOW_SHA = '57a341fff98e9da1f8ea60f2f3eb5c86f818673fa271abaae677e69a6c9cdb67'
+WORKFLOW_SHA = '74246e3855744848bf98173ac4ba6d74f5f7595e56c263b17568d89512942be2'
 PREPARER_SHA = '99a394b4c5c247800f525aa716091872fd82ac3c2bb93168c3c92374f6419daf'
-INSTALLER_SHA = 'e6a7faa56557df3fd1e0a2dfc335807a2ffe17695b5b3f7ea560e0a023bf832a'
+INSTALLER_SHA = 'f3456160b11fc9e330d1683a813edaa1edb3d8f128fa6eb99956bec4b4538316'
 BUSINESS_SHA = '0db442b087a9a1b69dab32263f60ddc799c7a7ec5b3a3735fd73c0b4e6483152'
 PIP = {'name': 'pip-25.3-py3-none-any.whl', 'bytes': 1778622,
        'sha256': '9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd',
@@ -228,7 +228,7 @@ def driver_contract(b, r, root, inputs, job, execution_reference, preflight_ref,
         r.save(context_path, context); context_ref = {'path': str(context_path), 'sha256': sha(canonical(context))}
         need(b.read_file(str(context_path), 2 ** 20) == canonical(context), 'Original context write changed')
         args = ['run', '--pip-wheel', str(pip_path), '--runtime-bridge', str(bridge_path), '--wheel', '{wheel}', '--wheel-sha256', '{wheel_sha256}',
-                '--native-sha256', '{native_sha256}', '--source-metadata', '{source_metadata}',
+                '--native-sha256', '{native_sha256}', '--identity-path', '{identity_path}', '--identity-sha256', '{identity_sha256}', '--source-metadata', '{source_metadata}',
                 '--source-input-sha256', '{source_input_sha256}', '--sdk-version', '{sdk_version}',
                 '--engine-version', '{engine_version}', '--venv', '{venv}', '--driver', str(driver),
                 '--driver-sha256', BUSINESS_SHA, '--context', str(context_path), '--context-sha256', context_ref['sha256'],

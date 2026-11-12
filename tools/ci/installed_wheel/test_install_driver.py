@@ -141,6 +141,58 @@ class Tests(unittest.TestCase):
         contract = json.loads((self.parent / 'smoke-installation/driver-contract.json').read_bytes())
         self.assertEqual(contract['identity'], result['identity']['identity'])
 
+    def test_wheel_identity_rejects_wrong_size_before_installer(self):
+        record_path = self.inputs / 'wheel-identity.json'
+        record = {'schema_version': 1, 'minor': sys.version_info.minor, 'wheel': str(self.wheel),
+                  'wheel_size_bytes': len(self.wheel.read_bytes()) + 1, 'wheel_sha256': self.args.wheel_sha256,
+                  'native_sha256': self.args.native_sha256, 'source_input_sha256': self.args.source_input_sha256,
+                  'source_metadata_sha256': t.sha(self.source_raw), 'venv': str(self.venv),
+                  'installer_path': str(Path(t.__file__).absolute()), 'installer_sha256': t.sha(Path(t.__file__).read_bytes()),
+                  'build_manifest_sha256': 'c' * 64, 'run_identity': {'run_id': '1', 'attempt': '1', 'nonce': 'collect'}}
+        record_path.write_bytes(t.canonical(record))
+        self.args.identity_path = str(record_path); self.args.identity_sha256 = t.sha(record_path.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'Wheel identity record differs'):
+            self.run_execute()
+        self.assertEqual(self.calls, [])
+
+    def make_identity(self, attempt='1'):
+        context = json.loads(self.context.read_bytes()); context['attempt_id'] = '42-1'
+        self.context.write_bytes(t.canonical(context)); self.args.context_sha256 = t.sha(self.context.read_bytes())
+        record = {'schema_version': 1, 'minor': sys.version_info.minor, 'wheel': str(self.wheel),
+                  'wheel_size_bytes': len(self.wheel.read_bytes()), 'wheel_sha256': self.args.wheel_sha256,
+                  'native_sha256': self.args.native_sha256, 'source_input_sha256': self.args.source_input_sha256,
+                  'source_metadata_sha256': t.sha(self.source_raw), 'venv': str(self.venv),
+                  'installer_path': str(Path(t.__file__).absolute()), 'installer_sha256': t.sha(Path(t.__file__).read_bytes()),
+                  'build_manifest_sha256': 'c' * 64, 'run_identity': {'run_id': '42', 'attempt': attempt, 'nonce': 'collect'}}
+        selected = self.inputs / 'identity.json'; selected.write_bytes(t.canonical(record))
+        self.args.identity_path = str(selected); self.args.identity_sha256 = t.sha(selected.read_bytes())
+        return selected
+
+    def test_matching_identity_reaches_substituted_install(self):
+        self.make_identity()
+        self.assertEqual(self.run_execute()['status'], 'EXACT_OFFLINE_INSTALL_AND_DRIVER_COMPLETED')
+
+    def test_identity_boolean_schema_version_rejected(self):
+        selected = self.make_identity(); record = json.loads(selected.read_bytes())
+        record['schema_version'] = True; selected.write_bytes(t.canonical(record))
+        self.args.identity_sha256 = t.sha(selected.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'Wheel identity record differs'): self.run_execute()
+        self.assertEqual(self.calls, [])
+
+    def test_identity_attempt_mismatch_stops_before_installer(self):
+        self.make_identity(attempt='2')
+        with self.assertRaisesRegex(ValueError, 'attempt differ'): self.run_execute()
+        self.assertEqual(self.calls, [])
+
+    def test_identity_tamper_stops_before_installer(self):
+        selected = self.make_identity(); selected.write_bytes(b'{}')
+        with self.assertRaisesRegex(ValueError, 'identity record changed'): self.run_execute()
+        self.assertEqual(self.calls, [])
+
+    def test_legacy_linux_without_identity_parameters(self):
+        with patch.object(t.platform, 'system', return_value='Linux'):
+            self.assertEqual(self.run_execute()['status'], 'EXACT_OFFLINE_INSTALL_AND_DRIVER_COMPLETED')
+
     def test_installer_failure_stops_no_sdk_load(self):
         def failed(argv, **kw): self.calls.append((argv, kw)); return types.SimpleNamespace(returncode=1)
         with self.assertRaisesRegex(ValueError, 'installer failed'): self.run_execute(process=failed)

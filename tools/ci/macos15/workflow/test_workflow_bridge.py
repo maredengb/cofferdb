@@ -133,7 +133,7 @@ class Tests(unittest.TestCase):
         self.write(out / 'RESULT.json', result)
         return {'status': 'ORIGINAL_STEP_CAPTURED_WITH_FRESH_INPUTS_NOT_ACCEPTANCE', 'original_result': result}
 
-    def instantiate(self, bundle, modules):
+    def instantiate(self, bundle, modules, *, save_identity):
         self.events.append('runtime-plans'); self.assertIs(modules, self.originals)
         self.assertEqual(set(bundle), {'schema_version', 'kind', *self.b.DOCUMENTS})
         for name in self.b.DOCUMENTS:
@@ -143,7 +143,8 @@ class Tests(unittest.TestCase):
             name = 'cp3' + str(minor); plan = {'evidence': layout['evidence_parent'] + '/runtime-' + name}
             plans[name] = {'plan': plan, 'plan_sha256': t.sha(self.r.canonical(plan))}
             wheel = Path(layout['work_parent']) / (name + '.whl'); wheel.write_bytes(b'not a wheel; fixture only')
-            artifacts.append({'minor': minor, 'wheel': str(wheel), 'wheel_sha256': t.sha(wheel.read_bytes())})
+            ref = save_identity(minor, {'fixture': name})
+            artifacts.append({'minor': minor, 'wheel': str(wheel), 'wheel_sha256': t.sha(wheel.read_bytes()), 'identity': ref})
         return {'status': 'RUNTIME_PLANS_DERIVED_NOT_EXECUTED', 'plans': plans, 'observed': artifacts,
                 'source_commit': '1' * 40, 'source_tree': '2' * 40}
 
