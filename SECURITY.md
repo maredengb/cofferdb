@@ -1,6 +1,6 @@
 # Security policy
 
-CofferDB is experimental pre-release software. No stable supported-version window
+CofferDB is pre-release software. No stable supported-version window
 or security-response SLA is promised at this stage. It is a local retrieval engine,
 not an encrypted store, authenticated service or multi-tenant security boundary.
 

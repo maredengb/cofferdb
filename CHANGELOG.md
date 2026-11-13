@@ -33,7 +33,7 @@ effect on application relevance.
 
 ## 0.1.0
 
-Initial experimental Rust library and CLI for local embedded retrieval.
+Initial Rust library and CLI for local embedded retrieval.
 
 - Store documents, chunks, metadata and externally generated vectors in a single database file.
 - Search with BM25, exact cosine-vector scoring and weighted hybrid fusion, with metadata filters and explain output.
@@ -45,7 +45,7 @@ Initial experimental Rust library and CLI for local embedded retrieval.
 
 ### Compatibility and upgrades
 
-Compared with earlier experimental snapshots, 0.1.0 makes JSON limits and
+Compared with earlier snapshots, 0.1.0 makes JSON limits and
 conditional error diagnostics explicit, distinguishes controlled resource refusal,
 and permits a nullable ordinary `suggested_action`. Compaction counters describe
 committed business records; retained-file writers, embedding-model consistency,
@@ -66,5 +66,5 @@ security documentation describe compatibility and data-handling limitations.
 This entry describes the 0.1.0 feature set. See the
 [releases page](https://github.com/maredengb/coffered/releases) for publication
 status and downloadable artifacts. Platform binaries and their checksums are
-separate release artifacts; experimental status and the limitations above remain
-applicable after publication.
+separate release artifacts; the limitations above remain applicable after
+publication.

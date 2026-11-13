@@ -5,7 +5,7 @@ chunks, metadata and optional embeddings. The engine does not generate embedding
 or contact a model service. It combines lexical and vector retrieval locally and
 explains the scores of returned results.
 
-This describes the current experimental implementation. It is not a declaration
+This describes the current implementation. It is not a declaration
 of completed release acceptance, a stable file-format promise or a claim about
 application relevance or comparative performance.
 

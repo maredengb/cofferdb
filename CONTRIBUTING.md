@@ -1,6 +1,6 @@
 # Contributing
 
-CofferDB is an experimental embedded Rust library and CLI. Start with the
+CofferDB is an embedded Rust library and CLI. Start with the
 [README](README.md), [architecture overview](docs/architecture.md) and runnable
 [examples](README.md#rust-library-and-examples). These files describe the public
 product without requiring separate planning documents.

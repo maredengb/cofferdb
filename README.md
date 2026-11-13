@@ -3,7 +3,7 @@
 A single-file, embedded Rust retrieval database for explainable local search and
 RAG applications. Use the Rust library in your application or the `coffer` CLI to
 import documents, search with keywords and externally supplied vectors, and
-inspect how each result was ranked. The experimental 0.1.1 sources also provide
+inspect how each result was ranked. The 0.1.1 sources also provide
 an in-process Python binding to the same engine. The Rust source crate does not
 include the Python binding source; use the complete matching source tree for
 Python source builds.
@@ -18,7 +18,7 @@ candidates** until the [matching published release record](https://github.com/ma
 identifies their exact source revision and artifact checksums. A source checkout
 alone does not establish publication or validation.
 
-**Status: experimental.** Check the [releases page](https://github.com/maredengb/cofferdb/releases)
+Check the [releases page](https://github.com/maredengb/cofferdb/releases)
 for published versions and downloadable artifacts. File-format compatibility across
 future releases and production durability are not guaranteed. Documented commit,
 recovery and integrity contracts still apply. Keep original inputs and export backups. No certified retrieval-quality

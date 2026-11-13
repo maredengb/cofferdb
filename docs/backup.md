@@ -1,6 +1,6 @@
 # Backup, export and data handling
 
-Keep original inputs and independent backups when using this experimental
+Keep original inputs and independent backups when using this
 pre-release. Storage integrity, application relevance and backup completeness are
 different checks. `check` is read-only and is not a repair command or an evaluation
 of whether the stored text answers a user's question.

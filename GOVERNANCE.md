@@ -14,7 +14,7 @@ artificial restrictions that reserve its existing retrieval capabilities for a
 paid service.
 
 Product documentation and release notes should distinguish delivered behavior,
-experimental work and future plans. Compatibility changes need explicit notes.
+ongoing work and future plans. Compatibility changes need explicit notes.
 Performance and retrieval-quality statements need evidence for their stated
 scope, including regressions and measurement limitations.
 

@@ -1,7 +1,7 @@
 # 0.1.0 compatibility and upgrade notes
 
 These notes apply to the 0.1.0 library, CLI and interchange artifacts. Earlier
-experimental snapshots did not all implement the same input and scoring rules.
+snapshots did not all implement the same input and scoring rules.
 Keep the producing version, original inputs and an independent backup when moving
 between snapshots. A JSON `schema_version` of `"0.1"` alone does not establish
 compatibility with every previous client or snapshot.
@@ -16,7 +16,7 @@ metadata, a filter, weights or a configuration, rather than an entire surroundin
 CLI response or JSONL dataset. These are processing limits, not a claim that a refused value is
 invalid JSON, a whole-dataset limit or a total-process RSS limit.
 
-Earlier experimental importers included a 1 MiB raw manifest guard and a 64 MiB
+Earlier importers included a 1 MiB raw manifest guard and a 64 MiB
 per-JSONL-file raw-input cap, also constrained by the remaining atomic-import
 budget. Those wire-size guards are not the current business-root and canonical-size
 policy. Whitespace, wrapping and operation workspace can affect
@@ -62,7 +62,7 @@ still count in the compacted file.
 alias for `records_removed`, and the two values must not be added as independent
 reclaimed totals. Replacing a collection tombstone with an equivalent drop can
 produce `records_removed = 0` and `tombstones_removed = 1`. Clients that interpreted
-older experimental counters as deleted-object totals must update that logic.
+older counters as deleted-object totals must update that logic.
 `segments_merged` counts old persistent index segment records processed, not the
 number of final queryable segments; use index statistics for the latter.
 

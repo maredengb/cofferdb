@@ -3,7 +3,7 @@
 legacy-2d9eb64.hex is a byte-for-byte hex encoding of a real database produced by
 unmodified cofferdb code from commit 2d9eb64 (git archive, cargo build, init, import
 examples/code/import_manifest.json). It has a config-less collection and schema-1
-text suffix using the previous experimental tokenizer. It contains only synthetic
+text suffix using the previous tokenizer. It contains only synthetic
 public fixture text and relative source paths. Do not regenerate from current
 storage.rs: that would stop testing an independently produced old format.
 

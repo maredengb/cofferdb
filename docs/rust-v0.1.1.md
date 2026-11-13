@@ -1,6 +1,6 @@
 # Rust 0.1.1 programming guide
 
-This guide describes the experimental 0.1.1 implementation in this source tree.
+This guide describes the 0.1.1 implementation in this source tree.
 Check the [release record](https://github.com/maredengb/cofferdb/releases) for
 available packages and their validation results. The
 [0.1.0 guide](rust-v0.1.0.md) covers the retained lifecycle, configuration,

@@ -1,7 +1,7 @@
 # CofferDB programming documentation
 
 Documentation follows the version of the library or installed Python package.
-The 0.1.1 material describes an experimental API. Treat a source revision or
+The 0.1.1 material describes its API. Treat a source revision or
 artifact as unreleased until it is identified in the matching release record.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) for
 available artifacts, checksums and validation results for specific environments.

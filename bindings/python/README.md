@@ -1,6 +1,6 @@
 # CofferDB Python 0.1.1
 
-This source contains the experimental in-process binding for CofferDB 0.1.1.
+This source contains the in-process binding for CofferDB 0.1.1.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) to find
 available artifacts, their checksums and package-specific validation results.
 The native extension statically links the Rust engine from the same source tree.

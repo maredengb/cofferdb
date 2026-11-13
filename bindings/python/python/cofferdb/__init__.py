@@ -1,4 +1,4 @@
-"""Experimental in-process CofferDB binding for version 0.1.1."""
+"""In-process CofferDB binding for version 0.1.1."""
 
 from ._runtime import check_runtime as _check_runtime
 

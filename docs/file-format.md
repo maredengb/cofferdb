@@ -1,6 +1,6 @@
 # File format and recovery boundaries
 
-This is an overview of the current experimental binary implementation. Keep
+This is an overview of the current binary implementation. Keep
 original JSONL inputs and exported backups. The presence of version fields and
 byte-level tests does not itself promise compatibility with future releases or
 complete format freeze. Use the matching CLI/API to read files rather than editing

@@ -246,7 +246,7 @@ def build(source, legacy, output, cargo, legacy_commit):
                                  extensions=["tables", "fenced_code", "toc", LocalLinks(relative, rendered)])
         (copied / relative.with_suffix(".html")).write_text(page(relative.stem, body), encoding="utf-8")
     body = (f"<h1>CofferDB {html.escape(version)} offline reference</h1>"
-            "<p>Experimental API documentation. See the matching release record for artifact availability and package-specific validation results. Generated references do not imply full version or platform acceptance.</p>"
+            "<p>API documentation. See the matching release record for artifact availability and package-specific validation results. Generated references do not imply full version or platform acceptance.</p>"
             "<ul><li><a href='source/docs/README.html'>Versioned programming guides</a></li>"
             f"<li><a href='rust-{version}/cofferdb/index.html'>Rust {html.escape(version)} API</a></li>"
             "<li><a href='rust-0.1.0/cofferdb/index.html'>Rust 0.1.0 API, generated from its own source</a></li>"

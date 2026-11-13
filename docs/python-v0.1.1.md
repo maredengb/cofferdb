@@ -1,8 +1,8 @@
 # Python 0.1.1 programming guide
 
-The complete source tree contains an experimental synchronous, in-process
+The complete source tree contains a synchronous, in-process
 Python API; the Rust source crate does not include the binding source. There is
-no 0.1.0 Python API. Version 0.1.1 is experimental. Treat a matching wheel as
+no 0.1.0 Python API. Treat a matching wheel as
 unreleased until it and its checksum are identified in the
 [release record](https://github.com/maredengb/cofferdb/releases).
 `cofferdb.__version__` identifies the SDK;
