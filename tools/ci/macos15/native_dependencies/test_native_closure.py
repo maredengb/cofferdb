@@ -211,7 +211,7 @@ class Tests(unittest.TestCase):
             base = runtime['binary']['path']
             self.assertIn((base, base), calls)
 
-    def installed_framework_graph_fixture(self):
+    def installed_framework_graph_fixture(self, *, python314_tcl9=False):
         policy = OBSERVER.installed_policy(); limits = policy.host_limits; calls = []
 
         def fixture_limits(value, role, private_root=None, file_info=None):
@@ -231,7 +231,8 @@ class Tests(unittest.TestCase):
         for minor in (12, 13, 14):
             provider = self.root / 'Library/Frameworks/Python.framework/Versions' / f'3.{minor}'
             stdlib = provider / f'lib/python3.{minor}'; stdlib.mkdir(parents=True)
-            tcl = provider / 'Frameworks/Tcl.framework/Versions/8.6/Tcl'
+            version = '9.0' if minor == 14 and python314_tcl9 else '8.6'
+            tcl = provider / f'Frameworks/Tcl.framework/Versions/{version}/Tcl'
             tk = provider / 'Frameworks/Tk.framework/Versions/8.6/Tk'
             self.put(tcl, image(deps=[(0xc, '/usr/lib/libSystem.B.dylib')]))
             self.put(tk, image(deps=[(0xc, str(tcl))]))
@@ -286,6 +287,24 @@ class Tests(unittest.TestCase):
         with patch.object(policy.os, 'read', side_effect=replace_during_read):
             with self.assertRaisesRegex(ValueError, 'changed during read'):
                 policy.host_file(str(selected), role='native')
+
+    def test_python314_tcl9_graph_is_exact_and_rechecked(self):
+        policy, calls, images = self.installed_framework_graph_fixture(python314_tcl9=True)
+        result = self.inspect()
+        runtime = result['snapshot']['runtimes'][2]
+        selected = [Path(row['path']) for row in runtime['runtime_files']]
+        self.assertEqual(set(selected), {path for path in images if '/3.14/' in str(path)})
+        self.assertEqual(sum('/Tcl.framework/Versions/9.0/Tcl' in str(path) for path in selected), 1)
+        self.assertEqual(sum('/Tk.framework/Versions/8.6/Tk' in str(path) for path in selected), 1)
+        for row in runtime['runtime_files']:
+            self.assertEqual(policy.row(row, host_role='native'), Path(row['path']))
+        n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
+        victim = next(path for path in selected if str(path).endswith('/Tcl.framework/Versions/9.0/Tcl'))
+        victim.chmod(0o675)
+        victim.write_bytes(image(minimum=(12, 0, 0)))
+        victim.chmod(0o575)
+        with self.assertRaisesRegex(ValueError, 'graph changed'):
+            n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)
 
     def test_stdlib_addition_or_byte_mutation_fails_fresh(self):
         result = self.inspect()

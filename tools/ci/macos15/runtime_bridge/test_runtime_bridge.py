@@ -68,7 +68,7 @@ class Tests(unittest.TestCase):
                   'python_providers': self.d.PROVIDERS, 'selection_method': self.d.METHOD,
                   'native_closure_gate': 'independent-exact-closure-input-v1',
                   'driver_contract_sha256': self.d.sha(self.d.raw(driver)),
-                  'candidate_manifest_sha256': '5bf396c0711b29f859154c87153476a7ab9812887ed9874363e8963721113c59',
+                  'candidate_manifest_sha256': 'cea22436539fc35a48c653c10dda134fd94a1da05642e1da4b7a8e872475e7be',
                   'native_closure_validator_sha256': '9' * 64}
         runtimes = []
         for minor in (12, 13, 14):

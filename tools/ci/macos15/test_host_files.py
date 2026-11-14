@@ -73,11 +73,14 @@ class HostFiles(unittest.TestCase):
         paths = [f'/Library/Frameworks/Python.framework/Versions/3.{minor}/Frameworks/'
                  f'{name}.framework/Versions/8.6/{name}'
                  for minor in (12, 13, 14) for name in ('Tcl', 'Tk')]
+        paths += [f'/Library/Frameworks/Python.framework/Versions/3.14/Frameworks/'
+                  f'{name}.framework/Versions/9.0/{name}' for name in ('Tcl',)]
         self.assertEqual(set(paths), r.FRAMEWORK_NATIVE_IMAGES)
         for value in paths:
             with self.subTest(value=value):
-                self.assertEqual(r.host_protection(value, self.info(mode=0o575, size=4664640, uid=0),
-                                                   'native'), 128 * 1024**2)
+                for mode in (0o575, 0o775):
+                    self.assertEqual(r.host_protection(value, self.info(mode=mode, size=4664640, uid=0),
+                                                       'native'), 128 * 1024**2)
                 for info in (self.info(mode=0o577), self.info(mode=0o4575),
                              self.info(links=2), self.info(uid=987654),
                              self.info(size=129 * 1024**2)):
@@ -86,11 +89,38 @@ class HostFiles(unittest.TestCase):
                 with self.assertRaises(ValueError): r.host_protection(value, info, 'native')
                 with self.assertRaises(ValueError): r.host_protection(value, self.info(), 'python')
 
-    def test_bundled_framework_name_exception_is_exactly_six_canonical_paths(self):
+    def test_tcl9_runtime_row_reaches_input_checks_and_profile_as_literal(self):
+        tcl = '/Library/Frameworks/Python.framework/Versions/3.14/Frameworks/Tcl.framework/Versions/9.0/Tcl'
+        native = {'path': tcl, 'sha256': 'a' * 64}
+        with tempfile.TemporaryDirectory(dir='/private/tmp') as folder:
+            root = Path(folder); root.chmod(0o700)
+            binary = root / 'python'; binary.write_bytes(b'fixture')
+            plan = {'sandbox': {'path': '/usr/bin/sandbox-exec'},
+                    'supervisor': {'path': '/fixture/supervisor'},
+                    'compiler': {'path': '/fixture/clang'},
+                    'python': {'invocation': str(binary), 'real': str(binary),
+                               'base': str(binary), 'sha256': 'b' * 64},
+                    'venv': str(root), 'stdlib': str(root), 'dependencies': [],
+                    'runtime_files': [native], 'probe_sha256': 'c' * 64,
+                    'driver': {'path': '/fixture/driver', 'sha256': 'd' * 64, 'inputs': []},
+                    'work': str(root)}
+            with patch.object(r, 'row') as checked:
+                r.actual_inputs(plan)
+            self.assertIn(((native,), {'host_role': 'native'}),
+                          [(call.args, call.kwargs) for call in checked.call_args_list])
+            with patch.object(r, 'schema', return_value=plan):
+                rendered = r.profile(plan)
+            self.assertIn('(literal "' + tcl + '")', rendered)
+            self.assertNotIn('(subpath "' + tcl + '")', rendered)
+
+    def test_bundled_framework_name_exception_is_exactly_seven_canonical_paths(self):
         root = '/Library/Frameworks/Python.framework/Versions/3.13/'
         fixed = root + 'Frameworks/Tcl.framework/Versions/8.6/Tcl'
         rejected = [
             fixed.replace('/8.6/', '/9.0/'), fixed.replace('/8.6/', '/8.6.14/'),
+            fixed.replace('/3.13/', '/3.12/').replace('/8.6/', '/9.0/'),
+            fixed.replace('/3.13/', '/3.14/').replace('/8.6/', '/9.1/'),
+            fixed.replace('/3.13/', '/3.14/').replace('/8.6/', '/9.0/').replace('/Tcl.framework/', '/Tk.framework/').replace('/9.0/Tcl', '/9.0/Tk'),
             fixed.replace('/8.6/', '/Current/'), fixed.replace('/Tcl.framework/', '/Other.framework/'),
             fixed.replace('/8.6/Tcl', '/8.6/Tk'), fixed.replace('/Frameworks/Tcl.', '/lib/Frameworks/Tcl.'),
             fixed.replace('/Library/Frameworks/', '/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/'),
