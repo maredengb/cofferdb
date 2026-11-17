@@ -117,6 +117,7 @@ def run(path, expected, approved):
             path_dirs.append(directory)
     environment = {'PATH': ':'.join(path_dirs), 'LANG': 'C', 'LC_ALL': 'C', 'HOME': str(work),
                    'TMPDIR': str(work), 'CARGO_HOME': plan['cargo_home'], 'CARGO_NET_OFFLINE': 'true',
+                   'CARGO_TARGET_DIR': str(work / 'cargo-target'),
                    'CARGO': plan['cargo']['path'], 'RUSTC': plan['rustc']['path'],
                    'MACOSX_DEPLOYMENT_TARGET': '15.0'}
     records = []

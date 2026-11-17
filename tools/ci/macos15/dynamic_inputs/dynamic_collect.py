@@ -13,7 +13,7 @@ import stat
 import time
 import types
 
-INSTANTIATOR_SHA='f975f5eb8872c7ad7cc6059f5c2fc11c94bb8fbc8ac884a7dad9cf4a3a8d2248'
+INSTANTIATOR_SHA='700b22c7543f6420910dd95e9094501ac43101d616ba7115c16fedad2e4e3242'
 HERE=Path(__file__).absolute().parent
 
 def load_instantiator():
