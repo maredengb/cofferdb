@@ -106,7 +106,16 @@ def run(path, expected, approved):
            'deadline_monotonic': deadline, 'prepare_seconds': 300, 'build_seconds': 3600,
            'product_acceptance': False})
     work = r.private_new(plan['work'])
-    environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C', 'HOME': str(work),
+    path_dirs = []
+    for key in ('cargo', 'rustc'):
+        directory = str(Path(plan[key]['path']).parent)
+        r.need(directory.startswith('/') and ':' not in directory, 'Toolchain directory')
+        if directory not in path_dirs:
+            path_dirs.append(directory)
+    for directory in ('/usr/bin', '/bin'):
+        if directory not in path_dirs:
+            path_dirs.append(directory)
+    environment = {'PATH': ':'.join(path_dirs), 'LANG': 'C', 'LC_ALL': 'C', 'HOME': str(work),
                    'TMPDIR': str(work), 'CARGO_HOME': plan['cargo_home'], 'CARGO_NET_OFFLINE': 'true',
                    'CARGO': plan['cargo']['path'], 'RUSTC': plan['rustc']['path'],
                    'MACOSX_DEPLOYMENT_TARGET': '15.0'}
