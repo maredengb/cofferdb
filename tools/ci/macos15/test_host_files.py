@@ -112,6 +112,9 @@ class HostFiles(unittest.TestCase):
                 rendered = r.profile(plan)
             self.assertIn('(literal "' + tcl + '")', rendered)
             self.assertNotIn('(subpath "' + tcl + '")', rendered)
+            self.assertIn('(allow file-read* (literal "/"))', rendered)
+            self.assertNotIn('(subpath "/")', rendered)
+            self.assertIn('(literal "/fixture/clang")', rendered)
 
     def test_bundled_framework_name_exception_is_exactly_eight_canonical_paths(self):
         root = '/Library/Frameworks/Python.framework/Versions/3.13/'

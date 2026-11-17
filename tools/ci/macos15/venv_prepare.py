@@ -13,7 +13,7 @@ import types
 import hashlib
 
 HERE = Path(__file__).absolute().parent
-RUNNER_SHA = 'e03e2cc1ac72ebe62d140c7f6d0872757d5e8541a05f0e01e492f7b931a2b2ac'
+RUNNER_SHA = '478ca5a6720627a855fa94835449f8b76a9fad90a0003491bdce64b31af517dd'
 def runner_bytes():
     selected = HERE / 'runner.py'
     if any(item.is_symlink() for item in [selected, *selected.parents]):

@@ -373,6 +373,9 @@ def profile(plan):
                for v in sorted(set(read_roots + [plan['work']]))) + ')',
              '(allow file-write* ' + ' '.join('(subpath ' + sbpl(plan[k]) + ')'
                for k in ['venv', 'work']) + ')',
+             # dyld's libignition opens the root directory vnode while mapping
+             # the process. This allow is that one directory, not its children.
+             '(allow file-read* (literal "/"))',
              '(deny file-read* ' + ' '.join('(subpath ' + sbpl(v) + ')'
                for v in FORBIDDEN) + ' (literal ' + sbpl(plan['compiler']['path']) + '))']
     return '\n'.join(lines) + '\n'
