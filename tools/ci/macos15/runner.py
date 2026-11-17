@@ -381,6 +381,10 @@ def profile(plan):
     lines = ['(version 1)', '(deny default)', '(deny network*)', '(allow process-fork)',
              '(allow sysctl-read)', '(allow file-read-metadata ' + ' '.join(
                 '(literal ' + sbpl(v) + ')' for v in ancestors) + ')',
+             # The bounded reader opens each ancestor directory from "/".
+             # Metadata on that directory does not permit the open.
+             '(allow file-read-data ' + ' '.join(
+                '(literal ' + sbpl(v) + ')' for v in ancestors) + ')',
              '(allow process-exec ' + ' '.join('(literal ' + sbpl(v) + ')'
                for v in sorted(set(exec_paths))) + ')',
              '(allow file-read* ' + ' '.join('(literal ' + sbpl(v) + ')'

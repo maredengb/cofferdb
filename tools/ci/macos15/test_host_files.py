@@ -144,6 +144,13 @@ class HostFiles(unittest.TestCase):
         self.assertEqual(rendered.count('(literal "' + app + '")'), 2)
         self.assertNotIn('(subpath "' + app + '")', rendered)
         self.assertIn('(literal "' + plan['compiler']['path'] + '")', rendered)
+        data = next(line for line in rendered.splitlines()
+                    if line.startswith('(allow file-read-data '))
+        self.assertIn('(literal "/")', data)
+        self.assertIn('(literal "/private")', data)
+        self.assertNotIn('(subpath ', data)
+        self.assertNotIn('(literal "/usr/bin")', data)
+        self.assertIn('(subpath "/usr/bin")', rendered)
 
     def test_bundled_framework_name_exception_is_exactly_eight_canonical_paths(self):
         root = '/Library/Frameworks/Python.framework/Versions/3.13/'
