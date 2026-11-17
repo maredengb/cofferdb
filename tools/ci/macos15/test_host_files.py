@@ -74,7 +74,7 @@ class HostFiles(unittest.TestCase):
                  f'{name}.framework/Versions/8.6/{name}'
                  for minor in (12, 13, 14) for name in ('Tcl', 'Tk')]
         paths += [f'/Library/Frameworks/Python.framework/Versions/3.14/Frameworks/'
-                  f'{name}.framework/Versions/9.0/{name}' for name in ('Tcl',)]
+                  f'{name}.framework/Versions/9.0/{name}' for name in ('Tcl', 'Tk')]
         self.assertEqual(set(paths), r.FRAMEWORK_NATIVE_IMAGES)
         for value in paths:
             with self.subTest(value=value):
@@ -113,14 +113,14 @@ class HostFiles(unittest.TestCase):
             self.assertIn('(literal "' + tcl + '")', rendered)
             self.assertNotIn('(subpath "' + tcl + '")', rendered)
 
-    def test_bundled_framework_name_exception_is_exactly_seven_canonical_paths(self):
+    def test_bundled_framework_name_exception_is_exactly_eight_canonical_paths(self):
         root = '/Library/Frameworks/Python.framework/Versions/3.13/'
         fixed = root + 'Frameworks/Tcl.framework/Versions/8.6/Tcl'
         rejected = [
             fixed.replace('/8.6/', '/9.0/'), fixed.replace('/8.6/', '/8.6.14/'),
             fixed.replace('/3.13/', '/3.12/').replace('/8.6/', '/9.0/'),
             fixed.replace('/3.13/', '/3.14/').replace('/8.6/', '/9.1/'),
-            fixed.replace('/3.13/', '/3.14/').replace('/8.6/', '/9.0/').replace('/Tcl.framework/', '/Tk.framework/').replace('/9.0/Tcl', '/9.0/Tk'),
+            fixed.replace('/3.13/', '/3.14/').replace('/8.6/', '/9.0/').replace('/Tcl.framework/', '/Tk.framework/').replace('/9.0/Tcl', '/9.1/Tk'),
             fixed.replace('/8.6/', '/Current/'), fixed.replace('/Tcl.framework/', '/Other.framework/'),
             fixed.replace('/8.6/Tcl', '/8.6/Tk'), fixed.replace('/Frameworks/Tcl.', '/lib/Frameworks/Tcl.'),
             fixed.replace('/Library/Frameworks/', '/opt/homebrew/Cellar/python@3.13/3.13.9/Frameworks/'),

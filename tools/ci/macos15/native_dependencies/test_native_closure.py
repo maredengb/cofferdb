@@ -233,7 +233,7 @@ class Tests(unittest.TestCase):
             stdlib = provider / f'lib/python3.{minor}'; stdlib.mkdir(parents=True)
             version = '9.0' if minor == 14 and python314_tcl9 else '8.6'
             tcl = provider / f'Frameworks/Tcl.framework/Versions/{version}/Tcl'
-            tk = provider / 'Frameworks/Tk.framework/Versions/8.6/Tk'
+            tk = provider / f'Frameworks/Tk.framework/Versions/{version}/Tk'
             self.put(tcl, image(deps=[(0xc, '/usr/lib/libSystem.B.dylib')]))
             self.put(tk, image(deps=[(0xc, str(tcl))]))
             tcl.chmod(0o575); tk.chmod(0o575); images += [tcl, tk]
@@ -295,7 +295,7 @@ class Tests(unittest.TestCase):
         selected = [Path(row['path']) for row in runtime['runtime_files']]
         self.assertEqual(set(selected), {path for path in images if '/3.14/' in str(path)})
         self.assertEqual(sum('/Tcl.framework/Versions/9.0/Tcl' in str(path) for path in selected), 1)
-        self.assertEqual(sum('/Tk.framework/Versions/8.6/Tk' in str(path) for path in selected), 1)
+        self.assertEqual(sum('/Tk.framework/Versions/9.0/Tk' in str(path) for path in selected), 1)
         for row in runtime['runtime_files']:
             self.assertEqual(policy.row(row, host_role='native'), Path(row['path']))
         n.fresh(result['snapshot'], self.index, result['report'], OBSERVER)

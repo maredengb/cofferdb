@@ -27,7 +27,7 @@ FRAMEWORK_NATIVE_IMAGES = frozenset(
     for minor in (12, 13, 14) for name in ('Tcl', 'Tk')) | frozenset(
     str(Path('/Library/Frameworks/Python.framework/Versions/3.14/Frameworks') /
         f'{name}.framework' / 'Versions' / '9.0' / name)
-    for name in ('Tcl',))
+    for name in ('Tcl', 'Tk'))
 RAW_LIMIT = 2 * 1024 * 1024
 FIELDS = {'schema_version', 'kind', 'python', 'stdlib', 'dependencies', 'runtime_files', 'venv', 'work',
           'evidence', 'sandbox', 'supervisor', 'probe_sha256', 'compiler', 'driver',
