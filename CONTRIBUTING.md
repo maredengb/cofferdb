@@ -62,9 +62,8 @@ Apache-2.0 permissions and third-party license obligations remain in force.
 
 The CLA does not grant additional rights in older unrelated contributions.
 
-When this v0.1.1 source snapshot was prepared, the automated CLA workflow was
-paused. Contact the maintainers for its current status and how confirmations
-are handled.
+The automated check is enabled. Post your confirmation in the
+[confirmation thread](https://github.com/maredengb/cofferdb/issues/5).
 
 1. Read the agreement and [confirmation-data notice](CLA-PRIVACY.md).
    Review the highlighted commercial licensing, patent, future-contribution and
