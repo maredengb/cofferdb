@@ -13,10 +13,9 @@ For version 0.1.1, start with the
 Python from a matching wheel and verify its checksum. Consult the release
 record for artifact availability and the environments validated for that package.
 
-**Release status for 0.1.1:** Treat these sources and artifacts as **unreleased
-candidates** until the [matching published release record](https://github.com/maredengb/cofferdb/releases)
-identifies their exact source revision and artifact checksums. A source checkout
-alone does not establish publication or validation.
+**Release status for 0.1.1:** The [published release record](https://github.com/maredengb/cofferdb/releases)
+identifies this source revision and the checksums of its published artifacts. A
+different checkout does not establish those checksums or validation results.
 
 Check the [releases page](https://github.com/maredengb/cofferdb/releases)
 for published versions and downloadable artifacts. File-format compatibility across
@@ -72,15 +71,15 @@ human-readable CLI output. Inspect the available commands and budget presets wit
 Each example creates a new `notes.coffer` file. Run them in separate fresh
 directories; neither example needs a model download or an external service.
 
-For Rust, use the published 0.1.0 crate with Rust 1.80 or later. In your
+For Rust, use the published 0.1.1 crate with Rust 1.80 or later. In your
 application’s `Cargo.toml`, pin the dependency:
 
 ```toml
 [dependencies]
-cofferdb = "=0.1.0"
+cofferdb = "=0.1.1"
 ```
 
-The [Rust 0.1.0 guide](docs/rust-v0.1.0.md) describes the matching API.
+The [Rust 0.1.1 guide](docs/rust-v0.1.1.md) describes the matching API.
 
 ```rust
 use cofferdb::{
