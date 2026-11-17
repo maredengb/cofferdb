@@ -12,13 +12,13 @@ import threading
 import types
 
 PINS = {
-    'runtime_bridge/runtime_bridge.py': 'cb9b8bfba2b71e8445f89230ae468d2c97aae93694d101161f7288e1eddf94ce',
-    'dynamic_inputs/dynamic_collect.py': '41caa647db5140056eb4b43f9474e3165476be447ddde605bf62a6ea2c30f0cd',
-    'native_dependencies/native_closure.py': '62fdbcff9f439a7445d6aad822ebf84b3d3007b767b2c27f93659c308dc201ab',
-    'launch_bridge/launch_bridge.py': 'dbfd84d5684bf77d094989ba77eb97b161814e77e99193958fc540ecf974fea0',
-    'tool_observer/tool_observer.py': 'b4a88d551a9ac2be40f3d8551b8fe61fa76ccf8a5b2c465fe2b11eaaee74aef0',
+    'runtime_bridge/runtime_bridge.py': '09a3c5fc5224e03b96f1c6ef50cc1eed81b4eac2a4f59d0250277504d1c23a29',
+    'dynamic_inputs/dynamic_collect.py': '7004d9efb2bf6cdb2c457996b362fd28dd0c8001bf41ffaf25d312de730e3822',
+    'native_dependencies/native_closure.py': 'd904c521d31f82f76f37181ddc1c6f3e900b0f24557ac3a888ea428ce515de7a',
+    'launch_bridge/launch_bridge.py': '4b96c71de670a599f52ab56e220d6aa3a64eda02cc4ecad7f6ec1d41310f08d7',
+    'tool_observer/tool_observer.py': '2040198a2194e9b9bd0249a5da30ddb5b8715aee3faf1030a4f1a30b9243190e',
 }
-INPUT_MANIFEST = '0e3f15991599c946aac20344f74b9076281bd7232add8a94bcda5270d40c4c1c'
+INPUT_MANIFEST = '9f7c6e80803d276282108894042e1958cbf11dfec26d0dcd728543713fe7c717'
 WHOLE_SECONDS = 7200
 
 

@@ -10,7 +10,7 @@ import types
 import stat
 
 HERE = Path(__file__).absolute().parent
-RUNNER_SHA = '478ca5a6720627a855fa94835449f8b76a9fad90a0003491bdce64b31af517dd'
+RUNNER_SHA = 'a977b937b8eac9e895644f64875d81dbe9cb57e3a3852bd91231da009ec17ce3'
 def runner_bytes():
     selected = HERE / 'runner.py'
     if any(item.is_symlink() for item in [selected, *selected.parents]):

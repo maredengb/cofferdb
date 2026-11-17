@@ -346,6 +346,17 @@ def schema(plan):
     return plan
 
 
+def framework_app_binary(base):
+    """Exact Python.app target spawned by a framework python executable."""
+    selected = path(base)
+    version = selected.parent.parent
+    app = version / 'Resources' / 'Python.app' / 'Contents' / 'MacOS' / 'Python'
+    if (selected.parent.name == 'bin' and version.name in ('3.12', '3.13', '3.14')
+            and selected.name == 'python' + version.name and python_provider(str(app))):
+        return app
+    return None
+
+
 def sbpl(value):
     # JSON string escaping is a quoted SBPL string for these literal paths;
     # backslash/control/nonASCII rejected to avoid parser interpretation gaps.
@@ -359,6 +370,11 @@ def profile(plan):
                   '/System/Library/CoreServices/SystemVersion.plist',
                   plan['driver']['path']] + [r['path'] for r in plan['driver']['inputs']] + [
                   r['path'] for r in plan['runtime_files']]
+    exec_paths = [plan['python']['invocation'], plan['python']['real']]
+    app = framework_app_binary(plan['python']['base'])
+    if app is not None:
+        read_files.append(str(app))
+        exec_paths.append(str(app))
     read_roots = list(SYSTEM_READ) + [plan['stdlib']] + plan['dependencies'] + [plan['venv']]
     ancestors = sorted({str(parent) for v in read_files + read_roots + [plan['work']]
                         for parent in Path(v).parents})
@@ -366,7 +382,7 @@ def profile(plan):
              '(allow sysctl-read)', '(allow file-read-metadata ' + ' '.join(
                 '(literal ' + sbpl(v) + ')' for v in ancestors) + ')',
              '(allow process-exec ' + ' '.join('(literal ' + sbpl(v) + ')'
-               for v in sorted(set([plan['python']['invocation'], plan['python']['real']]))) + ')',
+               for v in sorted(set(exec_paths))) + ')',
              '(allow file-read* ' + ' '.join('(literal ' + sbpl(v) + ')'
                for v in sorted(set(read_files + ['/dev/null', '/dev/urandom', '/dev/random'])) ) + ')',
              '(allow file-read* ' + ' '.join('(subpath ' + sbpl(v) + ')'
@@ -398,6 +414,11 @@ def actual_inputs(plan):
          'Venv Python target changed')
     row({'path': plan['python']['real'], 'sha256': plan['python']['sha256']}, executable=True, host_role='private_python', private_root=plan['venv'])
     row({'path': plan['python']['base'], 'sha256': plan['python']['sha256']}, executable=True, host_role='python')
+    app = framework_app_binary(plan['python']['base'])
+    if app is not None:
+        no_link(app)
+        host_protection(str(app), app.stat(), 'python')
+        need(os.access(app, os.X_OK), 'Framework application interpreter unavailable')
     for key in ['venv', 'stdlib']:
         p = path(plan[key]); no_link(p); need(p.is_dir(), 'Runtime read directory missing')
     venv = path(plan['venv']); info = venv.stat()

@@ -115,6 +115,35 @@ class HostFiles(unittest.TestCase):
             self.assertIn('(allow file-read* (literal "/"))', rendered)
             self.assertNotIn('(subpath "/")', rendered)
             self.assertIn('(literal "/fixture/clang")', rendered)
+            self.assertIsNone(r.framework_app_binary(str(binary)))
+
+    def test_framework_launcher_is_one_exec_and_read_literal(self):
+        base = '/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12'
+        app = '/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python'
+        self.assertEqual(str(r.framework_app_binary(base)), app)
+        homebrew = ('/opt/homebrew/Cellar/python@3.12/3.12.16/Frameworks/Python.framework/'
+                    'Versions/3.12/bin/python3.12')
+        self.assertEqual(r.framework_app_binary(homebrew).name, 'Python')
+        self.assertIsNone(r.framework_app_binary(
+            '/Users/runner/hostedtoolcache/Python/3.12.10/arm64/bin/python3.12'))
+        with tempfile.TemporaryDirectory(dir='/private/tmp') as folder:
+            root = Path(folder); root.chmod(0o700)
+            binary = root / 'python'; binary.write_bytes(b'fixture')
+            plan = {'sandbox': {'path': '/usr/bin/sandbox-exec'},
+                    'supervisor': {'path': '/fixture/supervisor'},
+                    'compiler': {'path': '/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang'},
+                    'python': {'invocation': str(binary), 'real': str(binary),
+                               'base': base, 'sha256': 'b' * 64, 'minor': 12},
+                    'venv': str(root), 'stdlib': '/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12',
+                    'dependencies': [], 'runtime_files': [], 'probe_sha256': 'c' * 64,
+                    'driver': {'path': '/fixture/driver', 'sha256': 'd' * 64, 'inputs': []},
+                    'work': str(root)}
+            with patch.object(r, 'schema', return_value=plan):
+                rendered = r.profile(plan)
+        self.assertIn('(literal "' + app + '")', rendered)
+        self.assertEqual(rendered.count('(literal "' + app + '")'), 2)
+        self.assertNotIn('(subpath "' + app + '")', rendered)
+        self.assertIn('(literal "' + plan['compiler']['path'] + '")', rendered)
 
     def test_bundled_framework_name_exception_is_exactly_eight_canonical_paths(self):
         root = '/Library/Frameworks/Python.framework/Versions/3.13/'
