@@ -18,6 +18,9 @@ are separate from the source files and are not provided by this source tree. If
 a matching archive is published, keep it with its wheel and checksums. Do not
 substitute a mutable `main` checkout for a released API.
 
+See the [Rust 0.1.2 guide](rust-v0.1.2.md) for the Rust API and the
+[Text ingestion guide](ingestion-v0.1.2.md) for the CLI workflow.
+
 The Rust 0.1.0 guide is supplemental documentation delivered with this source
 tree. It does not change that release's tag, package or platform declaration.
 The shared executable uses APIs that exist in both Rust versions; the 0.1.1

@@ -16,6 +16,8 @@ use crate::model::{
 use crate::profile::{DatabaseConfig, Durability, ResourceProfile};
 use crate::storage::FORMAT_VERSION;
 
+mod ingest;
+
 pub fn run(args: Vec<String>) -> Result<String> {
     run_with_exit_code(args).map(|output| output.0)
 }
@@ -252,6 +254,8 @@ fn run_command(command: &str, mut args: Args) -> Result<CommandResult> {
                 Ok(result)
             });
         }
+        "embed-jsonl" => ingest::embed_jsonl(&mut args),
+        "import-dir" => ingest::import_dir(&mut args),
         "search" => return search_command(args, false),
         "vector-search" => return search_command(args, true),
         "why-not" => return why_not_command(args),
@@ -886,6 +890,43 @@ fn help_json() -> JsonValue {
                     "p0",
                     "coffer import-embeddings <path> <input-path>",
                     &["--collection", "--on-conflict", "--durability"],
+                ),
+                help_command(
+                    "embed-jsonl",
+                    "p0",
+                    "coffer embed-jsonl <chunks.jsonl> --provider <openai|openai-compatible> --model <name> --out <embeddings.jsonl> --dimensions <n>. Uploads chunk text only after this command is configured. Does not open a database or store the API key. A failed generation batch does not write a database.",
+                    &[
+                        "--provider",
+                        "--model",
+                        "--out",
+                        "--dimensions",
+                        "--batch-size",
+                        "--concurrency",
+                        "--api-key-env",
+                        "--base-url",
+                        "--metadata-out",
+                    ],
+                ),
+                help_command(
+                    "import-dir",
+                    "p0",
+                    "coffer import-dir <input-dir> <path> --collection <name> --chunk-size <bytes> --chunk-overlap <bytes> --emit-jsonl <dir> [--embed <provider:model>]. Without --embed, writes text artifacts only and does not open the database. With --embed, uploads chunk text and imports only after validation. The API key is not stored. A failed generation batch does not change the database; core batches committed after import starts are kept.",
+                    &[
+                        "--collection",
+                        "--chunk-size",
+                        "--chunk-overlap",
+                        "--format",
+                        "--include",
+                        "--exclude",
+                        "--emit-jsonl",
+                        "--embed",
+                        "--dimensions",
+                        "--batch-size",
+                        "--concurrency",
+                        "--api-key-env",
+                        "--base-url",
+                        "--metadata-out",
+                    ],
                 ),
                 help_command(
                     "search",
@@ -3436,6 +3477,8 @@ mod tests {
             "benchmark",
             "export",
             "snapshot",
+            "embed-jsonl",
+            "import-dir",
         ] {
             assert!(
                 commands
@@ -3492,6 +3535,23 @@ mod tests {
                 "benchmark missing {flag}"
             );
         }
+        let embed_jsonl = help_command_by_name(commands, "embed-jsonl");
+        let embed_synopsis = embed_jsonl
+            .get("synopsis")
+            .and_then(JsonValue::as_str)
+            .unwrap();
+        assert!(embed_synopsis.contains("Does not open a database or store the API key"));
+        assert!(embed_synopsis.contains("A failed generation batch does not write a database"));
+        let import_dir = help_command_by_name(commands, "import-dir");
+        let import_dir_synopsis = import_dir
+            .get("synopsis")
+            .and_then(JsonValue::as_str)
+            .unwrap();
+        assert!(import_dir_synopsis
+            .contains("writes text artifacts only and does not open the database"));
+        assert!(import_dir_synopsis.contains(
+            "A failed generation batch does not change the database; core batches committed after import starts are kept"
+        ));
         let import = help_command_by_name(commands, "import");
         for flag in ["--manifest", "--on-conflict", "--durability"] {
             assert!(help_command_has_flag(import, flag), "import missing {flag}");

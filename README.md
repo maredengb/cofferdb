@@ -71,15 +71,15 @@ human-readable CLI output. Inspect the available commands and budget presets wit
 Each example creates a new `notes.coffer` file. Run them in separate fresh
 directories; neither example needs a model download or an external service.
 
-For Rust, use the published 0.1.1 crate with Rust 1.80 or later. In your
+For Rust, this version uses Rust 1.80 or later. In your
 application’s `Cargo.toml`, pin the dependency:
 
 ```toml
 [dependencies]
-cofferdb = "=0.1.1"
+cofferdb = "=0.1.2"
 ```
 
-The [Rust 0.1.1 guide](docs/rust-v0.1.1.md) describes the matching API.
+The [Rust 0.1.2 guide](docs/rust-v0.1.2.md) covers the API and links to the ingestion workflow.
 
 ```rust
 use cofferdb::{

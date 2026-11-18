@@ -82,6 +82,8 @@ pub struct Error {
     detail: Vec<(String, String)>,
     numeric_details: Vec<usize>,
     source: Option<std::io::Error>,
+    /// Errors raised by v0.1.2 ingestion before manifest import starts.
+    pre_import: bool,
 }
 
 impl Error {
@@ -109,7 +111,17 @@ impl Error {
             detail: Vec::new(),
             numeric_details: Vec::new(),
             source: None,
+            pre_import: false,
         }
+    }
+
+    /// Mark an ingestion failure that has not entered manifest import.
+    ///
+    /// The public code stays one of the existing codes. The envelope for this
+    /// phase is recoverable and does not suggest a retry or a command-line secret.
+    pub(crate) fn ingestion_boundary(mut self) -> Self {
+        self.pre_import = true;
+        self
     }
 
     pub fn with_detail(mut self, key: impl Into<String>, value: impl ToString) -> Self {
@@ -197,6 +209,9 @@ impl Error {
     }
 
     fn recoverable(&self) -> bool {
+        if self.pre_import {
+            return true;
+        }
         if crate::json::is_limit_error(self) {
             return self.code != ErrorCode::RecoveryError;
         }
@@ -216,6 +231,9 @@ impl Error {
     }
 
     fn suggested_action(&self) -> Option<&'static str> {
+        if self.pre_import {
+            return None;
+        }
         if crate::json::is_limit_error(self) {
             return Some(if self.code == ErrorCode::RecoveryError {
                 "preserve the original file and use a compatible version for explicit migration"
@@ -339,6 +357,7 @@ impl From<std::io::Error> for Error {
             detail: Vec::new(),
             numeric_details: Vec::new(),
             source: Some(source),
+            pre_import: false,
         }
     }
 }
