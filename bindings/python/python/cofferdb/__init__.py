@@ -1,4 +1,4 @@
-"""In-process CofferDB binding for version 0.1.1."""
+"""In-process CofferDB binding for version 0.1.2."""
 
 from ._runtime import check_runtime as _check_runtime
 
@@ -11,7 +11,7 @@ from ._native import (
     ResultMaterializationError,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 if _native_version != __version__:
     raise ImportError(
         "CofferDB Python and native extension versions do not match; "

@@ -13,10 +13,9 @@ on [crates.io](https://crates.io/crates/cofferdb/0.1.2). See the
 [0.1.2 release notes](https://github.com/maredengb/cofferdb/releases/tag/v0.1.2)
 for this release.
 
-Python wheels are available from the
-[0.1.1 release](https://github.com/maredengb/cofferdb/releases/tag/v0.1.1).
-Use the [Python 0.1.1 guide](docs/python-v0.1.1.md) for wheel selection and
-checksum verification. The Rust crate excludes Python binding source. Use the
+For Python 0.1.2, see the [programming guide](docs/python-v0.1.2.md) and
+check the [0.1.2 release](https://github.com/maredengb/cofferdb/releases/tag/v0.1.2)
+for wheel availability and checksums. The Rust crate excludes Python binding source. Use the
 matching complete source tree for Python source builds.
 
 Check the [releases page](https://github.com/maredengb/cofferdb/releases)
@@ -122,8 +121,8 @@ fn main() -> cofferdb::Result<()> {
 }
 ```
 
-For Python, install a matching 0.1.1 wheel as described in the
-[Python 0.1.1 guide](docs/python-v0.1.1.md).
+For Python, select a matching wheel as described in the
+[Python 0.1.2 guide](docs/python-v0.1.2.md).
 
 ```python
 from cofferdb import Database
@@ -160,7 +159,7 @@ and [public exports](src/lib.rs).
 The [Rust 0.1.2 guide](docs/rust-v0.1.2.md) is the starting point for
 the current crate. The [Rust 0.1.0](docs/rust-v0.1.0.md) and
 [Rust 0.1.1](docs/rust-v0.1.1.md) guides document their respective versions.
-The [Python 0.1.1 guide](docs/python-v0.1.1.md) covers installation,
+The [Python 0.1.2 guide](docs/python-v0.1.2.md) covers installation,
 source-backed retrieval, error handling and compatibility limits. See
 [reference build instructions](docs/reference.md) to generate API references.
 
