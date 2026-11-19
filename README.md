@@ -1,39 +1,28 @@
 # CofferDB
 
-A single-file, embedded Rust retrieval database for explainable local search and
-RAG applications. Use the Rust library in your application or the `coffer` CLI to
-import documents, search with keywords and externally supplied vectors, and
-inspect how each result was ranked. CofferDB 0.1.2 adds CLI text ingestion:
-prepare JSONL artifacts offline, generate embeddings with a configured HTTP
-provider, and import into an existing collection.
+CofferDB is an embedded retrieval database for explainable local search and RAG
+applications. Use it from Rust, Python, or the `coffer` CLI.
 
-Start with the [Rust 0.1.2 guide](docs/rust-v0.1.2.md) or the
-[text ingestion guide](docs/ingestion-v0.1.2.md). The Rust crate is available
-on [crates.io](https://crates.io/crates/cofferdb/0.1.2). See the
-[0.1.2 release notes](https://github.com/maredengb/cofferdb/releases/tag/v0.1.2)
-for this release.
+Start with the [Rust 0.1.3 guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/rust-v0.1.3.md) or the
+[Python 0.1.3 guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/python-v0.1.3.md). The
+[text ingestion guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/ingestion-v0.1.2.md) shows how to prepare text offline
+and optionally generate embeddings for import.
 
-For Python 0.1.2, see the [programming guide](docs/python-v0.1.2.md) and
-check the [0.1.2 release](https://github.com/maredengb/cofferdb/releases/tag/v0.1.2)
-for wheel availability and checksums. The Rust crate excludes Python binding source. Use the
-matching complete source tree for Python source builds.
-
-Check the [releases page](https://github.com/maredengb/cofferdb/releases)
-for other published versions and downloadable artifacts. File-format compatibility across
-future releases and production durability are not guaranteed. Documented commit,
-recovery and integrity contracts still apply. Keep original inputs and export backups. No certified retrieval-quality
-or comparative performance claim is made.
+Find the Rust crate on [crates.io](https://crates.io/crates/cofferdb/0.1.3),
+Python wheels on [PyPI](https://pypi.org/project/cofferdb/0.1.3/), and wheel
+checksums in the [0.1.3 GitHub release](https://github.com/maredengb/cofferdb/releases/tag/v0.1.3).
+For Python source builds, use the complete source tree for this version.
 
 ## What it does
 
-- Stores collections, documents, chunks, metadata and embeddings in a `.coffer`
-  file, with manifest-based JSONL import and export.
+- Stores collections, documents, chunks, metadata and embeddings locally.
+  Supports manifest-based JSONL import and export.
 - Combines BM25 keyword search, exact vector search and metadata filters using
   weighted hybrid scoring.
 - Explains returned results with component scores, effective weights and candidate
   sources.
-- Provides read-only snapshots, integrity checks, compaction and configurable
-  resource budgets.
+- Provides consistent read views, self-contained snapshots, integrity checks,
+  compaction and configurable resource budgets.
 - Runs core database operations locally, without telemetry, model downloads or
   an external service. Embeddings are supplied by the caller.
 
@@ -67,6 +56,38 @@ human-readable CLI output. Inspect the available commands and budget presets wit
 ./target/debug/coffer profile-help
 ```
 
+## Back up and restore a snapshot
+
+CofferDB will continue to support creating a self-contained snapshot and restoring
+the committed data from that file alone with a compatible version of the engine.
+A snapshot includes the collection configuration, stored text, metadata and vectors.
+
+To try it with the database from the quickstart, close any application holding
+a write handle. Choose a new destination for the snapshot:
+
+```sh
+./target/debug/coffer snapshot "$coffer_demo_dir/notes.coffer" "$coffer_demo_dir/backup.coffer"
+```
+
+To restore, copy the snapshot into a fresh directory, check the copy and open
+it as a database:
+
+```sh
+coffer_restore_dir="$(mktemp -d)"
+cp "$coffer_demo_dir/backup.coffer" "$coffer_restore_dir/restored.coffer"
+./target/debug/coffer check "$coffer_restore_dir/restored.coffer" --verify-indexes
+./target/debug/coffer search "$coffer_restore_dir/restored.coffer" --collection notes 'write ahead'
+```
+
+For this sample the search should return `wal#commit`. For your own database,
+compare the restored records and queries with known results. To copy a live
+database path with operating-system tools, first stop writes and maintenance,
+close the writer successfully and keep writers out until the copy finishes.
+See the [backup guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/backup.md) for verification and privacy details.
+Keep original inputs and independent backups. File-format compatibility across
+future releases and production durability are not guaranteed. The documented
+commit, recovery and integrity contracts apply.
+
 ## Rust and Python quickstarts
 
 Each example creates a new `notes.coffer` file. Run them in separate fresh
@@ -77,10 +98,10 @@ application’s `Cargo.toml`, pin the dependency:
 
 ```toml
 [dependencies]
-cofferdb = "=0.1.2"
+cofferdb = "=0.1.3"
 ```
 
-The [Rust 0.1.2 guide](docs/rust-v0.1.2.md) covers the API and links to the ingestion workflow.
+The [Rust 0.1.3 guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/rust-v0.1.3.md) covers the API and links to the ingestion workflow.
 
 ```rust
 use cofferdb::{
@@ -122,7 +143,7 @@ fn main() -> cofferdb::Result<()> {
 ```
 
 For Python, select a matching wheel as described in the
-[Python 0.1.2 guide](docs/python-v0.1.2.md).
+[Python 0.1.3 guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/python-v0.1.3.md).
 
 ```python
 from cofferdb import Database
@@ -153,15 +174,12 @@ text search and do not supply embeddings.
 
 The library exposes `Database`, `CollectionConfig`, `SearchBuilder` and related
 types. Search builders accept text, a query embedding, filters, weights and a
-resource profile. See the complete [embedded Rust example](examples/embedded.rs)
-and [public exports](src/lib.rs).
+resource profile. See the complete [embedded Rust example](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/embedded.rs)
+and [public exports](https://github.com/maredengb/cofferdb/blob/v0.1.3/src/lib.rs).
 
-The [Rust 0.1.2 guide](docs/rust-v0.1.2.md) is the starting point for
-the current crate. The [Rust 0.1.0](docs/rust-v0.1.0.md) and
-[Rust 0.1.1](docs/rust-v0.1.1.md) guides document their respective versions.
-The [Python 0.1.2 guide](docs/python-v0.1.2.md) covers installation,
-source-backed retrieval, error handling and compatibility limits. See
-[reference build instructions](docs/reference.md) to generate API references.
+The [guide index](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/README.md) lists documentation by language and version.
+See the [reference build instructions](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/reference.md)
+for the versioned offline API references.
 
 To run these examples, use a checkout of this source tree and start from its
 repository root. Create a fresh temporary directory for the example databases:
@@ -175,13 +193,13 @@ cargo run --locked --example real_corpus_demo -- "$coffer_demo_dir/real-corpus.c
 
 | Example | What to inspect |
 | --- | --- |
-| [Embedded Rust](examples/embedded.rs) | Create a collection, insert text and vectors, and run hybrid search. |
-| [Explain and ranking](examples/explain_troubleshooting.rs) | Compare weights and resource profiles on small synthetic fixtures. |
-| [Source-backed demos](examples/real_corpus_demo.rs) | Markdown retrieval, Rust code filtering and ranking explanations using bundled source snapshots and precomputed model vectors. |
+| [Embedded Rust](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/embedded.rs) | Create a collection, insert text and vectors, and run hybrid search. |
+| [Explain and ranking](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/explain_troubleshooting.rs) | Compare weights and resource profiles on small synthetic fixtures. |
+| [Source-backed demos](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/real_corpus_demo.rs) | Markdown retrieval, Rust code filtering and ranking explanations using bundled source snapshots and precomputed model vectors. |
 
 The examples need no model download or embedding service. The source-backed
 fixtures use pinned Rust by Example sources with matching BGE-M3 vectors and
-include their [provenance](examples/data/real_corpus/provenance.json). Source
+include their [provenance](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/data/real_corpus/provenance.json). Source
 snapshots and their MIT/Apache-2.0 notices are bundled. Rust snippets are retrieval
 inputs; some intentionally illustrate compile errors or panics. These small
 examples do not measure representative application relevance.
@@ -189,7 +207,7 @@ Example output demonstrates functionality, not general retrieval quality or
 performance. Generate local Rust API documentation with `cargo doc --no-deps --open`.
 
 With a matching Python wheel installed, run the complete
-[offline code example](examples/code_retrieval.py):
+[offline code example](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/code_retrieval.py):
 
 ```console
 python examples/code_retrieval.py /a/new/path/code.coffer
@@ -197,10 +215,9 @@ python examples/code_retrieval.py /a/new/path/code.coffer
 
 It uses the same pinned sources and precomputed vectors, checks complete stored
 text and source spans after close/reopen, and needs no model provider or download.
-The Python target matrix is regular-GIL CPython 3.12/3.13/3.14 on macOS 15+
-arm64 and Linux x86_64/glibc 2.28+. macOS 11–14 is unsupported by this Python
-package. This declaration does not change the old Rust/CLI platform scope or
-claim that every minimum-platform test has passed.
+Python wheels target regular-GIL CPython 3.12, 3.13 and 3.14 on macOS 15+
+arm64 and Linux x86_64 with glibc 2.28+. See the
+[release notes](https://github.com/maredengb/cofferdb/releases/tag/v0.1.3) for the environments tested.
 
 ## Search inputs and weights
 
@@ -247,7 +264,7 @@ has no complete relevance judgments and does not report application recall.
 ## Memory metadata
 
 Memory entries use ordinary documents and chunks. The bundled
-[metadata template](examples/data/memory/metadata-template.json) provides `type`,
+[metadata template](https://github.com/maredengb/cofferdb/blob/v0.1.3/examples/data/memory/metadata-template.json) provides `type`,
 `source`, `scope`, `project_id`, `session_id`, `importance`, `created_at`,
 `last_accessed_at`, `expires_at` and `supersedes`. Store these on chunk metadata
 and filter with keys such as `chunk.type` or `chunk.project_id`.
@@ -303,7 +320,7 @@ they are not core runtime dependencies.
 Source checkouts include representative quality and cost observations, per-query
 results, failures and replay materials in the
 [0.1.0 evaluation archive](https://github.com/maredengb/coffered/tree/v0.1.0/benchmarks/evaluation-v1).
-The archive is excluded from Cargo packages; see the [benchmark guide](benchmarks/README.md)
+The archive is excluded from Cargo packages; see the [benchmark guide](https://github.com/maredengb/cofferdb/blob/v0.1.3/benchmarks/README.md)
 for its scope and replay instructions.
 These observations do not establish release readiness or certify a
 model/configuration. CofferDB makes no fixed application Recall/MRR guarantee and no
@@ -311,20 +328,21 @@ claim that hybrid always wins. Quantitative claims require reproducible evidence
 including regressions and limitations.
 
 The current sources focus on an embedded engine with Rust, CLI and Python
-entry points. Hosted embedding providers, approximate vector indexes and
-server-scale deployment are outside the current scope. CofferDB does not claim
+entry points. The optional CLI ingestion tools can call a configured HTTP embedding
+provider. Core retrieval runs locally. Approximate vector indexes and server-scale
+deployment are outside the current scope. CofferDB does not claim
 to replace SQLite or PostgreSQL. Search, explain and export output may contain
 your source text and metadata; control where those outputs are shared.
 
 ## Documentation
 
-- [Architecture overview](docs/architecture.md) and [file-format boundaries](docs/file-format.md).
-- [Backup, export and data handling](docs/backup.md), including privacy and deletion limits.
-- [Explain JSON and ranking troubleshooting](docs/explain.md).
-- [Benchmark reproduction](benchmarks/README.md) and [SQLite reference notes](benchmarks/sqlite-baseline.md).
-- [Contributing](CONTRIBUTING.md), [security policy](SECURITY.md) and [governance/naming](GOVERNANCE.md).
+- [Architecture overview](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/architecture.md) and [file-format boundaries](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/file-format.md).
+- [Backup, export and data handling](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/backup.md), including privacy and deletion limits.
+- [Explain JSON and ranking troubleshooting](https://github.com/maredengb/cofferdb/blob/v0.1.3/docs/explain.md).
+- [Benchmark reproduction](https://github.com/maredengb/cofferdb/blob/v0.1.3/benchmarks/README.md) and [SQLite reference notes](https://github.com/maredengb/cofferdb/blob/v0.1.3/benchmarks/sqlite-baseline.md).
+- [Contributing](https://github.com/maredengb/cofferdb/blob/v0.1.3/CONTRIBUTING.md), [security policy](https://github.com/maredengb/cofferdb/blob/v0.1.3/SECURITY.md) and [governance/naming](https://github.com/maredengb/cofferdb/blob/v0.1.3/GOVERNANCE.md).
 
 ## License
 
-[Apache-2.0](LICENSE). See the [dependency and license summary](DEPENDENCIES.md)
+[Apache-2.0](https://github.com/maredengb/cofferdb/blob/v0.1.3/LICENSE). See the [dependency and license summary](https://github.com/maredengb/cofferdb/blob/v0.1.3/DEPENDENCIES.md)
 for the distinction between source dependencies and compiled runtime notices.

@@ -10,6 +10,8 @@ available artifacts, checksums and validation results for specific environments.
 | --- | --- | --- | --- |
 | Rust 0.1.0 | [Supplemental programming guide](rust-v0.1.0.md) | [Common Rust lifecycle](../examples/programming_guide.rs), also verified against the published 0.1.0 source | 0.1.0 rustdoc in the matching offline reference archive |
 | Rust 0.1.1 | [Programming guide](rust-v0.1.1.md) | [Common lifecycle](../examples/programming_guide.rs) and [source-backed retrieval](../examples/real_corpus_demo.rs) | Generated rustdoc in the matching offline reference archive |
+| Rust 0.1.3 | [Programming guide](rust-v0.1.3.md) | [Common lifecycle](../examples/programming_guide.rs) | Rust API and snapshot recovery |
+| Python 0.1.3 | [Programming guide](python-v0.1.3.md) | [Offline code retrieval](../examples/code_retrieval.py) | Wheel installation and snapshot recovery |
 | Rust 0.1.2 | [Programming guide](rust-v0.1.2.md) and [CLI text ingestion](ingestion-v0.1.2.md) | [Common lifecycle](../examples/programming_guide.rs) | Rust API and CLI guides |
 | Python 0.1.2 | [Programming guide](python-v0.1.2.md) | [Offline code retrieval](../examples/code_retrieval.py) | Check the matching release for wheel availability |
 | Python 0.1.1 | [Programming guide](python-v0.1.1.md); installation and behavior details are in `bindings/python/README.md` in the complete source tree | [Offline code retrieval](../examples/code_retrieval.py); the direct batch example is in `bindings/python/examples/quickstart.py` in the complete source tree | Installed-package Sphinx reference in the matching offline archive |
@@ -20,7 +22,7 @@ are separate from the source files and are not provided by this source tree. If
 a matching archive is published, keep it with its wheel and checksums. Do not
 substitute a mutable `main` checkout for a released API.
 
-See the [Rust 0.1.2 guide](rust-v0.1.2.md) for the Rust API and the
+See the [Rust 0.1.3 guide](rust-v0.1.3.md) for the Rust API and the
 [Text ingestion guide](ingestion-v0.1.2.md) for the CLI workflow.
 
 The Rust 0.1.0 guide is supplemental documentation delivered with this source

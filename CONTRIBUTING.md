@@ -1,15 +1,15 @@
 # Contributing
 
-CofferDB is an embedded Rust library and CLI. Start with the
-[README](README.md), [architecture overview](docs/architecture.md) and runnable
-[examples](README.md#rust-library-and-examples). These files describe the public
-product without requiring separate planning documents.
+CofferDB offers a Rust API, Python bindings, and the `coffer` CLI. Start with
+the [README](README.md), the [architecture overview](docs/architecture.md), or
+the [Rust and Python quickstarts](README.md#rust-and-python-quickstarts).
 
 ## Reporting a problem
 
-When reporting an issue, include the
-version or commit, OS/architecture, Rust version, filesystem, relevant settings,
-minimal commands and expected versus actual results. Sanitize documents, vectors,
+Include the CofferDB version or commit, OS and architecture, filesystem, and
+relevant settings. For Python, include the Python version. If you built from
+source, include the Rust version. Give a minimal CLI command, Rust example, or
+Python example and describe the expected and actual results. Sanitize documents, vectors,
 paths, metadata and diagnostics. Follow the [security policy](SECURITY.md) for
 security-sensitive reports; do not attach a private database to a public issue.
 

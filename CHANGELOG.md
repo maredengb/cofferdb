@@ -4,6 +4,13 @@ Entries describe version contents. The
 [releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
+## 0.1.3
+
+- Document how to create a self-contained snapshot and restore committed data
+  from that file alone in a compatible environment. CofferDB will continue to
+  support this workflow. The database format is the same as in 0.1.2.
+- Add Rust and Python 0.1.3 guides covering installation and recovery.
+
 ## 0.1.1
 
 - Add a synchronous in-process Python API using the same Rust engine for

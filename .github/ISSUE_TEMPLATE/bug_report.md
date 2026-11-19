@@ -5,13 +5,15 @@ about: Report a reproducible CofferDB problem using sanitized data
 
 ## Environment
 
-CofferDB version or commit, OS/architecture, Rust version if built from source,
-filesystem, resource profile, budget overrides and durability mode.
+Include the CofferDB version or commit, OS and architecture, filesystem,
+resource profile, budget overrides, and durability mode. For Python, include
+the Python version. If you built from source, include the Rust version.
 
 ## Reproduction
 
-Minimal commands or Rust code and a small, sanitized input. Describe whether the
-problem occurs on a newly created database or an existing one.
+Include a minimal CLI command, Rust example, or Python example that reproduces
+the problem. Provide a small, sanitized input and say whether the problem occurs
+on a newly created database or an existing one.
 
 ## Expected and actual behavior
 

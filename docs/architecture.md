@@ -1,7 +1,8 @@
 # Architecture overview
 
-CofferDB is an embedded Rust library with a CLI. Applications provide documents,
-chunks, metadata and optional embeddings. The engine does not generate embeddings
+The Rust API, Python bindings, and `coffer` CLI share the same Rust retrieval
+engine. Applications provide documents, chunks, metadata and optional
+embeddings. The engine does not generate embeddings
 or contact a model service. It combines lexical and vector retrieval locally and
 explains the scores of returned results.
 
@@ -82,6 +83,7 @@ there is no distributed transaction or network-filesystem consistency promise.
 | Area | Implementation |
 | --- | --- |
 | Public Rust surface | [src/lib.rs](../src/lib.rs) |
+| Python bindings | [Python package](https://github.com/maredengb/cofferdb/tree/v0.1.3/bindings/python/python/cofferdb) and [native extension](https://github.com/maredengb/cofferdb/tree/v0.1.3/bindings/python/src) |
 | CLI and output envelopes | [src/cli.rs](../src/cli.rs) |
 | Runtime and read/write operations | [src/db.rs](../src/db.rs) |
 | Catalog and mutations | [src/catalog.rs](../src/catalog.rs) |

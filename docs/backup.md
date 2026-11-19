@@ -5,6 +5,30 @@ pre-release. Storage integrity, application relevance and backup completeness ar
 different checks. `check` is read-only and is not a repair command or an evaluation
 of whether the stored text answers a user's question.
 
+## Creating and restoring a snapshot
+
+CofferDB will continue to provide a supported way to create a self-contained
+snapshot and restore its committed data from that file alone in a compatible
+environment. In 0.1.3, close any open writer and choose a new output path.
+`coffer snapshot` holds the source writer lock while it copies the database.
+
+With the CLI installed and the `notes` collection from the README quickstart:
+
+```sh
+coffer snapshot notes.coffer backup.coffer
+restore_dir="$(mktemp -d)"
+cp backup.coffer "$restore_dir/restored.coffer"
+coffer check "$restore_dir/restored.coffer" --verify-indexes
+coffer search "$restore_dir/restored.coffer" --collection notes 'write ahead'
+```
+
+The restored sample should return `wal#commit`. Copying the snapshot to a
+fresh directory keeps the backup intact when you later open the restored copy
+for writing. The snapshot contains the committed records, collection settings
+and vectors, along with any persisted index checkpoint. It can also contain old
+records and sensitive text. For your own restore test, compare known records,
+vectors and representative queries with the source.
+
 ## Copying a database file
 
 Stop all writes and maintenance, close the writer successfully, and prevent any

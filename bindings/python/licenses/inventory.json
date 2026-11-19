@@ -1,6 +1,6 @@
 {
   "kind": "SOURCE_LICENSE_INVENTORY_NOT_BINARY_RELEASE_CLEARANCE",
-  "cargo_lock_sha256": "ab8b5e0e031cb70a9bf75e8e38c314a7ab3604c626987ecf79a09450cd341532",
+  "cargo_lock_sha256": "d97cd0f35a3184ea1750e1bb7fa7f63bf396d5ccfae765fd8c43030252f903f8",
   "dependencies": [
     {
       "name": "autocfg",
