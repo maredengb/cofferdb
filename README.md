@@ -3,22 +3,24 @@
 A single-file, embedded Rust retrieval database for explainable local search and
 RAG applications. Use the Rust library in your application or the `coffer` CLI to
 import documents, search with keywords and externally supplied vectors, and
-inspect how each result was ranked. The 0.1.1 sources also provide
-an in-process Python binding to the same engine. The Rust source crate does not
-include the Python binding source; use the complete matching source tree for
-Python source builds.
+inspect how each result was ranked. CofferDB 0.1.2 adds CLI text ingestion:
+prepare JSONL artifacts offline, generate embeddings with a configured HTTP
+provider, and import into an existing collection.
 
-For version 0.1.1, start with the
-[Rust/Python programming guides and reference index](docs/README.md). Install
-Python from a matching wheel and verify its checksum. Consult the release
-record for artifact availability and the environments validated for that package.
+Start with the [Rust 0.1.2 guide](docs/rust-v0.1.2.md) or the
+[text ingestion guide](docs/ingestion-v0.1.2.md). The Rust crate is available
+on [crates.io](https://crates.io/crates/cofferdb/0.1.2). See the
+[0.1.2 release notes](https://github.com/maredengb/cofferdb/releases/tag/v0.1.2)
+for this release.
 
-**Release status for 0.1.1:** The [published release record](https://github.com/maredengb/cofferdb/releases)
-identifies this source revision and the checksums of its published artifacts. A
-different checkout does not establish those checksums or validation results.
+Python wheels are available from the
+[0.1.1 release](https://github.com/maredengb/cofferdb/releases/tag/v0.1.1).
+Use the [Python 0.1.1 guide](docs/python-v0.1.1.md) for wheel selection and
+checksum verification. The Rust crate excludes Python binding source. Use the
+matching complete source tree for Python source builds.
 
 Check the [releases page](https://github.com/maredengb/cofferdb/releases)
-for published versions and downloadable artifacts. File-format compatibility across
+for other published versions and downloadable artifacts. File-format compatibility across
 future releases and production durability are not guaranteed. Documented commit,
 recovery and integrity contracts still apply. Keep original inputs and export backups. No certified retrieval-quality
 or comparative performance claim is made.
@@ -120,8 +122,8 @@ fn main() -> cofferdb::Result<()> {
 }
 ```
 
-For Python, once a matching release wheel is available, install it as described
-in the [Python guide](docs/python-v0.1.1.md).
+For Python, install a matching 0.1.1 wheel as described in the
+[Python 0.1.1 guide](docs/python-v0.1.1.md).
 
 ```python
 from cofferdb import Database
@@ -155,14 +157,12 @@ types. Search builders accept text, a query embedding, filters, weights and a
 resource profile. See the complete [embedded Rust example](examples/embedded.rs)
 and [public exports](src/lib.rs).
 
-The [0.1.0 supplemental Rust guide](docs/rust-v0.1.0.md) describes the original
-published API. The [0.1.1 Rust guide](docs/rust-v0.1.1.md) also covers complete
-chunk/document reads from one view. The [Python guide](docs/python-v0.1.1.md)
-includes binary/offline installation, source-backed retrieval, input and error
-handling, thread/signal behavior and compatibility limits. The release is intended
-to include generated rustdoc and installed-package Sphinx references in a matching
-offline archive. Check the matching release record for availability; [source and
-build instructions](docs/reference.md) are included here.
+The [Rust 0.1.2 guide](docs/rust-v0.1.2.md) is the starting point for
+the current crate. The [Rust 0.1.0](docs/rust-v0.1.0.md) and
+[Rust 0.1.1](docs/rust-v0.1.1.md) guides document their respective versions.
+The [Python 0.1.1 guide](docs/python-v0.1.1.md) covers installation,
+source-backed retrieval, error handling and compatibility limits. See
+[reference build instructions](docs/reference.md) to generate API references.
 
 To run these examples, use a checkout of this source tree and start from its
 repository root. Create a fresh temporary directory for the example databases:
