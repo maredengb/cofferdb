@@ -370,7 +370,17 @@ fn public_import_crash_windows_preserve_complete_objects() {
                 .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(15);
-        while !marker.exists() {
+        loop {
+            // The worker creates the marker before its stage name is fully written.
+            match fs::read(&marker) {
+                Ok(bytes) if bytes == stage.as_bytes() => break,
+                Ok(bytes) => assert!(
+                    stage.as_bytes().starts_with(&bytes),
+                    "unexpected marker for {stage}: {bytes:?}"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot read marker for {stage}: {error}"),
+            }
             assert!(
                 child.0.try_wait().unwrap().is_none(),
                 "worker exited before {stage}; evidence: {}",
@@ -383,7 +393,6 @@ fn public_import_crash_windows_preserve_complete_objects() {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(fs::read_to_string(&marker).unwrap(), stage);
         assert!(child.0.try_wait().unwrap().is_none());
         child.0.kill().unwrap();
         assert!(!child.0.wait().unwrap().success());
