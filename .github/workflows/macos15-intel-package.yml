@@ -132,12 +132,16 @@ jobs:
               --python "$PY312" "$PY313" "$PY314" \
               --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314" "${options[@]}"
           ) >"$work/private.log" 2>&1; then
-            read -r stage <"$work/stage"
+            read -r stage abi <"$work/stage"
             case "$stage" in
-              source-and-host|build-inputs|native-build|install) ;;
+              source-and-host|build-inputs|native-build|acceptance-inputs|pip-download|wheel-digest|venv|pip-install|wheel-install|wheel-import|installed-tests|old-database|artifact-check|acceptance-report) ;;
               *) stage=unknown ;;
             esac
-            echo "::error::Native wheel check failed at stage $stage. Dispatch a new run after resolving the failure."
+            case "$abi" in
+              cp312|cp313|cp314) ;;
+              *) abi=all ;;
+            esac
+            echo "::error::Native wheel check failed at $stage ($abi). Dispatch a new run after resolving the failure."
             exit 1
           fi
           echo "All three macOS $WHEEL_ARCH wheel installations passed"
@@ -193,6 +197,7 @@ jobs:
           work="$RUNNER_TEMP/cofferdb-intel-restore"
           wheels="$RUNNER_TEMP/cofferdb-intel-wheels"
           mkdir -m 700 "$work"
+          echo restore-inputs >"$work/stage"
           if ! (
             curl --fail --silent --show-error --proto '=https' \
               "https://raw.githubusercontent.com/maredengb/cofferdb/$SOURCE_SHA/tools/ci/release_wheel.py" \
@@ -203,7 +208,16 @@ jobs:
               --wheels "$wheels" --snapshot "$RUNNER_TEMP/cofferdb-snapshot" \
               --python "$PY312" "$PY313" "$PY314" --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"
           ) >"$work/private.log" 2>&1; then
-            echo '::error::Standalone snapshot restoration failed'
+            read -r stage abi <"$work/stage"
+            case "$stage" in
+              restore-inputs|pip-download|wheel-digest|venv|pip-install|wheel-install|snapshot-check|restore-report) ;;
+              *) stage=unknown ;;
+            esac
+            case "$abi" in
+              cp312|cp313|cp314) ;;
+              *) abi=all ;;
+            esac
+            echo "::error::Standalone snapshot restoration failed at $stage ($abi)"
             exit 1
           fi
           echo 'Standalone snapshot restoration passed on all three Intel interpreters'

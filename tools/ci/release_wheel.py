@@ -40,8 +40,8 @@ def require(condition, error):
         raise ValueError(error)
 
 
-def run(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, text=True).strip()
+def run(*args, cwd=None, env=None):
+    return subprocess.check_output(args, cwd=cwd, env=env, text=True).strip()
 
 
 def write_json(path, value):
@@ -57,8 +57,8 @@ def actions_identity():
     return {"run_id": run_id, "attempt": 1}
 
 
-def stage(work, value):
-    (work / "stage").write_text(value + "\n", encoding="utf-8")
+def stage(work, value, abi=""):
+    (work / "stage").write_text(f"{value} {abi}\n", encoding="utf-8")
 
 
 def download(pin, directory):
@@ -111,13 +111,18 @@ def check_rust(expected_host):
     require(f"host: {expected_host}" in rust, "Rust host target differs")
 
 
-def install(python, venv, pip, wheel, record):
+def install(python, work, abi, pip, wheel, record):
+    stage(work, "wheel-digest", abi)
     require(sha(wheel) == record["sha256"], "wheel digest differs before installation")
+    stage(work, "venv", abi)
+    venv = work / f"venv-{abi}"
     run(python, "-I", "-m", "venv", venv)
     executable = venv / "bin/python"
     install_args = ("-I", "-m", "pip", "--isolated", "install", "--no-index", "--no-deps", "--only-binary=:all:")
+    stage(work, "pip-install", abi)
     run(executable, *install_args, pip)
     require(run(executable, "-I", "-c", "import pip; print(pip.__version__)") == "25.3", "pip version differs")
+    stage(work, "wheel-install", abi)
     run(executable, *install_args, wheel)
     return executable
 
@@ -199,7 +204,9 @@ def release_build(args):
         maturin = str(toolkit / "bin/maturin")
     run("cargo", "fetch", "--locked", "--manifest-path", repo / "bindings/python/Cargo.toml")
     source = output / "source"
-    run(args.python[0], "-I", repo / "tools/prepare_source.py", "--commit", args.commit, source)
+    prepare_env = {**os.environ, "CARGO_TARGET_DIR": str(output / "prepare-target")}
+    run(args.python[0], "-I", "-B", repo / "tools/prepare_source.py", "--commit", args.commit, source,
+        env=prepare_env)
     stage(output, "native-build")
     result = builder.build(source, output / "built", args.python, maturin)
     if mac:
@@ -211,13 +218,14 @@ def release_build(args):
 
 
 def accept_build(repo, commit, host, build, output, pythons, fixture=None):
-    stage(output, "install")
+    stage(output, "acceptance-inputs")
     identity = source_identity(repo, commit)
     build_host = json.loads((build / "build-environment.json").read_text(encoding="utf-8"))
     require(build_host == host, "build and installation environments differ")
     result = json.loads((build / "built/build-manifest.json").read_text(encoding="utf-8"))
     for key, value in identity.items():
         require(result["source"]["source"][key] == value, "prepared wheel input source differs")
+    stage(output, "pip-download")
     pip = download(PIP, output)
     artifact = output / "release-wheels"
     artifact.mkdir()
@@ -225,9 +233,11 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
     for python, build_record in zip(pythons, result["artifacts"], strict=True):
         abi = f"cp3{build_record['runtime']['minor']}"
         wheel = build / "built" / abi / build_record["wheel"]
-        executable = install(python, output / f"venv-{abi}", pip, wheel, build_record)
-        run(executable, "-I", "-B", Path(__file__), "inspect", build_record["native_sha256"], cwd=output)
+        executable = install(python, output, abi, pip, wheel, build_record)
+        stage(output, "wheel-import", abi)
+        run(executable, "-I", "-B", Path(__file__).resolve(), "inspect", build_record["native_sha256"], cwd=output)
         # A separate process runs the full installed suite, including the write/query/reopen lifecycle.
+        stage(output, "installed-tests", abi)
         suite = subprocess.run(
             [executable, "-I", "-B", "-m", "unittest", "discover", "-s", repo / "bindings/python/tests"],
             cwd=output, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -237,16 +247,19 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
         counts = re.search(r"^Ran (\d+) tests? in ", suite.stderr, re.MULTILINE)
         require(counts and int(counts[1]) > 0, "installed test discovery returned no tests")
         if fixture:
-            run(executable, "-I", "-B", Path(__file__), "inspect", build_record["native_sha256"],
+            stage(output, "old-database", abi)
+            run(executable, "-I", "-B", Path(__file__).resolve(), "inspect", build_record["native_sha256"],
                 "--fixture", fixture, "--fixture-kind", "old_database", "--copy-to", output / f"old-{abi}", cwd=output)
         record = {name: build_record[name] for name in ("wheel", "sha256", "native_sha256", "binary")}
         record.update(python=build_record["runtime"]["version"], installed_suite_exit_code=0,
                       installed_tests=int(counts[1]),
                       old_database_checked=bool(fixture))
         staged = artifact / wheel.name
+        stage(output, "artifact-check", abi)
         shutil.copyfile(wheel, staged)
         check_egress(staged)
         rows.append(record)
+    stage(output, "acceptance-report")
     write_json(artifact / "result.json", {
         **identity, "source_input_sha256": result["source"]["source_input_sha256"], "environment": host,
         "acceptance_script_sha256": sha(Path(__file__)), "actions": actions_identity(),
@@ -292,9 +305,10 @@ def make_fixtures(work):
 
 
 def restore(args):
+    work = args.work.resolve()
+    stage(work, "restore-inputs")
     host = environment(args.python, "X64", args.versions)
     require(host["system"] == "Darwin", "native Intel macOS recovery required")
-    work = args.work.resolve()
     manifest = json.loads((args.wheels / "result.json").read_text(encoding="utf-8"))
     require(manifest["commit"] == args.commit, "restore input is from a different commit")
     require(manifest["actions"] == actions_identity(), "restore input is from a different workflow run")
@@ -302,15 +316,18 @@ def restore(args):
     require(manifest["environment"]["machine"] == "x86_64", "restore input is not Intel")
     records = manifest["artifacts"]
     require(len(records) == 3, "restore needs all three Intel wheels")
+    stage(work, "pip-download")
     pip = download(PIP, work)
     for python, version, record in zip(args.python, args.versions, records, strict=True):
         abi = f"cp{version.split('.')[0]}{version.split('.')[1]}"
         wheel = f"cofferdb-{VERSION}-{abi}-{abi}-macosx_15_0_x86_64.whl"
         require(record["wheel"] == wheel and record["python"] == version, "restore wheel or Python differs")
-        executable = install(python, work / f"venv-{abi}", pip, args.wheels / wheel, record)
-        run(executable, "-I", "-B", Path(__file__), "inspect", record["native_sha256"],
+        executable = install(python, work, abi, pip, args.wheels / wheel, record)
+        stage(work, "snapshot-check", abi)
+        run(executable, "-I", "-B", Path(__file__).resolve(), "inspect", record["native_sha256"],
             "--fixture", args.snapshot, "--fixture-kind", "standalone_snapshot",
             "--copy-to", work / f"restore-{abi}", cwd=work)
+    stage(work, "restore-report")
     output = work / "verified"
     output.mkdir()
     report = output / "restore.json"
