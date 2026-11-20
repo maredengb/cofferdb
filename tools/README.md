@@ -10,10 +10,10 @@ For supervised macOS 15 build and isolated runtime commands, see the
 
 ## Prepare the source and build native wheels
 
-Use Python 3.12+, Rust with the selected target's linker, maturin **1.10.2**,
-and the locked Cargo dependencies available locally. Select regular GIL builds
-of CPython 3.12, 3.13 or 3.14 on native macOS arm64 or glibc Linux x86_64.
-Free-threaded builds and cross-compilation are outside this command's scope.
+Use Python 3.12+, Rust with the target's linker, maturin **1.10.2**, and the
+locked Cargo dependencies. Select regular 64-bit CPython 3.12, 3.13 or 3.14.
+The native targets are macOS 15 Intel and Apple Silicon, and glibc 2.28+
+Linux x86_64 and AArch64. Linux builds require `readelf` and `auditwheel`.
 
 From the product repository root:
 
@@ -46,12 +46,11 @@ Python modules, typing files, the selected interpreter's exact native module
 path, product license and dependency notices. RECORD, internal tags, package
 version and exact wheel filename, source bytes and selected absolute build paths
 are checked too. macOS inspection
-checks the actual thin arm64 dynamic-library header, macOS platform identifier,
+checks the thin dynamic-library header for the selected CPU, macOS platform identifier,
 minimum deployment version, system dependencies and absence of
-runtime library search paths. Linux inspection uses `readelf` for x86_64, GLIBC
-symbol requirements and runtime search paths; maturin performs its own
-manylinux audit. An image's Mach-O `LC_ID_DYLIB` is its identity, not an external
-runtime dependency.
+runtime library search paths. Linux inspection checks the ELF machine ID and
+uses `readelf` for shared libraries, glibc symbols and runtime search paths.
+`auditwheel show` checks the actual wheel against the manylinux policy for its CPU.
 
 The output includes raw build logs, a partial manifest after each inspected
 wheel and a final build manifest with actual tool/interpreter versions, flags,
@@ -67,7 +66,7 @@ supervising long builds. An absent final manifest is not a complete build.
 Static inspection and a successful build do not prove installation on macOS 15
 or the declared minimum Linux distribution. Install and exercise the exact
 artifact in each actual target environment. See the
-[versioned installation guide](../docs/python-v0.1.1.md).
+[versioned installation guide](../docs/python-v0.1.5.md).
 
 After building, exercise malformed source and artifact rejection paths without
 installing a package or loading its native extension:
@@ -75,7 +74,7 @@ installing a package or loading its native extension:
 ```sh
 python3.12 -B tools/check_python_builder.py /tmp/cofferdb-builder-checks \
   --source /tmp/cofferdb-prepared \
-  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.1.1-cp312-cp312-macosx_15_0_arm64.whl \
+  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.1.5-cp312-cp312-macosx_15_0_arm64.whl \
   --python /absolute/path/to/python3.12
 ```
 
@@ -85,7 +84,8 @@ missing members and displaced native modules, plus source configuration,
 symlink and mode controls. The original source and wheel remain unchanged.
 On macOS the controls also inspect modified native headers, platform identifiers
 and deployment-version fields without
-loading or executing the modified native binaries.
+loading or executing the modified native binaries. Linux controls exercise the
+ELF machine check and rejection of incompatible glibc, search paths and platform policies.
 
 ## Observe process memory
 

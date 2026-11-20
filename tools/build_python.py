@@ -35,7 +35,9 @@ PLATFORM_TAGS = {
     ('Darwin', 'arm64'): 'macosx_15_0_arm64',
     ('Darwin', 'x86_64'): 'macosx_15_0_x86_64',
     ('Linux', 'x86_64'): 'manylinux_2_28_x86_64',
+    ('Linux', 'aarch64'): 'manylinux_2_28_aarch64',
 }
+ELF_MACHINES = {'x86_64': 62, 'aarch64': 183}
 MACHO_CPUS = {'arm64': 0x0100000C, 'x86_64': 0x01000007}
 
 
@@ -75,6 +77,34 @@ def macho_target(data, machine='arm64'):
 
     return {'platform_id':target, 'platform_name':'macos',
             'minimum_macos':version(minimum), 'build_sdk_version':version(sdk)}
+
+
+def linux_binary(wheel, inspection, machine):
+    with inspection.open('rb') as stream:
+        header = stream.read(64)
+    if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01'
+            or struct.unpack_from('<HH', header, 16) != (3, ELF_MACHINES[machine])):
+        raise ValueError(f'native library must be a little-endian ELF64 {machine} shared object')
+    capture(['readelf', '-h', str(inspection)])
+    version_info = capture(['readelf', '--version-info', str(inspection)])
+    required = set(re.findall(r'Name: GLIBC_([^\s]+)', version_info))
+    for name in required:
+        if not re.fullmatch(r'\d+(?:\.\d+)+', name) or tuple(map(int, name.split('.'))) > (2, 28, 0):
+            raise ValueError('native extension requires a glibc symbol outside the 2.28 baseline')
+    dynamic = capture(['readelf', '-d', str(inspection)])
+    if '(RPATH)' in dynamic or '(RUNPATH)' in dynamic:
+        raise ValueError('ELF retains a runtime library search path')
+    audit = ' '.join(capture(['auditwheel', 'show', str(wheel)]).split())
+    policy = re.search(r'consistent with the following platform tag: "(manylinux_(\d+)_(\d+)_([^"]+))"', audit)
+    if not policy or policy[4] != machine or (int(policy[2]), int(policy[3])) > (2, 28):
+        raise ValueError('wheel dependencies or instruction set exceed the manylinux 2.28 policy')
+    return {
+        'architecture': machine,
+        'auditwheel_policy': policy[1],
+        'required_glibc_symbol_versions': sorted(required, key=lambda name: tuple(map(int, name.split('.')))),
+        'needed_libraries': re.findall(r'\(NEEDED\).*?\[(.*?)\]', dynamic),
+        'runtime_rpath': False,
+    }
 
 
 def capture(arguments, cwd=None, environment=None):
@@ -184,7 +214,7 @@ def interpreter(python):
         raise ValueError('select regular 64-bit CPython 3.12, 3.13 or 3.14')
     pair = (result['system'], result['machine'])
     if pair not in PLATFORM_TAGS:
-        raise ValueError('select native macOS arm64 or x86_64, or glibc Linux x86_64 interpreters')
+        raise ValueError('select native macOS arm64 or x86_64, or glibc Linux aarch64 or x86_64 interpreters')
     if result['system']=='Linux' and result['libc'][0]!='glibc':
         raise ValueError('the Linux wheel baseline requires glibc')
     if pair != (platform.system(), platform.machine()):
@@ -311,16 +341,7 @@ def artifact(wheel, metadata, runtime, output, private_prefixes, inputs):
             binary = {**target, 'architecture':architecture, 'self_image_id':own_id,
                       'runtime_dependencies':libraries[1:], 'runtime_rpath':False}
         else:
-            header = capture(['readelf','-h',str(inspection)])
-            versions = capture(['readelf','--version-info',str(inspection)])
-            dynamic = capture(['readelf','-d',str(inspection)])
-            required = sorted({tuple(map(int, match)) for match in re.findall(r'GLIBC_(\d+)\.(\d+)', versions)})
-            if 'Advanced Micro Devices X86-64' not in header or any(version>(2,28) for version in required):
-                raise ValueError('ELF architecture or required GLIBC exceeds the wheel contract')
-            if '(RPATH)' in dynamic or '(RUNPATH)' in dynamic:
-                raise ValueError('ELF retains a runtime library search path')
-            binary = {'architecture':'x86_64','required_glibc_symbol_versions':['.'.join(map(str,v)) for v in required],
-                      'needed_libraries':re.findall(r'\(NEEDED\).*?\[(.*?)\]',dynamic), 'runtime_rpath':False}
+            binary = linux_binary(wheel, inspection, runtime['machine'])
         return {'wheel':wheel.name,'sha256':sha(wheel.read_bytes()),'native_sha256':sha(native[0][1]),
                 'source_input_sha256':metadata['source_input_sha256'],'runtime':runtime,'binary':binary,
                 'scope':'build and static artifact inspection; actual target-system installation remains separate'}
@@ -364,7 +385,7 @@ def build(source, output, pythons, maturin):
     selectors = ('RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTUP_TOOLCHAIN',
                  'CARGO_BUILD_TARGET','CARGO_HOME','CARGO_TARGET_DIR',
                  'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER','CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER',
-                 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER',
+                 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER','CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER',
                  'CC','CXX','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','SDKROOT','DEVELOPER_DIR','MACOSX_DEPLOYMENT_TARGET')
     context = {'source':metadata, 'compiler_flags':flags, 'native_toolchain':toolchain,
                'cargo_configuration_files':configuration,

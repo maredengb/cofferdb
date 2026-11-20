@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import struct
 import sys
+from unittest.mock import patch
 import zipfile
 
 import build_python as builder
@@ -154,6 +155,30 @@ def check(source, wheel, output, python):
                                     ('header-truncated-command-range', 20, 0xffffffff),
                                     ('header-empty-command-range', 20, 0)]:
             artifact_case(name, lambda data, offset=offset, value=value:changed_header(data, offset, value))
+
+    if runtime['system'] == 'Linux':
+        machine = runtime['machine']
+        other = next(value for arch, value in builder.ELF_MACHINES.items() if arch != machine)
+
+        def other_machine(data):
+            native = bytearray(data[native_name])
+            struct.pack_into('<H', native, 18, other)
+            data[native_name] = bytes(native)
+
+        artifact_case('elf-wrong-machine', other_machine)
+        native = clean / (wheel.stem + '.native')
+        capture = builder.capture
+        for name, command, output_override in (
+                ('glibc-2-29', 'readelf --version-info', 'Name: GLIBC_2.29'),
+                ('elf-rpath', 'readelf -d', '(RPATH)'),
+                ('elf-runpath', 'readelf -d', '(RUNPATH)'),
+                ('auditwheel-glibc-2-29', 'auditwheel show', f'consistent with the following platform tag: "manylinux_2_29_{machine}"'),
+                ('auditwheel-other-machine', 'auditwheel show', 'consistent with the following platform tag: "manylinux_2_28_other"')):
+            def inspect(argv):
+                return output_override if ' '.join(argv[:2]) == command else capture(argv)
+
+            with patch.object(builder, 'capture', inspect):
+                refusal(name, lambda: builder.linux_binary(wheel, native, machine))
 
     for name in ('unlisted-cargo-config', 'unlisted-rust-source', 'unlisted-symlink', 'changed-source-mode'):
         copied = output / name

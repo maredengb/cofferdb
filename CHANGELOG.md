@@ -4,6 +4,12 @@ Entries describe version contents. The
 [releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
+## 0.1.5
+
+- Add Linux ARM64 (AArch64) wheels for regular-GIL CPython 3.12, 3.13 and 3.14 on glibc 2.28 or later.
+- Build and verify the Rust library and CLI on native Linux ARM64. Existing databases and self-contained snapshots from 0.1.4 can be opened and queried on this platform.
+- Continue providing wheels for Linux x86_64, Apple Silicon and Intel Mac.
+
 ## 0.1.4
 
 - Add native Intel Mac wheels for regular-GIL CPython 3.12, 3.13 and 3.14 on macOS 15 or later. Apple Silicon and Linux x86_64 wheels remain available.

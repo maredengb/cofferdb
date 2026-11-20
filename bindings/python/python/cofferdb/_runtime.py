@@ -7,7 +7,7 @@ import sysconfig
 
 _SUPPORTED = (
     "CofferDB requires regular-GIL CPython 3.12, 3.13 or 3.14 on "
-    "macOS 15+ on arm64 or x86_64, or Linux x86_64 with glibc 2.28+. "
+    "macOS 15+ on arm64 or x86_64, or Linux aarch64 or x86_64 with glibc 2.28+. "
     "See the versioned installation and compatibility guide."
 )
 
@@ -16,7 +16,7 @@ def check_runtime() -> None:
     """Check declared runtime prerequisites; this is not an installation test."""
     if sys.implementation.name != "cpython" or not (3, 12) <= sys.version_info[:2] < (3, 15):
         raise ImportError(_SUPPORTED)
-    if sysconfig.get_config_var("Py_GIL_DISABLED"):
+    if sys.maxsize <= 2**32 or sysconfig.get_config_var("Py_GIL_DISABLED"):
         raise ImportError(_SUPPORTED)
     if hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled():
         raise ImportError(_SUPPORTED)
@@ -31,7 +31,7 @@ def check_runtime() -> None:
         if version < (15, 0):
             raise ImportError(_SUPPORTED)
         return
-    if sys.platform != "linux" or machine != "x86_64":
+    if sys.platform != "linux" or machine not in {"aarch64", "x86_64"}:
         raise ImportError(_SUPPORTED)
     try:
         implementation, version = os.confstr("CS_GNU_LIBC_VERSION").split()

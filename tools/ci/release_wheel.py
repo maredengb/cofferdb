@@ -1,23 +1,25 @@
-"""Build and test version 0.1.4 release wheels without publishing them."""
+"""Build and test release wheels and check the Linux ARM64 source crate without publishing them."""
 import argparse
 import hashlib
 import importlib.metadata
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
 import subprocess
 import sys
 import sysconfig
+import tarfile
+import tomllib
 import urllib.request
 import zipfile
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 OLD_CRATE = (
-    "https://static.crates.io/crates/cofferdb/cofferdb-0.1.3.crate",
-    "2292053a3182dd0924fb15c82fe00d62b40c154f1754d465d4c4a88d2d980b6b",
+    "https://static.crates.io/crates/cofferdb/cofferdb-0.1.4.crate",
+    "3a4f00ab817349206b3cc4b3e11e80b0b475ff6e4b895c12838967ee853039e8",
 )
 PIP = (
     "https://files.pythonhosted.org/packages/44/3c/d717024885424591d5376220b5e836c2d5293ce2011523c9de23ff7bf068/pip-25.3-py3-none-any.whl",
@@ -72,13 +74,19 @@ def download(pin, directory):
 
 def source_identity(repo, commit):
     require(re.fullmatch(r"[0-9a-f]{40}", commit), "full source commit required")
+    origin = run("git", "remote", "get-url", "origin", cwd=repo).removesuffix(".git")
+    require(origin in ("https://github.com/maredengb/cofferdb", "git@github.com:maredengb/cofferdb"),
+            "unexpected product repository")
     require(run("git", "rev-parse", "HEAD", cwd=repo) == commit, "checkout differs from source SHA")
     require(not run("git", "status", "--porcelain", "--untracked-files=all", cwd=repo), "checkout is dirty")
     return {"commit": commit, "tree": run("git", "rev-parse", "HEAD^{tree}", cwd=repo)}
 
 
 def environment(pythons, architecture, versions):
-    machine = {"X64": "x86_64", "ARM64": "arm64"}[architecture]
+    system = platform.system()
+    require(system in {"Darwin", "Linux"}, "unsupported build system")
+    machine = "x86_64" if architecture == "X64" else {"Darwin": "arm64", "Linux": "aarch64"}[system]
+    require(os.environ.get("RUNNER_ARCH", architecture) == architecture, "runner architecture differs")
     require(platform.machine() == run("uname", "-m") == machine, "host architecture differs")
     probe = """import json, platform, sys, sysconfig
 print(json.dumps(dict(implementation=sys.implementation.name, version=platform.python_version(),
@@ -86,7 +94,6 @@ print(json.dumps(dict(implementation=sys.implementation.name, version=platform.p
                       suffix=sysconfig.get_config_var('EXT_SUFFIX'), gil=not sysconfig.get_config_var('Py_GIL_DISABLED'))))"""
     runtimes = [json.loads(run(python, "-I", "-c", probe)) for python in pythons]
     require([row["version"] for row in runtimes] == versions, "interpreter micro versions differ")
-    system = platform.system()
     for row, abi in zip(runtimes, ("312", "313", "314"), strict=True):
         require(row["implementation"] == "cpython" and row["bits"] == 64 and row["gil"],
                 "regular 64-bit CPython required")
@@ -98,10 +105,14 @@ print(json.dumps(dict(implementation=sys.implementation.name, version=platform.p
         require(run("sysctl", "-in", "sysctl.proc_translated") in ("", "0"), "translated execution")
     else:
         version = run("getconf", "GNU_LIBC_VERSION")
-        require(version == "glibc 2.28" and machine == "x86_64", "glibc 2.28 x86_64 required")
-    image = os.environ.get("ImageVersion") or os.environ.get("RELEASE_IMAGE", "")
+        require(version == "glibc 2.28", "release acceptance requires the glibc 2.28 baseline")
+    image = os.environ.get("ImageVersion", "") if system == "Darwin" else os.environ.get("RELEASE_IMAGE", "")
+    if system == "Linux":
+        require(re.fullmatch(r"quay\.io/pypa/manylinux_2_28_" + machine + r"@sha256:[0-9a-f]{64}", image),
+                "pinned architecture-specific manylinux image required")
     require(re.fullmatch(r"[A-Za-z0-9._:/@-]+", image), "runner image identity required")
-    return {"system": system, "version": version, "machine": machine, "image": image, "python": runtimes}
+    return {"system": system, "version": version, "machine": machine, "image": image, "runner_image": os.environ.get("ImageVersion", ""),
+            "actions": actions_identity(), "python": runtimes}
 
 
 def check_rust(expected_host):
@@ -109,6 +120,7 @@ def check_rust(expected_host):
     cargo = run("cargo", "--version")
     require("release: 1.97.1" in rust and cargo.startswith("cargo 1.97.1 "), "Rust/Cargo 1.97.1 required")
     require(f"host: {expected_host}" in rust, "Rust host target differs")
+    return {"host": expected_host, "rustc": run("rustc", "--version"), "cargo": cargo}
 
 
 def install(python, work, abi, pip, wheel, record):
@@ -144,16 +156,24 @@ def inspect_installed(digest):
     require(not sysconfig.get_config_var("Py_GIL_DISABLED"), "installed interpreter is free-threaded")
 
 
-def read_fixture(path, evidence, directory, kind):
-    from cofferdb import Database
-
-    oracle = json.loads(evidence.read_text(encoding="utf-8"))
+def fixture_oracle(directory, kind):
+    require({p.name for p in directory.iterdir()} == {"fixture.coffer", "fixture.json"},
+            "unexpected compatibility input files")
+    oracle = json.loads((directory / "fixture.json").read_bytes())
     require(oracle["stats"] == EXPECTED and oracle["chunk"] == "wal#commit", "unexpected old fixture oracle")
     require(oracle["kind"] == kind and oracle["actions"] == actions_identity(), "unexpected fixture origin")
-    require(sha(path) == oracle["sha256"], "old fixture digest differs")
+    require(oracle["crate"] == {"url": OLD_CRATE[0], "sha256": OLD_CRATE[1]}, "unexpected old source crate")
+    require(sha(directory / "fixture.coffer") == oracle["sha256"], "old fixture digest differs")
+    return oracle
+
+
+def read_fixture(source, directory, kind):
+    from cofferdb import Database
+
+    oracle = fixture_oracle(source, kind)
     directory.mkdir()
     fresh = directory / "restored.coffer"
-    shutil.copyfile(path, fresh)
+    shutil.copyfile(source / "fixture.coffer", fresh)
     with Database.open(str(fresh), read_only=True) as db:
         stats = db.stats()
         require(all(stats[key] == value for key, value in EXPECTED.items()), "old fixture stats differ")
@@ -162,6 +182,8 @@ def read_fixture(path, evidence, directory, kind):
         chunk = notes.get_chunk(hit["chunk_id"])["chunk"]
         require(chunk["chunk_external_id"] == oracle["chunk"], "old fixture query differs")
     require(sha(fresh) == oracle["sha256"], "read-only fixture changed")
+    return {"sha256": sha(fresh), "stats": {key: stats[key] for key in EXPECTED},
+            "chunk": chunk["chunk_external_id"]}
 
 
 def check_egress(path):
@@ -187,14 +209,15 @@ def release_build(args):
     source_identity(repo, args.commit)
     host = environment(args.python, args.arch, args.versions)
     mac = host["system"] == "Darwin"
-    check_rust(
-        {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}[host["machine"]]
-        if mac else "x86_64-unknown-linux-gnu"
-    )
+    triple = "aarch64" if host["machine"] == "arm64" else host["machine"]
+    tools = check_rust(triple + ("-apple-darwin" if mac else "-unknown-linux-gnu"))
     if mac:
-        require(run("xcodebuild", "-version").splitlines()[0] == "Xcode 16.0", "Xcode must be 16.0")
-        require(run("xcrun", "--sdk", "macosx", "--show-sdk-version") == "15.0", "SDK must be 15.0")
+        tools["xcode"] = run("xcodebuild", "-version").splitlines()[0]
+        tools["sdk"] = run("xcrun", "--sdk", "macosx", "--show-sdk-version")
+        require(tools["xcode"] == "Xcode 16.0" and tools["sdk"] == "15.0", "Xcode 16.0 and SDK 15.0 required")
         require(os.environ.get("MACOSX_DEPLOYMENT_TARGET") == "15.0", "deployment target must be 15.0")
+    else:
+        tools["rust_channel_sha256"] = sha(output / "rust-channel.toml")
     maturin = args.maturin
     stage(output, "build-inputs")
     if mac:
@@ -202,7 +225,8 @@ def release_build(args):
         run(args.python[0], "-I", "-m", "venv", toolkit)
         run(toolkit / "bin/pip", "--isolated", "install", "--no-index", "--no-deps", download(MATURIN_MAC, output))
         maturin = str(toolkit / "bin/maturin")
-    run("cargo", "fetch", "--locked", "--manifest-path", repo / "bindings/python/Cargo.toml")
+    for manifest in (repo / "Cargo.toml", repo / "bindings/python/Cargo.toml"):
+        run("cargo", "fetch", "--locked", "--manifest-path", manifest)
     source = output / "source"
     prepare_env = {**os.environ, "CARGO_TARGET_DIR": str(output / "prepare-target")}
     run(args.python[0], "-I", "-B", repo / "tools/prepare_source.py", "--commit", args.commit, source,
@@ -213,6 +237,7 @@ def release_build(args):
         require(all(row["binary"]["build_sdk_version"] == "15.0" for row in result["artifacts"]),
                 "actual wheel SDK differs")
     write_json(output / "build-environment.json", host)
+    write_json(output / "build-tools.json", tools)
     if not args.build_only:
         accept_build(repo, args.commit, host, output, output, args.python, args.fixture)
 
@@ -231,7 +256,11 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
     artifact.mkdir()
     rows = []
     for python, build_record in zip(pythons, result["artifacts"], strict=True):
+        expected_runtime = host["python"][len(rows)]
+        require(build_record["runtime"]["version"] == expected_runtime["version"], "wheel interpreter version differs")
         abi = f"cp3{build_record['runtime']['minor']}"
+        tag = ("macosx_15_0_" if host["system"] == "Darwin" else "manylinux_2_28_") + host["machine"]
+        require(build_record["wheel"] == f"cofferdb-{VERSION}-{abi}-{abi}-{tag}.whl", "wheel name differs")
         wheel = build / "built" / abi / build_record["wheel"]
         executable = install(python, output, abi, pip, wheel, build_record)
         stage(output, "wheel-import", abi)
@@ -246,14 +275,18 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
         require(suite.returncode == 0, "installed test suite failed")
         counts = re.search(r"^Ran (\d+) tests? in ", suite.stderr, re.MULTILINE)
         require(counts and int(counts[1]) > 0, "installed test discovery returned no tests")
+        require(not re.search(r"skipped=[1-9]", suite.stderr), "installed suite skipped required coverage")
+        observed = None
         if fixture:
             stage(output, "old-database", abi)
-            run(executable, "-I", "-B", Path(__file__).resolve(), "inspect", build_record["native_sha256"],
-                "--fixture", fixture, "--fixture-kind", "old_database", "--copy-to", output / f"old-{abi}", cwd=output)
+            observed = json.loads(run(
+                executable, "-I", "-B", Path(__file__).resolve(), "inspect", build_record["native_sha256"],
+                "--fixture", fixture, "--fixture-kind", "old_database", "--copy-to", output / f"old-{abi}", cwd=output))
         record = {name: build_record[name] for name in ("wheel", "sha256", "native_sha256", "binary")}
-        record.update(python=build_record["runtime"]["version"], installed_suite_exit_code=0,
+        record.update(versions=[VERSION, VERSION, VERSION], installed_native_verified=True,
+                      python=build_record["runtime"]["version"], installed_suite_exit_code=0,
                       installed_tests=int(counts[1]),
-                      old_database_checked=bool(fixture))
+                      old_database=observed)
         staged = artifact / wheel.name
         stage(output, "artifact-check", abi)
         shutil.copyfile(wheel, staged)
@@ -262,7 +295,9 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
     stage(output, "acceptance-report")
     write_json(artifact / "result.json", {
         **identity, "source_input_sha256": result["source"]["source_input_sha256"], "environment": host,
+        "job": os.environ.get("GITHUB_JOB"), "build_tools": json.loads((build / "build-tools.json").read_bytes()),
         "acceptance_script_sha256": sha(Path(__file__)), "actions": actions_identity(),
+        "linux_script_sha256": sha(Path(__file__).with_name("linux_release.sh")) if host["system"] == "Linux" else None,
         "rust": result["rustc"], "cargo": result["cargo"], "maturin": result["maturin"], "pip": "25.3",
         "artifacts": rows,
     })
@@ -273,9 +308,97 @@ def accept_build(repo, commit, host, build, output, pythons, fixture=None):
         check_egress(artifact / name)
 
 
-def make_fixtures(work):
+def check_database(coffer, path):
+    stats = json.loads(run(coffer, "stats", path, "--json"))["result"]
+    require(all(stats[key] == value for key, value in EXPECTED.items()), "sample database stats differ")
+    found = json.loads(run(coffer, "search", path, "--collection", "notes", "write ahead", "--json"))["result"]
+    require(found["results"][0]["chunk_external_id"] == "wal#commit", "sample query differs")
+    report = json.loads(run(coffer, "check", path, "--verify-indexes", "--json"))["result"]
+    require(report["status"] == "ok", "database integrity check failed")
+
+
+def check_crate(args):
+    work, repo = args.work.resolve(), args.repo.resolve()
+    identity = source_identity(repo, args.commit)
+    require(platform.system() == "Linux" and platform.machine() == run("uname", "-m") == "aarch64"
+            and os.environ.get("RUNNER_ARCH", "ARM64") == "ARM64", "native Linux ARM64 required")
+    check_rust("aarch64-unknown-linux-gnu")
+    build_env = {**os.environ, "CARGO_TARGET_DIR": str(work / "target")}
+    run("cargo", "package", "--locked", cwd=repo, env=build_env)
+    name = f"cofferdb-{VERSION}"
+    archive = work / "target/package" / (name + ".crate")
+    # Cargo uses a zero timestamp and the package basename as its only gzip header field.
+    header = b"\x1f\x8b\x08\x08\x00\x00\x00\x00\x02\xff" + archive.name.encode("ascii") + b"\x00"
+    require(archive.read_bytes().startswith(header), "unexpected crate gzip header")
+    expected = set(run("cargo", "package", "--list", "--locked", cwd=repo, env=build_env).splitlines())
+    with tarfile.open(archive, "r:gz") as package:
+        members = package.getmembers()
+        names = set()
+        for member in members:
+            path = PurePosixPath(member.name)
+            require(path.parts[:1] == (name,) and ".." not in path.parts and member.isfile()
+                    and member.uid == member.gid == 0 and not (member.uname or member.gname or member.pax_headers),
+                    "unexpected crate member or archive metadata")
+            relative = path.relative_to(name).as_posix()
+            require(relative not in names, "duplicate crate member")
+            source_file = repo / ("Cargo.toml" if relative == "Cargo.toml.orig" else relative)
+            expected_mode = 0o755 if source_file.is_file() and source_file.stat().st_mode & 0o111 else 0o644
+            require(member.mode == expected_mode and member.mtime == 1153704088, "unexpected crate member attributes")
+            names.add(relative)
+            payload = package.extractfile(member).read()
+            if relative == ".cargo_vcs_info.json":
+                vcs = json.loads(payload)
+                require(vcs["git"] == {"sha1": args.commit} and vcs["path_in_vcs"] == "", "crate source differs")
+            elif relative == "Cargo.toml":
+                normalized = tomllib.loads(payload.decode())["package"]
+                require(normalized["version"] == VERSION and normalized["license"] == "Apache-2.0"
+                        and not PRIVATE_DATA.search(payload), "normalized crate manifest differs")
+            else:
+                source = repo / ("Cargo.toml" if relative == "Cargo.toml.orig" else relative)
+                require(source.is_file() and not source.is_symlink() and source.read_bytes() == payload,
+                        "crate differs from reviewed source")
+        require(names == expected, "crate members differ from Cargo package list")
+        package.extractall(work, filter="data")
+    unpacked = work / name
+    readme = (unpacked / "README.md").read_text(encoding="utf-8")
+    require(f'cofferdb = "={VERSION}"' in readme, "crate README dependency differs")
+    for language in ("rust", "python"):
+        guide = f"docs/{language}-v{VERSION}.md"
+        require((unpacked / guide).is_file() and guide in readme, "crate version guide missing")
+    example = json.loads(run("cargo", "run", "--locked", "--example", "embedded", cwd=unpacked, env=build_env))
+    require(example["results"][0]["chunk_external_id"] == "wal#commit", "embedded Rust example query differs")
+    run("cargo", "build", "--locked", "--bin", "coffer", cwd=unpacked, env=build_env)
+    coffer = work / "target/debug/coffer"
+    require("AArch64" in run("readelf", "-h", coffer), "CLI architecture differs")
+    db, snapshot = work / "notes.coffer", work / "backup.coffer"
+    run(coffer, "init", db)
+    run(coffer, "import", db, "--manifest", unpacked / "examples/data/markdown/import_manifest.json", "--json")
+    check_database(coffer, db)
+    run(coffer, "snapshot", db, snapshot)
+    restore_dir = work / "restored"
+    restore_dir.mkdir()
+    copy = restore_dir / "restored.coffer"
+    shutil.copyfile(snapshot, copy)
+    check_database(coffer, copy)
+    require(sha(copy) == sha(snapshot), "restored database bytes changed")
+    require(source_identity(repo, args.commit) == identity, "checkout changed during crate verification")
+    output = work / "release-crate"
+    output.mkdir()
+    shutil.copyfile(archive, output / archive.name)
+    require(sha(output / archive.name) == sha(archive), "staged crate differs")
+    report = output / "result.json"
+    write_json(report, {**identity, "actions": actions_identity(), "job": os.environ.get("GITHUB_JOB"), "rust": run("rustc", "--version"),
+               "host": "aarch64-unknown-linux-gnu", "runner_image": os.environ.get("ImageVersion", ""),
+               "system": platform.release(), "glibc": run("getconf", "GNU_LIBC_VERSION"),
+               "crate": archive.name, "sha256": sha(archive), "cli_sha256": sha(coffer),
+               "snapshot_sha256": sha(snapshot), "stats": EXPECTED, "chunk": "wal#commit"})
+    check_egress(report)
+
+
+def make_fixtures(work, repo, commit):
+    identity = source_identity(repo, commit)
     archive = download(OLD_CRATE, work)
-    imported = work / "cofferdb-0.1.3"
+    imported = work / "cofferdb-0.1.4"
     run("tar", "-xzf", archive, "-C", work)
     check_rust("x86_64-unknown-linux-gnu")
     run("cargo", "build", "--locked", "--bin", "coffer", cwd=imported)
@@ -288,17 +411,17 @@ def make_fixtures(work):
     run(coffer, "init", old)
     manifest = "examples/data/markdown/import_manifest.json"
     run(coffer, "import", old, "--manifest", manifest, "--json", cwd=imported)
-    stats = json.loads(run(coffer, "stats", old, "--json"))["result"]
-    require(all(stats[key] == value for key, value in EXPECTED.items()), "v0.1.3 fixture stats differ")
-    found = json.loads(run(coffer, "search", old, "--collection", "notes", "write ahead", "--json"))["result"]
-    require(found["results"][0]["chunk_external_id"] == "wal#commit", "v0.1.3 fixture query differs")
+    check_database(coffer, old)
     run(coffer, "snapshot", old, snapshot)
     fixtures = ((old, old_dir, "old_database"), (snapshot, snapshot_dir, "standalone_snapshot"))
     for fixture, directory, kind in fixtures:
         staged = directory / "fixture.coffer"
         shutil.copyfile(fixture, staged)
         evidence = directory / "fixture.json"
-        write_json(evidence, {"stats": EXPECTED, "chunk": "wal#commit", "sha256": sha(staged),
+        write_json(evidence, {**identity, "crate": {"url": OLD_CRATE[0], "sha256": sha(archive)},
+                              "job": os.environ.get("GITHUB_JOB"), "machine": platform.machine(),
+                              "runner_image": os.environ.get("ImageVersion", ""),
+                              "stats": EXPECTED, "chunk": "wal#commit", "sha256": sha(staged),
                               "kind": kind, "actions": actions_identity()})
         check_egress(staged)
         check_egress(evidence)
@@ -307,33 +430,39 @@ def make_fixtures(work):
 def restore(args):
     work = args.work.resolve()
     stage(work, "restore-inputs")
-    host = environment(args.python, "X64", args.versions)
-    require(host["system"] == "Darwin", "native Intel macOS recovery required")
+    host = environment(args.python, args.arch, args.versions)
+    target = (host["system"], host["machine"])
+    tags = {("Darwin", "x86_64"): "macosx_15_0_x86_64", ("Linux", "aarch64"): "manylinux_2_28_aarch64"}
+    require(target in tags, "native Intel macOS or Linux ARM64 recovery required")
     manifest = json.loads((args.wheels / "result.json").read_text(encoding="utf-8"))
     require(manifest["commit"] == args.commit, "restore input is from a different commit")
     require(manifest["actions"] == actions_identity(), "restore input is from a different workflow run")
     require(sha(Path(__file__)) == manifest["acceptance_script_sha256"], "restore assertion differs from build")
-    require(manifest["environment"]["machine"] == "x86_64", "restore input is not Intel")
+    require(manifest["environment"]["system"] == host["system"] and
+            manifest["environment"]["machine"] == host["machine"], "restore input platform differs")
+    if host["system"] == "Linux":
+        require(manifest["environment"]["image"] == host["image"], "restore image differs")
     records = manifest["artifacts"]
-    require(len(records) == 3, "restore needs all three Intel wheels")
+    require(len(records) == 3, "restore needs all three platform wheels")
     stage(work, "pip-download")
     pip = download(PIP, work)
+    restored = {}
     for python, version, record in zip(args.python, args.versions, records, strict=True):
         abi = f"cp{version.split('.')[0]}{version.split('.')[1]}"
-        wheel = f"cofferdb-{VERSION}-{abi}-{abi}-macosx_15_0_x86_64.whl"
+        wheel = f"cofferdb-{VERSION}-{abi}-{abi}-{tags[target]}.whl"
         require(record["wheel"] == wheel and record["python"] == version, "restore wheel or Python differs")
         executable = install(python, work, abi, pip, args.wheels / wheel, record)
         stage(work, "snapshot-check", abi)
-        run(executable, "-I", "-B", Path(__file__).resolve(), "inspect", record["native_sha256"],
-            "--fixture", args.snapshot, "--fixture-kind", "standalone_snapshot",
-            "--copy-to", work / f"restore-{abi}", cwd=work)
+        restored[wheel] = json.loads(run(
+            executable, "-I", "-B", Path(__file__).resolve(), "inspect", record["native_sha256"],
+            "--fixture", args.snapshot, "--fixture-kind", "standalone_snapshot", "--copy-to", work / f"restore-{abi}", cwd=work))
     stage(work, "restore-report")
     output = work / "verified"
     output.mkdir()
     report = output / "restore.json"
     write_json(report, {
         "commit": args.commit, "environment": host, "snapshot_sha256": sha(args.snapshot / "fixture.coffer"),
-        "actions": actions_identity(),
+        "actions": actions_identity(), "tree": manifest["tree"], "job": os.environ.get("GITHUB_JOB"), "restored": restored,
         "wheels": {row["wheel"]: row["sha256"] for row in records},
         "restore_exit_code": 0,
     })
@@ -352,9 +481,18 @@ def main():
     accept = actions.add_parser("accept")
     accept.add_argument("--repo", type=Path, required=True)
     accept.add_argument("--built", type=Path, required=True)
+    accept.add_argument("--arch", choices=["X64", "ARM64"], default="X64")
+    accept.add_argument("--fixture", type=Path)
+    crate = actions.add_parser("crate")
+    crate.add_argument("work", type=Path)
+    crate.add_argument("--repo", type=Path, required=True)
+    crate.add_argument("--commit", required=True)
     fixtures = actions.add_parser("fixtures")
     fixtures.add_argument("work", type=Path)
+    fixtures.add_argument("--repo", type=Path, required=True)
+    fixtures.add_argument("--commit", required=True)
     recovery = actions.add_parser("restore")
+    recovery.add_argument("--arch", choices=["X64", "ARM64"], default="X64")
     recovery.add_argument("--wheels", type=Path, required=True)
     recovery.add_argument("--snapshot", type=Path, required=True)
     for action in (build, accept, recovery):
@@ -371,18 +509,19 @@ def main():
     if args.action == "build":
         release_build(args)
     elif args.action == "accept":
-        host = environment(args.python, "X64", args.versions)
+        host = environment(args.python, args.arch, args.versions)
         require(host["system"] == "Linux", "separate acceptance requires baseline Linux")
-        accept_build(args.repo.resolve(), args.commit, host, args.built.resolve(), args.work.resolve(), args.python)
+        accept_build(args.repo.resolve(), args.commit, host, args.built.resolve(), args.work.resolve(), args.python, args.fixture)
+    elif args.action == "crate":
+        check_crate(args)
     elif args.action == "fixtures":
-        make_fixtures(args.work)
+        make_fixtures(args.work, args.repo, args.commit)
     elif args.action == "restore":
         restore(args)
     else:
         inspect_installed(args.native_sha256)
         if args.fixture:
-            read_fixture(args.fixture / "fixture.coffer", args.fixture / "fixture.json",
-                         args.copy_to, args.fixture_kind)
+            print(json.dumps(read_fixture(args.fixture, args.copy_to, args.fixture_kind)))
 
 
 if __name__ == "__main__":

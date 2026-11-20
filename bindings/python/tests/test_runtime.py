@@ -9,11 +9,12 @@ from cofferdb._runtime import check_runtime
 
 class RuntimeGuardTests(unittest.TestCase):
     def check(self, *, os_name="darwin", machine="arm64", version=(3, 12),
-              gil=True, interpreter="cpython", mac="15.0", libc="glibc 2.28"):
+              gil=True, interpreter="cpython", mac="15.0", libc="glibc 2.28", maxsize=2**63 - 1):
         with (
             patch("cofferdb._runtime.sys.implementation", types.SimpleNamespace(name=interpreter)),
             patch("cofferdb._runtime.sys.version_info", version),
             patch("cofferdb._runtime.sys.platform", os_name),
+            patch("cofferdb._runtime.sys.maxsize", maxsize),
             patch("cofferdb._runtime.sysconfig.get_config_var", return_value=0 if gil else 1),
             patch("cofferdb._runtime.platform.machine", return_value=machine),
             patch("cofferdb._runtime.platform.mac_ver", return_value=(mac, (), machine)),
@@ -21,9 +22,9 @@ class RuntimeGuardTests(unittest.TestCase):
         ):
             check_runtime()
 
-    def test_declared_nine_combinations_pass_the_guard(self):
+    def test_declared_twelve_combinations_pass_the_guard(self):
         for version in [(3, 12), (3, 13), (3, 14)]:
-            for os_name, machine in [("darwin", "arm64"), ("darwin", "x86_64"), ("linux", "x86_64")]:
+            for os_name, machine in [("darwin", "arm64"), ("darwin", "x86_64"), ("linux", "x86_64"), ("linux", "aarch64")]:
                 with self.subTest(version=version, os=os_name, machine=machine):
                     self.check(version=version, os_name=os_name, machine=machine)
 
@@ -34,7 +35,12 @@ class RuntimeGuardTests(unittest.TestCase):
             {"os_name": "win32"}, {"mac": "10.15"}, {"mac": "11.7"},
             {"mac": "12.7"}, {"mac": "13.7"}, {"mac": "14.9"}, {"mac": ""},
             {"machine": "x86_64", "mac": "14.9"}, {"machine": "x86_64", "gil": False},
-            {"os_name": "linux", "machine": "aarch64"},
+            {"os_name": "linux", "machine": "armv7l"},
+            {"os_name": "linux", "machine": "ppc64le"},
+            {"os_name": "linux", "machine": "aarch64", "libc": "glibc 2.27"},
+            {"os_name": "linux", "machine": "aarch64", "libc": "musl 1.2"},
+            {"os_name": "linux", "machine": "aarch64", "gil": False},
+            {"os_name": "linux", "machine": "aarch64", "maxsize": 2**31 - 1},
             {"os_name": "linux", "machine": "x86_64", "libc": "glibc 2.27"},
             {"os_name": "linux", "machine": "x86_64", "libc": "musl 1.2"},
             {"os_name": "linux", "machine": "x86_64", "libc": None},
