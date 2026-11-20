@@ -7,7 +7,7 @@ import sysconfig
 
 _SUPPORTED = (
     "CofferDB requires regular-GIL CPython 3.12, 3.13 or 3.14 on "
-    "macOS 15+ arm64 or Linux x86_64 with glibc 2.28+. "
+    "macOS 15+ on arm64 or x86_64, or Linux x86_64 with glibc 2.28+. "
     "See the versioned installation and compatibility guide."
 )
 
@@ -22,7 +22,7 @@ def check_runtime() -> None:
         raise ImportError(_SUPPORTED)
     machine = platform.machine()
     if sys.platform == "darwin":
-        if machine != "arm64":
+        if machine not in {"arm64", "x86_64"}:
             raise ImportError(_SUPPORTED)
         try:
             version = tuple(int(part) for part in platform.mac_ver()[0].split(".")[:2])

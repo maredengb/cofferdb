@@ -21,18 +21,19 @@ class RuntimeGuardTests(unittest.TestCase):
         ):
             check_runtime()
 
-    def test_declared_six_combinations_pass_the_guard(self):
+    def test_declared_nine_combinations_pass_the_guard(self):
         for version in [(3, 12), (3, 13), (3, 14)]:
-            for os_name, machine in [("darwin", "arm64"), ("linux", "x86_64")]:
-                with self.subTest(version=version, os=os_name):
+            for os_name, machine in [("darwin", "arm64"), ("darwin", "x86_64"), ("linux", "x86_64")]:
+                with self.subTest(version=version, os=os_name, machine=machine):
                     self.check(version=version, os_name=os_name, machine=machine)
 
     def test_unsupported_runtimes_are_rejected(self):
         for override in [
             {"version": (3, 11)}, {"version": (3, 15)}, {"gil": False},
-            {"interpreter": "pypy"}, {"machine": "x86_64"},
+            {"interpreter": "pypy"}, {"machine": "i386"},
             {"os_name": "win32"}, {"mac": "10.15"}, {"mac": "11.7"},
             {"mac": "12.7"}, {"mac": "13.7"}, {"mac": "14.9"}, {"mac": ""},
+            {"machine": "x86_64", "mac": "14.9"}, {"machine": "x86_64", "gil": False},
             {"os_name": "linux", "machine": "aarch64"},
             {"os_name": "linux", "machine": "x86_64", "libc": "glibc 2.27"},
             {"os_name": "linux", "machine": "x86_64", "libc": "musl 1.2"},

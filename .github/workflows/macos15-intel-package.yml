@@ -1,0 +1,214 @@
+name: macOS 15 release wheels
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Approved full commit SHA on the default branch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.97.1
+  PYTHON_312: 3.12.10
+  PYTHON_313: 3.13.15
+  PYTHON_314: 3.14.7
+  SOURCE_SHA: ${{ inputs.source_sha }}
+
+jobs:
+  fixtures:
+    if: github.repository_id == '1422246026' && github.event.repository.private == false && github.sha == inputs.source_sha && github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Generate version 0.1.3 compatibility inputs
+        shell: bash
+        run: |
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          work="$RUNNER_TEMP/cofferdb-fixtures"
+          mkdir -m 700 "$work"
+          if ! (
+            rustup toolchain install 1.97.1 --profile minimal &&
+            python3 -I -B tools/ci/release_wheel.py fixtures "$work"
+          ) >"$work/private.log" 2>&1; then
+            echo '::error::Compatibility fixture generation failed'
+            exit 1
+          fi
+          echo 'Version 0.1.3 fixture generation passed'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cofferdb-013-old-database
+          path: |
+            ${{ runner.temp }}/cofferdb-fixtures/old/fixture.coffer
+            ${{ runner.temp }}/cofferdb-fixtures/old/fixture.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cofferdb-013-snapshot
+          path: |
+            ${{ runner.temp }}/cofferdb-fixtures/snapshot/fixture.coffer
+            ${{ runner.temp }}/cofferdb-fixtures/snapshot/fixture.json
+          if-no-files-found: error
+
+  macos:
+    needs: fixtures
+    if: github.repository_id == '1422246026' && github.event.repository.private == false && github.sha == inputs.source_sha && github.run_attempt == '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            python_arch: x64
+            runner_arch: X64
+            wheel_arch: x86_64
+          - os: macos-15
+            python_arch: arm64
+            runner_arch: ARM64
+            wheel_arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python312
+        with:
+          python-version: ${{ env.PYTHON_312 }}
+          architecture: ${{ matrix.python_arch }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python313
+        with:
+          python-version: ${{ env.PYTHON_313 }}
+          architecture: ${{ matrix.python_arch }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python314
+        with:
+          python-version: ${{ env.PYTHON_314 }}
+          architecture: ${{ matrix.python_arch }}
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        if: matrix.runner_arch == 'X64'
+        with:
+          name: cofferdb-013-old-database
+          path: ${{ runner.temp }}/cofferdb-old-database
+      - name: Build and accept the native wheels
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.runner_arch }}
+          WHEEL_ARCH: ${{ matrix.wheel_arch }}
+          PY312: ${{ steps.python312.outputs.python-path }}
+          PY313: ${{ steps.python313.outputs.python-path }}
+          PY314: ${{ steps.python314.outputs.python-path }}
+        run: |
+          umask 022
+          test "$RUNNER_ARCH" = "$EXPECTED_ARCH"
+          work="$RUNNER_TEMP/cofferdb-mac-release"
+          mkdir -m 700 "$work"
+          options=()
+          if [[ "$EXPECTED_ARCH" == X64 ]]; then
+            options+=(--fixture "$RUNNER_TEMP/cofferdb-old-database")
+            export CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=x86-64'
+          fi
+          echo build-inputs >"$work/stage"
+          if ! (
+            rustup toolchain install 1.97.1 --profile minimal &&
+            "$PY312" -I -B tools/ci/release_wheel.py build "$work" --repo "$PWD" \
+              --arch "$EXPECTED_ARCH" --commit "$SOURCE_SHA" \
+              --python "$PY312" "$PY313" "$PY314" \
+              --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314" "${options[@]}"
+          ) >"$work/private.log" 2>&1; then
+            read -r stage <"$work/stage"
+            case "$stage" in
+              source-and-host|build-inputs|native-build|install) ;;
+              *) stage=unknown ;;
+            esac
+            echo "::error::Native wheel check failed at stage $stage. Dispatch a new run after resolving the failure."
+            exit 1
+          fi
+          echo "All three macOS $WHEEL_ARCH wheel installations passed"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cofferdb-014-macos-${{ matrix.wheel_arch }}
+          path: |
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.4-cp312-cp312-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.4-cp313-cp313-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.4-cp314-cp314-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/SHA256SUMS
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/result.json
+          if-no-files-found: error
+
+  intel-restore:
+    needs: [fixtures, macos]
+    if: github.repository_id == '1422246026' && github.event.repository.private == false && github.sha == inputs.source_sha && github.run_attempt == '1'
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python312
+        with:
+          python-version: ${{ env.PYTHON_312 }}
+          architecture: x64
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python313
+        with:
+          python-version: ${{ env.PYTHON_313 }}
+          architecture: x64
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        id: python314
+        with:
+          python-version: ${{ env.PYTHON_314 }}
+          architecture: x64
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: cofferdb-013-snapshot
+          path: ${{ runner.temp }}/cofferdb-snapshot
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: cofferdb-014-macos-x86_64
+          path: ${{ runner.temp }}/cofferdb-intel-wheels
+      - name: Restore the standalone snapshot
+        shell: bash
+        env:
+          PY312: ${{ steps.python312.outputs.python-path }}
+          PY313: ${{ steps.python313.outputs.python-path }}
+          PY314: ${{ steps.python314.outputs.python-path }}
+        run: |
+          test "$RUNNER_ARCH" = X64
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          work="$RUNNER_TEMP/cofferdb-intel-restore"
+          wheels="$RUNNER_TEMP/cofferdb-intel-wheels"
+          mkdir -m 700 "$work"
+          if ! (
+            curl --fail --silent --show-error --proto '=https' \
+              "https://raw.githubusercontent.com/maredengb/cofferdb/$SOURCE_SHA/tools/ci/release_wheel.py" \
+              --output "$work/release_wheel.py" &&
+            "$PY312" -I -c 'import hashlib,json,sys; from pathlib import Path; sys.exit(0 if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() == json.loads(Path(sys.argv[2]).read_text())["acceptance_script_sha256"] else 1)' \
+              "$work/release_wheel.py" "$wheels/result.json" &&
+            "$PY312" -I -B "$work/release_wheel.py" restore "$work" --commit "$SOURCE_SHA" \
+              --wheels "$wheels" --snapshot "$RUNNER_TEMP/cofferdb-snapshot" \
+              --python "$PY312" "$PY313" "$PY314" --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"
+          ) >"$work/private.log" 2>&1; then
+            echo '::error::Standalone snapshot restoration failed'
+            exit 1
+          fi
+          echo 'Standalone snapshot restoration passed on all three Intel interpreters'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: cofferdb-014-intel-snapshot-acceptance
+          path: ${{ runner.temp }}/cofferdb-intel-restore/verified/restore.json
+          if-no-files-found: error

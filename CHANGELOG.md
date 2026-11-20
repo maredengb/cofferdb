@@ -4,6 +4,11 @@ Entries describe version contents. The
 [releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
+## 0.1.4
+
+- Add native Intel Mac wheels for regular-GIL CPython 3.12, 3.13 and 3.14 on macOS 15 or later. Apple Silicon and Linux x86_64 wheels remain available.
+- Add Rust and Python 0.1.4 guides, including snapshot recovery. Existing v0.1.3 databases and snapshots remain readable.
+
 ## 0.1.3
 
 - Document how to create a self-contained snapshot and restore committed data

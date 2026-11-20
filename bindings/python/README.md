@@ -1,12 +1,12 @@
-# CofferDB Python 0.1.3
+# CofferDB Python 0.1.4
 
-This source contains the in-process binding for CofferDB 0.1.3.
+This source contains the in-process binding for CofferDB 0.1.4.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) to find
 available artifacts, their checksums and package-specific validation results.
 The native extension statically links the Rust engine from the same source tree.
 
 The target runtimes are regular GIL builds of CPython 3.12, 3.13 and 3.14 on
-macOS arm64 and Linux x86_64 with glibc. Source builds require the Rust toolchain
+macOS on Apple Silicon (arm64) and Intel (x86_64), and Linux x86_64 with glibc. Source builds require the Rust toolchain
 and maturin 1.10.2; the intended standard installation uses prebuilt wheels.
 
 ## Installation
@@ -17,14 +17,14 @@ Use a clean virtual environment with `python -m pip` 25.3. Prepare that
 installer version before transferring the environment to an offline machine.
 
 ```console
-python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.1.3-<matching-tags>.whl
+python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.1.4-<matching-tags>.whl
 ```
 
 The wheel contains the native engine. Using it requires no Rust toolchain,
 server process, CLI executable, model provider, or model download. Unsupported
 interpreter/platform combinations fail at import instead of falling back to a
 source build or a different execution route. The declared lower bounds are
-macOS 15 on arm64 and glibc 2.28 (AlmaLinux 8) on Linux x86_64; macOS 11–14
+macOS 15 on Apple Silicon and Intel, and glibc 2.28 (AlmaLinux 8) on Linux x86_64; macOS 11–14
 is unsupported by this Python package. Wheel tags alone
 do not establish that every minimum-environment acceptance run has passed.
 
@@ -192,7 +192,7 @@ actually linked Rust crate version. The package includes public
 These are type hints, not runtime coercion or schema bypasses. The native API
 does not expose every Rust maintenance operation.
 
-The [programming guide](../../docs/python-v0.1.3.md) and
+The [programming guide](../../docs/python-v0.1.4.md) and
 [source-backed executable](../../examples/code_retrieval.py) cover the complete
 retrieval workflow. The [reference source](docs/index.rst) documents the exported API. Generated
 offline reference archives must be built against the matching installed wheel.

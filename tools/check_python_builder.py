@@ -115,7 +115,7 @@ def check(source, wheel, output, python):
         def changed_target(data, field, value):
             native = bytearray(data[native_name])
             if struct.unpack_from('<I', native, 0)[0] != 0xfeedfacf:
-                raise ValueError('the control requires the actual thin arm64 Mach-O')
+                raise ValueError('the control requires an actual thin Mach-O')
             count = struct.unpack_from('<I', native, 16)[0]
             offset, changed = 32, 0
             for _ in range(count):
@@ -147,8 +147,9 @@ def check(source, wheel, output, python):
             struct.pack_into('<I', native, offset, value)
             data[native_name] = bytes(native)
 
+        other_cpu = next(cpu for machine, cpu in builder.MACHO_CPUS.items() if machine != runtime['machine'])
         for name, offset, value in [('header-executable', 12, 2),
-                                    ('header-wrong-cpu', 4, 0x01000007),
+                                    ('header-wrong-cpu', 4, other_cpu),
                                     ('header-too-many-commands', 16, 0xffffffff),
                                     ('header-truncated-command-range', 20, 0xffffffff),
                                     ('header-empty-command-range', 20, 0)]:

@@ -13,11 +13,12 @@ import io
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import shlex
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -30,13 +31,20 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def macho_target(data):
-    # Read the binary target, rather than inferring its OS from an arm64 tag.
+PLATFORM_TAGS = {
+    ('Darwin', 'arm64'): 'macosx_15_0_arm64',
+    ('Darwin', 'x86_64'): 'macosx_15_0_x86_64',
+    ('Linux', 'x86_64'): 'manylinux_2_28_x86_64',
+}
+MACHO_CPUS = {'arm64': 0x0100000C, 'x86_64': 0x01000007}
+
+
+def macho_target(data, machine='arm64'):
     if len(data) < 32:
         raise ValueError('native Mach-O header is truncated')
     magic, cpu, _, kind, count, size, _, _ = struct.unpack_from('<8I', data)
-    if magic != 0xfeedfacf or cpu != 0x0100000c or kind != 6:
-        raise ValueError('native Mach-O must be a thin arm64 dynamic library')
+    if magic != 0xfeedfacf or cpu != MACHO_CPUS[machine] or kind != 6:
+        raise ValueError(f'native Mach-O must be a thin {machine} dynamic library')
     end = 32 + size
     if end > len(data) or count > size // 8:
         raise ValueError('native Mach-O load command range is invalid')
@@ -175,8 +183,8 @@ def interpreter(python):
             or result['free_threaded'] or result['pointer_bits'] != 64):
         raise ValueError('select regular 64-bit CPython 3.12, 3.13 or 3.14')
     pair = (result['system'], result['machine'])
-    if pair not in {('Darwin','arm64'), ('Linux','x86_64')}:
-        raise ValueError('select native macOS arm64 or glibc Linux x86_64 interpreters')
+    if pair not in PLATFORM_TAGS:
+        raise ValueError('select native macOS arm64 or x86_64, or glibc Linux x86_64 interpreters')
     if result['system']=='Linux' and result['libc'][0]!='glibc':
         raise ValueError('the Linux wheel baseline requires glibc')
     if pair != (platform.system(), platform.machine()):
@@ -189,7 +197,7 @@ def interpreter(python):
 
 def artifact(wheel, metadata, runtime, output, private_prefixes, inputs):
     tag = f"cp3{runtime['minor']}-cp3{runtime['minor']}-"
-    platform_tag = 'macosx_15_0_arm64' if runtime['system']=='Darwin' else 'manylinux_2_28_x86_64'
+    platform_tag = PLATFORM_TAGS[runtime['system'], runtime['machine']]
     expected_filename = 'cofferdb-' + metadata['sdk_version'] + '-' + tag + platform_tag + '.whl'
     if wheel.name != expected_filename:
         raise ValueError('wheel filename differs from the source distribution/version and selected runtime/platform')
@@ -197,6 +205,13 @@ def artifact(wheel, metadata, runtime, output, private_prefixes, inputs):
         names = bundle.namelist()
         if len(names) != len(set(names)) or bundle.testzip() is not None:
             raise ValueError('wheel has duplicate or corrupt members')
+        for info in bundle.infolist():
+            path = PurePosixPath(info.filename)
+            mode = stat.S_IFMT(info.external_attr >> 16)
+            allowed_mode = stat.S_IFDIR if info.is_dir() else stat.S_IFREG
+            if (not path.parts or path.is_absolute() or '..' in path.parts
+                    or '\\' in info.filename or mode not in (0, allowed_mode)):
+                raise ValueError('wheel has an unsafe archive member')
         regular={info.filename for info in bundle.infolist() if not info.is_dir()}
         expected_python = {
             name.removeprefix('bindings/python/python/')
@@ -265,8 +280,6 @@ def artifact(wheel, metadata, runtime, output, private_prefixes, inputs):
                     raise ValueError('wheel dependency notice differs from its recorded original')
         native = []
         for name in names:
-            if name.startswith('/') or '..' in Path(name).parts or '\\' in name:
-                raise ValueError('wheel member escapes its archive')
             data = bundle.read(name)
             if name.startswith('cofferdb/') and name!='cofferdb/_source.json' and not name.endswith('.so') and not name.endswith('/'):
                 relative='bindings/python/python/'+name
@@ -281,14 +294,14 @@ def artifact(wheel, metadata, runtime, output, private_prefixes, inputs):
         inspection = output / (wheel.stem+'.native')
         inspection.write_bytes(native[0][1])
         if runtime['system'] == 'Darwin':
-            target = macho_target(native[0][1])
+            target = macho_target(native[0][1], runtime['machine'])
             architecture = capture(['lipo','-archs',str(inspection)])
             loads = capture(['otool','-l',str(inspection)])
             libraries = capture(['otool','-L',str(inspection)]).splitlines()[1:]
             own_id = capture(['otool','-D',str(inspection)]).splitlines()[1].strip()
             libraries = [line.strip().split(' (',1)[0] for line in libraries]
             minimum_versions = re.findall(r'^\s+minos\s+([0-9.]+)\s*$', loads, re.MULTILINE)
-            if architecture != 'arm64' or minimum_versions != [target['minimum_macos']] or 'cmd LC_RPATH' in loads:
+            if architecture != runtime['machine'] or minimum_versions != [target['minimum_macos']] or 'cmd LC_RPATH' in loads:
                 raise ValueError('native Mach-O architecture/deployment/rpath differs from the wheel contract')
             if not libraries or libraries[0] != own_id or any(not name.startswith(('/usr/lib/','/System/Library/')) for name in libraries[1:]):
                 raise ValueError('Mach-O uses a non-system runtime dependency')
@@ -350,7 +363,8 @@ def build(source, output, pythons, maturin):
     env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
     selectors = ('RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTUP_TOOLCHAIN',
                  'CARGO_BUILD_TARGET','CARGO_HOME','CARGO_TARGET_DIR',
-                 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER','CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER',
+                 'CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER','CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER',
+                 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER',
                  'CC','CXX','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS','SDKROOT','DEVELOPER_DIR','MACOSX_DEPLOYMENT_TARGET')
     context = {'source':metadata, 'compiler_flags':flags, 'native_toolchain':toolchain,
                'cargo_configuration_files':configuration,
