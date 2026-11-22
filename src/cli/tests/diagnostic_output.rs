@@ -17,6 +17,8 @@ fn diagnostic_and_export_field_tables_match_independent_legacy_oracles() {
         issues_repaired: 1,
     };
     let snapshot = SnapshotSummary {
+        sha256: "test".into(),
+        collections: vec![],
         schema_version: "0.1".into(),
         source_path: "source".into(),
         output_path: "dest".into(),
@@ -35,6 +37,7 @@ fn diagnostic_and_export_field_tables_match_independent_legacy_oracles() {
         embeddings_sha256: "embeddings".into(),
     };
     let mut report = CheckReport {
+        detached_view: false,
         schema_version: "0.1".into(),
         path: "source".into(),
         status: "warning".into(),
@@ -73,7 +76,7 @@ fn diagnostic_and_export_field_tables_match_independent_legacy_oracles() {
         (
             retained_output_in(context.clone(), |b| snapshot.build_json(b)).unwrap(),
             snapshot.to_json(),
-            r#"{"schema_version":"0.1","source_path":"source","output_path":"dest","bytes_copied":7,"last_valid_commit":3,"critical_end_offset":5,"index_suffix_status":"persistent_checkpoint"}"#,
+            r#"{"schema_version":"0.1","source_path":"source","output_path":"dest","package":{"package_version":1,"format_version":1,"required_features":[],"size_bytes":"7","sha256":"test","last_valid_commit":"3","critical_end_offset":"5","index_suffix_status":"persistent_checkpoint","collections":[]},"bytes_copied":7,"last_valid_commit":3,"critical_end_offset":5,"index_suffix_status":"persistent_checkpoint"}"#,
         ),
         (
             retained_output_in(context.clone(), |b| export.build_json(b)).unwrap(),
@@ -83,7 +86,7 @@ fn diagnostic_and_export_field_tables_match_independent_legacy_oracles() {
         (
             retained_output_in(context.clone(), |b| report.build_json(b)).unwrap(),
             report.to_json(),
-            r#"{"schema_version":"0.1","path":"source","status":"warning","format_version":1,"last_valid_commit":9007199254740992,"critical_end_offset":7,"index_suffix_status":"rebuild_needed","index_suffix":null,"issues":[{"severity":"warning","code":"corrupt_suffix","message":"broken \"suffix\"","stream":"index","visibility_impact":"none","offset":7,"extent_id":null,"record_type":"Index","batch_id":9007199254740992,"repair_available":true,"repairable":true,"suggested_command":"coffer rebuild-index source"}],"repair_available":true,"index_check":"completed","index_check_reason":null,"result":{"live_documents":3,"live_chunks":5,"tombstones":2}}"#,
+            r#"{"schema_version":"0.1","path":"source","status":"warning","format_version":1,"last_valid_commit":"9007199254740992","critical_end_offset":7,"index_suffix_status":"rebuild_needed","index_suffix":null,"issues":[{"severity":"warning","code":"corrupt_suffix","message":"broken \"suffix\"","stream":"index","visibility_impact":"none","offset":7,"extent_id":null,"record_type":"Index","batch_id":"9007199254740992","repair_available":true,"repairable":true,"suggested_command":"coffer rebuild-index source"}],"repair_available":true,"index_check":"completed","index_check_reason":null,"result":{"live_documents":3,"live_chunks":5,"tombstones":2}}"#,
         ),
     ] {
         assert_eq!(value.value, parse(expected).unwrap());
@@ -118,7 +121,7 @@ fn diagnostic_and_export_field_tables_match_independent_legacy_oracles() {
         payload_len: 3,
         build_mode: "full_visible_snapshot".into(),
     };
-    let expected = parse(r#"{"status":"persistent_checkpoint","offset":7,"checkpoint_generation":2,"covered_critical_end_offset":7,"covered_last_batch_id":3,"covered_last_commit_sequence_no":9007199254740992,"coverage_hash":4294967295,"collection_count":1,"live_document_count":3,"live_chunk_count":5,"live_embedding_count":5,"text_segment_count":2,"vector_segment_count":1,"index_record_count":3,"index_extent_count":4,"payload_len":3,"total_size_bytes":302,"build_mode":"full_visible_snapshot"}"#).unwrap();
+    let expected = parse(r#"{"status":"persistent_checkpoint","offset":7,"checkpoint_generation":2,"covered_critical_end_offset":7,"covered_last_batch_id":3,"covered_last_commit_sequence_no":"9007199254740992","coverage_hash":4294967295,"collection_count":1,"live_document_count":3,"live_chunk_count":5,"live_embedding_count":5,"text_segment_count":2,"vector_segment_count":1,"index_record_count":3,"index_extent_count":4,"payload_len":3,"total_size_bytes":302,"build_mode":"full_visible_snapshot"}"#).unwrap();
     assert_eq!(suffix.to_json(), expected);
     report.index_suffix = Some(suffix);
     let old = retained_output_in(context.clone(), |b| report.build_json(b)).unwrap();

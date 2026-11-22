@@ -900,3 +900,97 @@ fn invalid_context_body_never_enters_an_exception_context_slot() {
         },
     );
 }
+
+#[test]
+fn maintenance_receipts_preserve_native_integer_width_and_nulls() {
+    Python::initialize();
+    Python::attach(|py| {
+        let op = Operation::standalone();
+        let lease = op.error(Error::new(ErrorCode::IoError, "test")).unwrap();
+        let mut receipt = maintenance::Receipt::Rebuild(
+            cofferdb::RebuildIndexSummary {
+                schema_version: "0.1".into(),
+                collection: None,
+                rebuild_scope: "full_visible_snapshot".into(),
+                index_suffix_status: "persistent_checkpoint".into(),
+                rebuild_needed: false,
+                last_index_commit_id: Some(u64::MAX),
+                index_record_count: 1,
+                index_extent_count: 1,
+                text_segment_count: 1,
+                vector_segment_count: 0,
+                duration_ms: u128::MAX,
+            },
+            lease,
+        );
+        let result = receipt.dictionary(py, std::process::id()).unwrap();
+        let dict = result.bind(py).cast::<PyDict>().unwrap();
+        assert!(dict.get_item("collection").unwrap().unwrap().is_none());
+        assert_eq!(
+            dict.get_item("duration_ms")
+                .unwrap()
+                .unwrap()
+                .extract::<u128>()
+                .unwrap(),
+            u128::MAX
+        );
+        assert_eq!(
+            dict.get_item("last_index_commit_id")
+                .unwrap()
+                .unwrap()
+                .extract::<u64>()
+                .unwrap(),
+            u64::MAX
+        );
+    });
+}
+
+#[test]
+fn snapshot_receipt_allocation_failure_preserves_file_and_handle() {
+    isolated(
+        "api::tests::snapshot_receipt_allocation_failure_preserves_file_and_handle",
+        || {
+            Python::initialize();
+            Python::attach(|py| {
+                errors::register(&PyModule::new(py, "snapshot_types").unwrap()).unwrap();
+                let (path, owner) = database("snapshot-allocation");
+                let target = path.with_extension("snapshot");
+                let target_arg = output::string(py, target.to_str().unwrap()).unwrap();
+                let db = Database {
+                    owner: Arc::clone(&owner),
+                };
+                // The normal report allocates the returned SHA-256 as a 64-character
+                // ASCII string. Select its actual size in this interpreter.
+                let size = output::string(py, &"a".repeat(64))
+                    .unwrap()
+                    .call_method0("__sizeof__")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap();
+                let (result, hits) = allocation_fault(py, size, || db.snapshot(py, &target_arg));
+                assert_eq!(hits, 1);
+                let error = result
+                    .expect("host allocation failure cannot panic")
+                    .unwrap_err();
+                assert!(error.is_instance_of::<PyMemoryError>(py));
+                let outcome = error.value(py).getattr("snapshot_outcome").unwrap();
+                assert_eq!(
+                    outcome
+                        .get_item("effect")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "snapshot_published"
+                );
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    std::fs::read(&target).unwrap()
+                );
+                assert!(owner.enter(false).is_ok());
+                db.close(py).unwrap();
+                std::fs::remove_file(target).unwrap();
+                std::fs::remove_file(path).unwrap();
+            });
+        },
+    );
+}

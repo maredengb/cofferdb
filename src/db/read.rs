@@ -8,15 +8,23 @@ use crate::model::{CollectionStats, DatabaseStats};
 use crate::storage::PayloadReader;
 use crate::Result;
 
+// Catalog entries can own a value or reference its on-disk payload. Read through the
+// reference when present and charge bytes_read only for that storage-backed path.
 pub(super) fn read_visible_chunk_text(
     reader: &mut PayloadReader,
     visible: &VisibleChunk<'_>,
     context: &JsonOperationContext,
     bytes_read: &mut u64,
 ) -> Result<crate::json::ReservedString> {
+    // A replayed chunk may retain only its location and summary. The presence of
+    // the locator decides where to obtain its text, even if the in-memory string
+    // is empty.
     let Some(record_ref) = visible.record_ref else {
         return crate::json::ReservedString::copy(&visible.chunk.text, context);
     };
+    // Account for the length of the stored payload before attempting the read.
+    // This counter describes the records requested, so it can already include a
+    // record whose decoding returns an error.
     *bytes_read = bytes_read.saturating_add(record_ref.payload.len);
     reader.read_chunk_text_in(record_ref, context)
 }
@@ -27,6 +35,9 @@ pub(super) fn read_visible_embedding_vector(
     context: &JsonOperationContext,
     bytes_read: &mut u64,
 ) -> Result<crate::json::ReservedVec<f32>> {
+    // Without a locator the catalog owns every component. Reserve space for the
+    // whole vector before copying, so callers can keep the returned values after
+    // this catalog borrow ends.
     let Some(record_ref) = visible.record_ref else {
         let mut vector = crate::json::ReservedVec::with_capacity(
             visible.embedding.vector.len(),
@@ -38,10 +49,16 @@ pub(super) fn read_visible_embedding_vector(
         }
         return Ok(vector);
     };
+    // Use the length of the encoded embedding payload. The decoded f32 slice can
+    // occupy a different number of bytes and would count only the vector portion
+    // of the record.
     *bytes_read = bytes_read.saturating_add(record_ref.payload.len);
     reader.read_embedding_vector_in(record_ref, context)
 }
 
+// Choose the lookup namespace at the call site. The same string may be one row's
+// internal ID and another row's external ID, and falling back from a failed lookup
+// could return the wrong record.
 pub(crate) enum RecordKey<'a> {
     Id(&'a str),
     ExternalId(&'a str),
@@ -52,9 +69,16 @@ impl Database {
         &self,
         context: &JsonOperationContext,
     ) -> Result<(JsonValue, JsonReservation)> {
+        // Build each attempted result under its own reservation. If a budget
+        // failure causes optional caches to be reclaimed and construction to be
+        // retried, the abandoned attempt releases its intermediate JSON
+        // allocations.
         self.lock()?.read_reclaiming(|inner| {
             let mut work = context.reservation();
             let builder = JsonBuilder::budgeted(&mut work, JsonInputKind::StoredJson);
+            // The JSON builder needs an exact element count up front. Count and
+            // consume live collections under the same guard so a drop or create
+            // cannot change the iterator between those operations.
             let count = inner.catalog.live_collections().count();
             let mut collections = inner.catalog.live_collections();
             let values = builder.array((0..count).map(|_| {
@@ -64,10 +88,15 @@ impl Database {
                     .build_json(&builder)
             }))?;
             let result = builder.object([("collections", values)])?;
+            // Return the reservation beside the JSON tree. Its strings and arrays
+            // remain charged while the caller converts or returns the result.
             Ok((result, work))
         })
     }
 
+    // Build the requested statistics and their JSON under one connection guard. A
+    // retry after reclaiming optional caches redoes the entire projection against
+    // the guarded catalog, including the optional index information.
     pub(crate) fn stats_json(
         &self,
         collection: Option<&str>,
@@ -76,6 +105,9 @@ impl Database {
     ) -> Result<(JsonValue, JsonReservation)> {
         self.lock()?.read_reclaiming(|inner| {
             let mut work = context.reservation();
+            // A collection name narrows the base statistics to that visible
+            // collection. The optional index report below still describes the
+            // connection's checkpoint, which covers the database as a whole.
             let mut result = match collection {
                 Some(name) => {
                     let id = &inner.catalog.collection_by_name(name)?.collection_id;
@@ -88,6 +120,9 @@ impl Database {
                     .database_stats()?
                     .build_json(&JsonBuilder::budgeted(&mut work, JsonInputKind::StoredJson))?,
             };
+            // Reuse the output reservation for the nested index report. The caller
+            // can retain the base object and the added subtree with one lease,
+            // even though the two sets of statistics were built separately.
             if include_index {
                 let builder = JsonBuilder::budgeted(&mut work, JsonInputKind::StoredJson);
                 builder.insert_if_absent(result.as_object_mut().unwrap(), "index_stats", || {
@@ -98,6 +133,9 @@ impl Database {
         })
     }
 
+    // Resolve both key forms within the collection and retain the guard through
+    // child materialization. The returned document, child count and any child
+    // records must describe the same committed view.
     pub(crate) fn document_json_in_collection(
         &self,
         collection_id: &str,
@@ -112,19 +150,32 @@ impl Database {
                 inner.catalog.document_by_external_id(collection_id, id)?
             }
         };
+        // The document projection already owns JSON allocations. Extend that same
+        // reservation while assembling the outer response so an early error
+        // releases both the document and any children copied so far.
         let (document_json, mut work) = document.to_json_in(context)?;
         let (chunks_count, chunks) = if include_chunks {
+            // Use the catalog's ordered visible child summaries for membership.
+            // Their catalog payloads may omit bytes kept in the primary record, so
+            // use the internal chunk ID to materialize each complete response row.
             let summaries = inner.catalog.chunks_for_document_in(
                 collection_id,
                 &document.document_id,
                 context,
             )?;
             let chunks_count = summaries.len();
+            // The child count is known before reading any payloads. Admit the
+            // final array in advance to avoid decoding a prefix of the children
+            // only to fail when growing the array.
             let mut chunks = Vec::new();
             work.reserve_vec(&mut chunks, chunks_count, JsonInputKind::StoredJson)?;
             for summary in summaries.iter() {
                 let (chunk, mut chunk_work) =
                     inner.materialize_chunk_in(&summary.chunk_id, context)?;
+                // Converting a materialized chunk can transfer owned strings and
+                // JSON into its output object. Merge that charge before the
+                // temporary chunk reservation goes out of scope. The accumulated
+                // array keeps every earlier value alive.
                 let value = chunk.into_json_retained(&mut chunk_work)?;
                 work.merge(chunk_work.into_json());
                 chunks.push(value);
@@ -132,6 +183,9 @@ impl Database {
             (chunks_count, Some(JsonValue::Array(chunks)))
         } else {
             (
+                // A count-only request can use catalog membership directly. It
+                // avoids loading chunk text or metadata and can succeed even when
+                // materializing the full child list would exceed output credit.
                 inner
                     .catalog
                     .chunk_count_for_document(collection_id, &document.document_id)?,
@@ -145,6 +199,9 @@ impl Database {
             ("external_id", builder.string(&document.external_id)?),
             ("chunks_count", JsonValue::Number(chunks_count as f64)),
         ])?;
+        // An explicitly requested empty child list is an empty array. Omitting the
+        // key means the caller did not request child details. Both cases report
+        // their visible count in the outer object.
         if let Some(chunks) = chunks {
             builder.insert_if_absent(result.as_object_mut().unwrap(), "chunks", || Ok(chunks))?;
         }
@@ -157,21 +214,43 @@ impl Database {
         key: RecordKey<'_>,
         context: &JsonOperationContext,
     ) -> Result<(JsonValue, JsonReservation)> {
+        // Keep one reader guard through identity resolution and payload retrieval.
+        // A collection drop or replacement on the same connection cannot change
+        // which locator is usable while the result is being assembled.
         let inner = self.lock()?;
+        // The caller selects the ID namespace explicitly. An external key can have
+        // the same spelling as an internal ID, and resolving it in the wrong
+        // namespace would return a different chunk.
         let summary = match key {
             RecordKey::Id(id) => inner.catalog.chunk_by_id(collection_id, id)?,
             RecordKey::ExternalId(id) => inner.catalog.chunk_by_external_id(collection_id, id)?,
         };
+        // The catalog row identifies the live chunk but can contain only its
+        // retained summary. Materialize the stored payload under the same file
+        // view before rendering text or metadata.
         let (payload, mut work) = inner.materialize_chunk_in(&summary.chunk_id, context)?;
         let chunk = payload;
+        // Resolve the owning document using the selected collection and the
+        // materialized chunk's document ID. The nested document and chunk in the
+        // response must describe the same visible relationship.
         let document = inner
             .catalog
             .document_by_id_ref(collection_id, &chunk.document_id)?;
         let (document_json, document_work) = document.to_json_in(context)?;
         work.merge(document_work);
+        // Capture embedding presence before moving the chunk into JSON. This flag
+        // reports the current catalog link held by the materialized row and does
+        // not require reading a vector payload.
         let embedding_present = chunk.embedding_id.is_some();
         let chunk_json = chunk.into_json_retained(&mut work)?;
+        // Both nested values now own their JSON strings and arrays. Keep their
+        // merged JSON reservation for the envelope below and release the native
+        // workspace that was not transferred to it.
         let mut work = work.into_json();
+        // Project the nested payloads and the repeated top-level keys from the
+        // same values. In the read DTO, external_id names the document and
+        // chunk_external_id names the chunk. Consumers can group returned chunks
+        // by document using the former.
         let builder = JsonBuilder::budgeted(&mut work, JsonInputKind::StoredJson);
         let result = builder.object([
             ("chunk", chunk_json),
@@ -191,6 +270,10 @@ impl Database {
 
 impl Inner {
     pub(super) fn database_stats(&self) -> Result<DatabaseStats> {
+        // The file size covers the current storage file, while object counts come
+        // from the visible catalog and checkpoint status comes from the
+        // connection. Reporting these together helps distinguish live data from
+        // on-disk history.
         let index = self.index_stats();
         let mut stats = self.catalog.stats(
             self.storage.file_size()?,
@@ -198,6 +281,9 @@ impl Inner {
             self.active_cache_budget_mb(),
             &index,
         );
+        // Expose the effective connection value here. A report should describe the
+        // profile and overrides chosen at open time rather than advertising any
+        // automatic maintenance based on file contents.
         stats.background_compaction_enabled = self.config.background_compaction;
         Ok(stats)
     }
@@ -207,24 +293,39 @@ impl Inner {
         collection_id: &str,
         context: &JsonOperationContext,
     ) -> Result<(CollectionStats, WorkspaceReservation)> {
+        // Allocate through the caller's context because the returned statistics
+        // own a copy of the collection name. The count inputs themselves do not
+        // require reading every vector payload.
         let mut work = context.workspace_reservation();
         let index = self.index_stats();
+        // Count embeddings from the live catalog. An unavailable or corrupt
+        // checkpoint does not remove embeddings from primary data, so the count
+        // can be positive even while the index needs rebuilding.
         let vector_count = self
             .catalog
             .live_embeddings()
             .filter(|embedding| embedding.collection_id == collection_id)
             .count();
+        // Suppress text terms when the persisted coverage is unusable. There is no
+        // full text walk in this reporting path to replace the stored summary.
         let text_terms = if index.rebuild_needed {
             0
         } else {
             self.text_stats()
                 .map_or(0, |stats| stats.term_count_in_collection(collection_id))
         };
+        // The catalog calculates counts for the requested collection and verifies
+        // its identity. Neither an empty text summary nor a zero vector count
+        // makes a missing collection a successful lookup.
         let mut stats = self.catalog.collection_stats(
             collection_id,
             self.config.resource_profile,
             text_terms,
             vector_count,
+            // Only the retained name survives this lookup as a new string.
+            // Transfer its allocation to the caller's reservation so the output
+            // representation can continue to account for it after the guard is
+            // gone.
             |name| {
                 let (name, name_work) =
                     crate::json::ReservedString::copy(name, context)?.into_parts();
@@ -232,10 +333,16 @@ impl Inner {
                 Ok(name)
             },
         )?;
+        // The text segment indicator is derived from checkpoint status. The byte
+        // size comes from the whole active suffix, so it can be the same across
+        // several collection reports.
         stats.text_index_segments = usize::from(!index.rebuild_needed);
         stats.index_size_bytes = index.index_size_bytes;
         stats.cache_budget_mb = self.active_cache_budget_mb();
         stats.background_compaction_enabled = self.config.background_compaction;
+        // The estimate adds a fraction of the database-wide checkpoint size to
+        // this collection's estimated dead bytes. Summing the estimate across
+        // collections would count the checkpoint allowance multiple times.
         stats.pending_compaction_bytes = stats.dead_bytes_estimate + index.index_size_bytes / 10;
         Ok((stats, work))
     }

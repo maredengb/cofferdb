@@ -36,9 +36,7 @@ fi
 git config --global --add safe.directory /src
 driver=/src/tools/ci/release_wheel.py
 if [[ "$phase" == accept ]]; then
-    fixture=()
-    if [[ "$machine" == aarch64 ]]; then fixture=(--fixture /fixture); fi
-    exec "${pythons[0]}" -I -B "$driver" accept /work "${arguments[@]}" --repo /src --built /build-input "${fixture[@]}"
+    exec "${pythons[0]}" -I -B "$driver" accept /work "${arguments[@]}" --repo /src --built /build-input --fixture /fixture
 fi
 [[ "$phase" == build ]]
 verify_download() {
@@ -77,11 +75,11 @@ verify_download "$maturin_url" "$wheel" "$maturin_sha"
 command -v cc ld readelf auditwheel > /dev/null
 "${pythons[0]}" -I -B "$driver" build /work "${arguments[@]}" --repo /src --maturin /work/tools/bin/maturin --build-only
 
-# Only the manifest, environment and three actual wheels enter the installation container.
+# Transfer the comparison executable separately so normal installed-wheel tests run without it on PATH.
 mkdir -p transfer/built
-cp build-environment.json build-tools.json transfer/
+cp build-environment.json build-tools.json comparison-coffer transfer/
 cp built/build-manifest.json transfer/built/
 for abi in "${abis[@]}"; do
     mkdir "transfer/built/$abi"
-    cp "built/$abi/cofferdb-0.1.5-$abi-$abi-manylinux_2_28_$machine.whl" "transfer/built/$abi/"
+    cp "built/$abi/cofferdb-0.2.0-$abi-$abi-manylinux_2_28_$machine.whl" "transfer/built/$abi/"
 done

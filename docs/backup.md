@@ -1,15 +1,12 @@
 # Backup, export and data handling
 
-Keep original inputs and independent backups when using this
-pre-release. Storage integrity, application relevance and backup completeness are
+Keep original inputs and independent backups when using database maintenance tools. Storage integrity, application relevance and backup completeness are
 different checks. `check` is read-only and is not a repair command or an evaluation
 of whether the stored text answers a user's question.
 
 ## Creating and restoring a snapshot
 
-CofferDB will continue to provide a supported way to create a self-contained
-snapshot and restore its committed data from that file alone in a compatible
-environment. In 0.1.3, close any open writer and choose a new output path.
+A snapshot contains the database bytes for one committed view. A compatible reader can open the copy directly. Choose a new output path. The [Python writer](python.md) can create a snapshot between batches. Close the writer first when using the separate CLI.
 `coffer snapshot` holds the source writer lock while it copies the database.
 
 With the CLI installed and the `notes` collection from the README quickstart:
@@ -28,6 +25,30 @@ for writing. The snapshot contains the committed records, collection settings
 and vectors, along with any persisted index checkpoint. It can also contain old
 records and sensitive text. For your own restore test, compare known records,
 vectors and representative queries with the source.
+
+## Maintenance on a local filesystem
+
+Use `--json` for scripts. A completed check writes its report to stdout,
+including any findings. An operation error writes a structured error to stderr.
+Exit 4 means the writer lock could not be obtained. Only one writer, including
+a maintenance writer, may open the same physical file across processes.
+
+| Command | Files and concurrency | Recovery |
+| --- | --- | --- |
+| `check DB` | Opens the source read-only. The check can run beside an idle current-version writer. A full scan delays changes to the same file. Older writers must close first. | Retry `check_view_unavailable` after the write completes. Inspect the report for skipped index checks and reasons. |
+| `repair DB --truncate-tail` | Requires exclusive write access. Rechecks the current commit boundary before truncation. Preserve an original copy if needed. | If the boundary is ambiguous, preserve the file. After a truncation error reopen and check the last commit and size. |
+| `rebuild-index DB` | Rewrites derived data after the committed records. Read the reported scope for collection requests. | Reopen and check the checkpoint after interruption. Repeat the rebuild if necessary. |
+| `compact DB` | Writes and validates a temporary database in the same directory, then atomically replaces the main file. Allow space for both files. Old readers may delay reclamation. | Take a snapshot first if you want the previous generation. After replacement, inspect the current path. If only index reconstruction failed, rebuild the index. |
+| `snapshot DB OUT` | Takes writer admission on the source and creates a validated copy in the output directory. Publication requires an unused name and hard-link support. | If already published, verify the reported commit, size and SHA-256 at that path. Choose a fresh name for another copy. |
+
+Compact accounts for the old generation that a reader may keep open as well as the replacement. Its default temporary-disk budget is 4 GiB. For a larger file on a volume with sufficient free space, supply an explicit ceiling in bytes, for example `coffer compact notes.coffer --temporary-disk-bytes 25769803776` for 24 GiB.
+
+Save the snapshot's `result.package` together with the copy. It records the
+required features, collections, tokenizers, effective vector models and index
+state. Verify the byte count and SHA-256 before opening the copy read-only.
+A missing index may require a transient index within the reader's budget.
+The file may contain paths and deleted history. The digest checks integrity
+and requires separate trusted provenance for publisher authentication.
 
 ## Copying a database file
 

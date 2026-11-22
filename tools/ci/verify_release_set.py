@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import zipfile
 
-from release_wheel import EXPECTED, VERSION, actions_identity, fixture_oracle, require, sha, source_identity
+from release_wheel import MAINTENANCE_TESTS, EXPECTED, EXPECTED_RECOVERY, VERSION, actions_identity, fixture_oracle, require, sha, source_identity
 
 
 def read(path):
@@ -30,10 +30,10 @@ def verify_environment(host, group, machine, run):
 
 def verify(directory, source_sha, tree):
     platforms = {
-        "linux-aarch64": ("manylinux_2_28_aarch64", "aarch64", True),
-        "linux-x86_64": ("manylinux_2_28_x86_64", "x86_64", False),
-        "macos-arm64": ("macosx_15_0_arm64", "arm64", False),
-        "macos-x86_64": ("macosx_15_0_x86_64", "x86_64", True),
+        "linux-aarch64": ("manylinux_2_28_aarch64", "aarch64"),
+        "linux-x86_64": ("manylinux_2_28_x86_64", "x86_64"),
+        "macos-arm64": ("macosx_15_0_arm64", "arm64"),
+        "macos-x86_64": ("macosx_15_0_x86_64", "x86_64"),
     }
     prefix = "cofferdb-" + VERSION.replace(".", "") + "-"
     reports = {}
@@ -48,8 +48,9 @@ def verify(directory, source_sha, tree):
         oracle = fixture_oracle(directory / name, kind)
         require(oracle["commit"] == source_sha and oracle["tree"] == tree and oracle["job"] == "fixtures"
                 and oracle["machine"] == "x86_64" and oracle["runner_image"], "compatibility sample source differs")
-        oracles[kind] = {field: oracle[field] for field in ("sha256", "stats", "chunk")}
-    for group, (tag, machine, needs_fixture) in platforms.items():
+        oracles[kind] = {field: oracle[field] for field in ("sha256", "stats", "chunk", "cli_check")}
+        oracles[kind]["recovered_contents"] = EXPECTED_RECOVERY
+    for group, (tag, machine) in platforms.items():
         root = directory / (prefix + group)
         report = read(root / "result.json")
         require(report["commit"] == source_sha and report["tree"] == tree and report["actions"] == run,
@@ -79,9 +80,16 @@ def verify(directory, source_sha, tree):
             name = f"cofferdb-{VERSION}-{abi}-{abi}-{tag}.whl"
             require(row["wheel"] == name and sha(root / name) == row["sha256"], "wheel bytes differ")
             require(row["installed_native_verified"] and row["versions"] == [VERSION] * 3 and
-                    row["installed_suite_exit_code"] == 0 and row["installed_tests"] > 0
-                    and row["old_database"] == (oracles["old_database"] if needs_fixture else None)
+                    row["installed_suite_exit_code"] == 0 and row["installed_tests"] >= row["check_tests"] > 0
+                    and row["old_database"] == oracles["old_database"]
                     and row["python"] == host["python"][minor - 12]["version"], "installed evidence incomplete")
+            require(set(row["maintenance"]) >= MAINTENANCE_TESTS, "missing per-wheel maintenance results")
+            commands = ["check", "compact", "rebuild-index", "repair", "snapshot"]
+            require(row["cli_comparison"] == {"human_commands": commands, "json_commands": commands,
+                    "restored": ["python", "cli"], "missing_collection": "collection_not_found"}
+                    and len(row["comparison_cli_sha256"]) == 64
+                    and row["comparison_cli_sha256"] == tools["comparison_cli_sha256"],
+                    "installed wheel CLI comparison or snapshot recovery differs")
             with zipfile.ZipFile(root / name) as archive:
                 source = json.loads(archive.read("cofferdb/_source.json"))
                 require(source["source"]["commit"] == source_sha and source["source"]["tree"] == tree
@@ -114,6 +122,10 @@ def verify(directory, source_sha, tree):
     require(evidence["actions"] == run and evidence["commit"] == source_sha and evidence["tree"] == tree
             and evidence["job"] == "arm-crate" and evidence["runner_image"]
             and evidence["host"] == "aarch64-unknown-linux-gnu" and evidence["stats"] == EXPECTED
+            and evidence["fixture_sha256"] == oracles["old_database"]["sha256"]
+            and evidence["cli_check"] == oracles["old_database"]["cli_check"]
+            and evidence["recovered_contents"] == EXPECTED_RECOVERY
+            and evidence["maintenance_suites"] == ["maintenance_files", "maintenance_process"]
             and evidence["chunk"] == "wal#commit" and evidence["crate"] == crate.name
             and evidence["sha256"] == sha(crate), "crate verification receipt differs")
     return {name: digest for group in reports.values() for name, digest in group.items()}

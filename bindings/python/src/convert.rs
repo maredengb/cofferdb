@@ -6,11 +6,22 @@ use pyo3::exceptions::PyOverflowError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyStringData, PyTuple};
 
+// Keep core budget or schema errors separate from an existing Python exception and
+// from newly diagnosed host type/value errors. The API wrapper translates each
+// through a different exception path.
 #[derive(Debug)]
 pub(crate) enum Failure {
+    // Preserve the core error, including its structured details, for native
+    // error-envelope projection.
     Engine(cofferdb::Error),
+    // Keep the original Python exception object so failures such as a Python
+    // allocation error retain their identity.
     Python(PyErr),
+    // The argument has the wrong built-in type. The binding will expose this as a
+    // Python type error.
     Type(&'static str),
+    // The host type was accepted but its contents cannot represent the requested
+    // native value.
     Value(&'static str),
 }
 
@@ -28,6 +39,9 @@ impl From<PyErr> for Failure {
 
 pub(crate) type Result<T> = std::result::Result<T, Failure>;
 
+// Traverse exact list and tuple objects through their native accessors. No
+// iterator supplied by the application is needed, and the references stay attached
+// to Python during conversion.
 pub(crate) enum Sequence<'py> {
     List(Bound<'py, PyList>),
     Tuple(Bound<'py, PyTuple>),
@@ -35,6 +49,9 @@ pub(crate) enum Sequence<'py> {
 
 impl<'py> Sequence<'py> {
     pub(crate) fn new(value: &Bound<'py, PyAny>) -> Result<Self> {
+        // Test the exact runtime type before casting: a Python subclass would pass
+        // a normal downcast but could expose user-defined behavior the binding
+        // does not accept.
         if value.is_exact_instance_of::<PyList>() {
             Ok(Self::List(
                 value.cast::<PyList>().map_err(PyErr::from)?.clone(),
@@ -55,6 +72,9 @@ impl<'py> Sequence<'py> {
         }
     }
 
+    // Return an owned Python reference to the element at the requested position
+    // without copying its contents. A failing indexed read remains a Python
+    // exception.
     pub(crate) fn item(&self, index: usize) -> Result<Bound<'py, PyAny>> {
         match self {
             Self::List(value) => value.get_item(index).map_err(Failure::from),
@@ -64,6 +84,9 @@ impl<'py> Sequence<'py> {
 }
 
 pub(crate) fn dict<'a, 'py>(value: &'a Bound<'py, PyAny>) -> Result<&'a Bound<'py, PyDict>> {
+    // Require a built-in dict just as sequences require concrete built-in
+    // containers. This prevents configuration and JSON conversion from invoking
+    // arbitrary mapping methods.
     if !value.is_exact_instance_of::<PyDict>() {
         return Err(Failure::Type("expected a built-in dict"));
     }
@@ -73,6 +96,8 @@ pub(crate) fn dict<'a, 'py>(value: &'a Bound<'py, PyAny>) -> Result<&'a Bound<'p
 }
 
 pub(crate) fn boolean(value: &Bound<'_, PyAny>) -> Result<bool> {
+    // Reject truthiness coercion. Flags require a Python bool; values such as 0, 1
+    // and objects defining a truth test are not equivalent inputs here.
     if !value.is_exact_instance_of::<PyBool>() {
         return Err(Failure::Type("expected a built-in bool"));
     }
@@ -80,11 +105,16 @@ pub(crate) fn boolean(value: &Bound<'_, PyAny>) -> Result<bool> {
 }
 
 pub(crate) fn unsigned(value: &Bound<'_, PyAny>) -> Result<u64> {
+    // Python bool is an int subclass. Exact type matching excludes it and also
+    // keeps a float containing a whole number from being accepted as a count.
     if !value.is_exact_instance_of::<PyInt>() {
         return Err(Failure::Type(
             "expected a built-in int; bool and float are not accepted",
         ));
     }
+    // Let the Python integer extractor check both sign and u64 range. Translate
+    // only overflow to this value-range diagnosis; other Python failures keep
+    // their original exception.
     value.extract().map_err(|error| {
         numeric_error(
             value.py(),
@@ -95,11 +125,16 @@ pub(crate) fn unsigned(value: &Bound<'_, PyAny>) -> Result<u64> {
 }
 
 pub(crate) fn number(value: &Bound<'_, PyAny>) -> Result<f64> {
+    // Allow native integer and float values for real-valued input. The exact-type
+    // gate rejects bool and custom numeric conversion methods before extraction.
     if !(value.is_exact_instance_of::<PyInt>() || value.is_exact_instance_of::<PyFloat>()) {
         return Err(Failure::Type(
             "expected a built-in int or float; bool is not accepted",
         ));
     }
+    // Conversion to binary64 can lose precision for a large integer that still
+    // fits its range. This helper converts the type; callers with stricter
+    // finiteness or representation constraints apply them separately.
     value.extract().map_err(|error| {
         numeric_error(
             value.py(),
@@ -110,6 +145,9 @@ pub(crate) fn number(value: &Bound<'_, PyAny>) -> Result<f64> {
 }
 
 fn numeric_error(py: Python<'_>, error: PyErr, message: &'static str) -> Failure {
+    // Translate a Python integer overflow into the argument converter's
+    // value-range failure. Keep unrelated Python exceptions intact so an
+    // allocation or interpreter error does not appear to be bad numeric input.
     if error.is_instance_of::<PyOverflowError>(py) {
         Failure::Value(message)
     } else {
@@ -122,12 +160,16 @@ fn unicode<'a, 'py>(value: &'a Bound<'py, PyAny>) -> Result<Codepoints<'a>> {
         return Err(Failure::Type("expected a built-in str"));
     }
     let string = value.cast::<PyString>().map_err(PyErr::from)?;
-    // SAFETY: the package accepts only regular-GIL CPython on little-endian
-    // arm64/x86_64, holds the GIL for this entire borrow, and never calls user
-    // protocols or detaches while iterating. The six ABI/platform targets must
-    // validate UCS1/UCS2/UCS4, surrogates and embedded NULs before delivery.
+    // SAFETY: the Bound borrow keeps this exact built-in string alive while
+    // its immutable code units are read with the GIL held. PyO3's data()
+    // relies on the target's CPython Unicode bitfield layout. Each supported
+    // little-endian ABI/platform must pass the conversion tests for UCS1,
+    // UCS2, UCS4, embedded NULs and surrogates before distribution.
     let data = unsafe { string.data()? };
     let points = Codepoints { data, position: 0 };
+    // Validate the immutable sequence before handing out a replayable cursor. A
+    // Python string may contain a lone surrogate, which has no Rust char or UTF-8
+    // encoding.
     if points.clone().any(|value| char::from_u32(value).is_none()) {
         return Err(Failure::Value("string is not valid UTF-8"));
     }
@@ -136,13 +178,20 @@ fn unicode<'a, 'py>(value: &'a Bound<'py, PyAny>) -> Result<Codepoints<'a>> {
 
 #[derive(Clone)]
 struct Codepoints<'a> {
+    // Borrowed immutable UCS1, UCS2 or UCS4 code units from the exact Python string
+    // for the attached conversion.
     data: PyStringData<'a>,
+    // Index of the next code unit, measured in the encoding's elements. Cloned
+    // cursors can preflight and replay the same string.
     position: usize,
 }
 
 impl Iterator for Codepoints<'_> {
     type Item = u32;
     fn next(&mut self) -> Option<u32> {
+        // CPython selects one code-unit width for the whole string. Widen UCS1 and
+        // UCS2 elements without interpreting them as UTF-8 bytes or combining
+        // adjacent units; the validated iteration yields one scalar at a time.
         let value = match self.data {
             PyStringData::Ucs1(value) => value.get(self.position).copied().map(u32::from),
             PyStringData::Ucs2(value) => value.get(self.position).copied().map(u32::from),
@@ -153,17 +202,25 @@ impl Iterator for Codepoints<'_> {
     }
 }
 
+// Only unicode()'s validated immutable sequence reaches this conversion. Both
+// sizing and encoding replay that sequence, so a surrogate cannot first appear on
+// the second pass.
 fn scalar(value: u32) -> char {
     char::from_u32(value).expect("validated Unicode scalar")
 }
 
 pub(crate) fn text(value: &Bound<'_, PyAny>, input: &mut Input) -> Result<String> {
+    // Names, paths and other ordinary text use the operation's workspace. Produce
+    // the admitted UTF-8 buffer directly from borrowed code points instead of
+    // allocating an intermediate Python encoding.
     input
         .text_from_chars(unicode(value)?.map(scalar))
         .map_err(Failure::from)
 }
 
 fn json_string(value: &Bound<'_, PyAny>, input: &mut Input, kind: ValueKind) -> Result<String> {
+    // JSON keys and string values use the same Unicode traversal but charge their
+    // retained bytes to the requested business-value kind.
     input
         .json_string_from_chars(unicode(value)?.map(scalar), kind)
         .map_err(Failure::from)
@@ -171,15 +228,31 @@ fn json_string(value: &Bound<'_, PyAny>, input: &mut Input, kind: ValueKind) -> 
 
 enum Frame<'py, I> {
     Array {
+        // Python identity of this active sequence, used to detect descent through a
+        // reference to an enclosing container.
         identity: usize,
+        // Exact list or tuple retained while its elements are traversed with the
+        // interpreter attached.
         source: Sequence<'py>,
+        // Index of the next source element to schedule. The last visited child
+        // still has to be attached to values.
         next: usize,
+        // In-order native elements already constructed for this array, backed by
+        // the operation's JSON reservation.
         values: Vec<JsonValue>,
     },
     Object {
+        // Python identity of this active dictionary, checked alongside active array
+        // frames for cycles.
         identity: usize,
+        // Iterator retaining the traversal position in the exact Python dictionary
+        // while nested children are converted.
         source: I,
+        // Owned key for the value currently being visited. Consumed when the
+        // completed child is inserted.
         key: Option<String>,
+        // Native object containing completed key/value pairs. It is exposed to its
+        // parent only after iteration finishes.
         values: JsonObject,
     },
 }
@@ -188,12 +261,18 @@ impl<'py, I> Frame<'py, I>
 where
     I: Iterator<Item = (Bound<'py, PyAny>, Bound<'py, PyAny>)>,
 {
+    // Array and object frames use one Python identity namespace. Cycle detection
+    // can therefore catch a list that returns to an enclosing dict as well as a
+    // direct self-reference.
     fn identity(&self) -> usize {
         match self {
             Self::Array { identity, .. } | Self::Object { identity, .. } => *identity,
         }
     }
 
+    // The caller supplies a completed native subtree. Array insertion uses the
+    // capacity admitted when the frame was opened; an object consumes the pending
+    // key associated with that particular child.
     fn accept(&mut self, value: JsonValue) {
         match self {
             Self::Array { values, .. } => values.push(value),
@@ -211,6 +290,9 @@ where
                 if *next == source.len() {
                     return Ok(None);
                 }
+                // Move the cursor past an element only after its retrieval
+                // succeeds. The caller finishes that child before asking the frame
+                // to schedule the following element.
                 let value = source.item(*next)?;
                 *next += 1;
                 Ok(Some(value))
@@ -219,12 +301,18 @@ where
                 let Some((name, value)) = source.next() else {
                     return Ok(None);
                 };
+                // Convert and charge the key before descending into its value. A
+                // nested container may keep this frame suspended, so retain the
+                // Rust key here until the child is ready to insert.
                 *key = Some(json_string(&name, input, kind)?);
                 Ok(Some(value))
             }
         }
     }
 
+    // Move the completed native container out after its source iterator is
+    // exhausted. The parent attaches one value regardless of whether the child was
+    // a scalar or another frame.
     fn finish(self) -> JsonValue {
         match self {
             Self::Array { values, .. } => JsonValue::Array(values),
@@ -234,21 +322,32 @@ where
 }
 
 /// Convert one free business value; fixed record wrappers use field-wise parsing.
+// Each frame owns an unfinished Rust container and remembers where to attach
+// its next child. Finish the child before advancing the parent. Until the
+// root is complete the whole tree belongs to conversion: an error drops it
+// without exposing a partially converted input to the engine.
 pub(crate) fn json(
     value: &Bound<'_, PyAny>,
     input: &mut Input,
     kind: ValueKind,
 ) -> Result<JsonValue> {
+    // Use an admitted stack for live ancestors. Pending owns an attached Python
+    // reference to the next object, while ready owns its converted Rust value.
     let mut stack: Stack<Frame<'_, _>> = input.stack()?;
     let mut pending = Some(value.clone());
     let mut ready = None;
     loop {
         if let Some(value) = pending.take() {
+            // Map exact built-in scalar types directly. Check bool separately from
+            // int so a Boolean cannot enter the JSON number path.
             if value.is_none() {
                 ready = Some(JsonValue::Null);
             } else if value.is_exact_instance_of::<PyBool>() {
                 ready = Some(JsonValue::Bool(boolean(&value)?));
             } else if value.is_exact_instance_of::<PyInt>() {
+                // JSON stores numbers as binary64. Compare the converted value with
+                // the original Python integer: a large power of two can round-trip
+                // exactly even when its immediate neighbors cannot.
                 let converted = number(&value)?;
                 if !converted.is_finite()
                     || !value.eq(crate::output::float(value.py(), converted)?)?
@@ -258,15 +357,29 @@ pub(crate) fn json(
                     ));
                 }
                 ready = Some(JsonValue::Number(converted));
+            // Copy the exact Python float as a JSON number. Validation of the
+            // completed business value still checks its numeric and size
+            // invariants.
             } else if value.is_exact_instance_of::<PyFloat>() {
                 ready = Some(JsonValue::Number(number(&value)?));
             } else if value.is_exact_instance_of::<PyString>() {
+                // Encode a Python string into a native buffer charged under the
+                // current value kind. Keys use the same accounting when an object
+                // frame asks for a member.
                 ready = Some(JsonValue::String(json_string(&value, input, kind)?));
+            // Only exact dict, list and tuple instances enter the container path.
+            // Other mappings and iterables must first be converted by the caller
+            // to a supported built-in type.
             } else if value.is_exact_instance_of::<PyDict>()
                 || value.is_exact_instance_of::<PyList>()
                 || value.is_exact_instance_of::<PyTuple>()
             {
+                // Use the live Python object's identity to detect cycles on the
+                // current path. The frame keeps the source alive while that
+                // identity is in the ancestor stack.
                 let identity = value.as_ptr() as usize;
+                // Only ancestors are active. A shared child in separate branches
+                // is valid and is converted independently at each occurrence.
                 if stack
                     .as_slice()
                     .iter()
@@ -274,7 +387,13 @@ pub(crate) fn json(
                 {
                     return Err(Failure::Value("cyclic containers are not supported"));
                 }
+                // Test one more container level before reserving its native node
+                // or element slots. Scalar children do not consume another depth
+                // level.
                 input.check_container_depth(stack.as_slice().len(), kind)?;
+                // Snapshot the expected dict size for admission, then fill it one
+                // member at a time. The frame retains the pending key until its
+                // value can be inserted.
                 let frame = if value.is_exact_instance_of::<PyDict>() {
                     let dict = dict(&value)?;
                     Frame::Object {
@@ -284,6 +403,9 @@ pub(crate) fn json(
                         values: input.object(dict.len(), kind)?,
                     }
                 } else {
+                    // Borrow the supported sequence and reserve its native slot
+                    // capacity before traversing elements. No temporary list of
+                    // Python values is needed for traversal.
                     let sequence = Sequence::new(&value)?;
                     let values = input.array(sequence.len(), kind)?;
                     Frame::Array {
@@ -293,21 +415,37 @@ pub(crate) fn json(
                         values,
                     }
                 };
+                // Push the opened frame only after its state and allocation have
+                // been prepared. The following iteration can obtain its first
+                // child or finalize it as empty.
                 stack.push(frame)?;
             } else {
+                // Reject unsupported objects before any generic Python protocol
+                // traversal. The converter has no path that coerces framework
+                // scalars or container subclasses.
                 return Err(Failure::Type(
                     "unsupported value; only built-in JSON types are accepted",
                 ));
             }
         }
+        // Validate the assembled root once its last frame is complete. Children can
+        // belong to a larger, independently limited input value; validating each one
+        // in isolation would miss the limit on the whole tree.
         if let Some(value) = ready.take() {
+            // The last frame is the only unfinished parent of this child. Deeper
+            // ancestors wait for that frame to become one complete native value.
             if let Some(parent) = stack.last_mut() {
                 parent.accept(value);
             } else {
+                // Apply business-value policy at the root after all children are
+                // integrated. The same operation still owns both decoded capacity
+                // and validation scratch.
                 input.validate_json(&value, kind)?;
                 return Ok(value);
             }
         }
+        // Ask the innermost frame to advance. Exhaustion pops one completed
+        // container and routes it through the same attachment step as a scalar.
         if let Some(frame) = stack.last_mut() {
             if let Some(value) = frame.next(input, kind)? {
                 pending = Some(value);
@@ -324,8 +462,13 @@ pub(crate) fn vector(
     input: &mut Input,
     kind: ValueKind,
 ) -> Result<Vec<f32>> {
+    // Determine the exact list or tuple length before admitting binary32 slots.
+    // The typed converter does not build an intermediate JSON number array.
     let sequence = Sequence::new(value)?;
     let mut vector = input.vector(sequence.len(), kind)?;
+    // Convert entries in source order and narrow immediately to the engine's
+    // coordinate type. The core still validates the resulting finite range and
+    // shape.
     for index in 0..sequence.len() {
         vector.push(number(&sequence.item(index)?)? as f32);
     }

@@ -1,6 +1,6 @@
 {
   "kind": "SOURCE_LICENSE_INVENTORY_NOT_BINARY_RELEASE_CLEARANCE",
-  "cargo_lock_sha256": "bccb0b044635a25178610bb565339ddb19fc292c4e0642a281dc6897e0e88b8c",
+  "cargo_lock_sha256": "41ea50d803ccbe47a2c741ee4671faad57da339bb43b44392e608d2f47214ef3",
   "dependencies": [
     {
       "name": "autocfg",
@@ -12,6 +12,32 @@
       "license_files": {
         "licenses/autocfg-1.5.1/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
         "licenses/autocfg-1.5.1/LICENSE-MIT": "27995d58ad5c1145c1a8cd86244ce844886958a35eb2b78c6b772748669999ac"
+      }
+    },
+    {
+      "name": "cfg-if",
+      "version": "1.0.5",
+      "declared_license": "MIT OR Apache-2.0",
+      "rust_version": "1.32",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/rust-lang/cfg-if",
+      "license_files": {
+        "licenses/cfg-if-1.0.5/LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+        "licenses/cfg-if-1.0.5/LICENSE-MIT": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+      }
+    },
+    {
+      "name": "encoding_rs",
+      "version": "0.8.35",
+      "declared_license": "(Apache-2.0 OR MIT) AND BSD-3-Clause",
+      "rust_version": "1.36",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/hsivonen/encoding_rs",
+      "license_files": {
+        "licenses/encoding_rs-0.8.35/COPYRIGHT": "11789f45bb180841cd362a5eee6789c68ddb573a11105e30768c308a6add0190",
+        "licenses/encoding_rs-0.8.35/LICENSE-APACHE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "licenses/encoding_rs-0.8.35/LICENSE-MIT": "3fa4ca83dcc9237839b1bdeb2e6d16bdfb5ec0c5ce42b24694d8bbf0dcbef72c",
+        "licenses/encoding_rs-0.8.35/LICENSE-WHATWG": "838118388fe5c2e7f1dbbaeed13e1c7f3ebf88be91319c7c1d77c18e987d1a50"
       }
     },
     {

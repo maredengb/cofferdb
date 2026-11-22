@@ -205,7 +205,7 @@ fn native_dto_conversion_failures_release_both_owned_query_results() {
             let (result, mut work) = db
                 .why_not_debug_with_metadata_boost_in(
                     "notes",
-                    &chunk_id,
+                    crate::db::DiagnosisTarget::Legacy(&chunk_id),
                     Some("stable".into()),
                     None,
                     filter,
@@ -215,6 +215,7 @@ fn native_dto_conversion_failures_release_both_owned_query_results() {
                     10,
                     None,
                     Some(context.clone()),
+                    |_| Ok(()),
                 )
                 .unwrap();
             work.merge(filter_work);
@@ -278,7 +279,7 @@ fn retained_filter_moves_into_diagnosis_without_recopying_or_refunding_live_data
     let (result, mut work) = db
         .why_not_debug_with_metadata_boost_in(
             "notes",
-            &chunk_id,
+            crate::db::DiagnosisTarget::Legacy(&chunk_id),
             Some("stable".into()),
             None,
             filter,
@@ -288,6 +289,7 @@ fn retained_filter_moves_into_diagnosis_without_recopying_or_refunding_live_data
             10,
             None,
             Some(context.clone()),
+            |_| Ok(()),
         )
         .unwrap();
     let expression = result

@@ -4,6 +4,9 @@ use super::*;
 use crate::json::JsonTextWriter;
 
 impl FilterExpr {
+    // The compiled tree drives evaluation, while the caller supplies the original
+    // JSON to show in the explanation. A shorthand equality expression, for
+    // example, should retain its original spelling in the returned value.
     pub(crate) fn evaluate_for_chunk_in(
         &self,
         catalog: &Catalog,
@@ -11,6 +14,9 @@ impl FilterExpr {
         expression: JsonValue,
         context: &JsonOperationContext,
     ) -> Result<(FilterExplain, JsonReservation)> {
+        // Resolve document and chunk fields with the same lookup used by the
+        // boolean eligibility check. This path additionally visits individual
+        // leaves to retain a reason for each condition.
         let (eval, work) =
             self.evaluate_lookup_in(&|field| resolve_field(catalog, chunk, field), context)?;
         Ok((
@@ -19,6 +25,9 @@ impl FilterExpr {
                 expression,
                 reasons: eval.reasons,
             },
+            // The returned reservation accompanies the newly allocated reason
+            // strings and their array. The expression moves in from the caller
+            // with its existing ownership and is never copied by this wrapper.
             work,
         ))
     }
@@ -28,6 +37,9 @@ impl FilterExpr {
         lookup: &impl Fn(&str) -> Option<&'a JsonValue>,
         context: &JsonOperationContext,
     ) -> Result<(Eval, JsonReservation)> {
+        // Keep the temporary traversal stack and the escaping explanation under
+        // separate reservations. The stack only owns child iterators and can
+        // release its allocation as soon as evaluation finishes.
         let kind = JsonInputKind::Filter;
         let mut scratch = context.reservation();
         let mut parents = Vec::<std::slice::Iter<'_, Self>>::new();
@@ -36,10 +48,18 @@ impl FilterExpr {
         let mut matched = true;
         let mut next = Some(self);
         while let Some(node) = next {
+            // Walk nested conjunctions with an explicit iterator stack. This keeps
+            // deep expression traversal from consuming the native call stack. An
+            // empty conjunction opens an empty iterator and leaves matched true if
+            // nothing else failed.
             if let Self::And(nodes) = node {
                 scratch.reserve_vec(&mut parents, 1, kind)?;
                 parents.push(nodes.iter());
             } else {
+                // Each leaf supplies a stable operator label and a borrowed
+                // expected value. Membership renders its list through a separate
+                // branch, so the common path carries no expected scalar for that
+                // variant.
                 let (field, op, expected) = match node {
                     Self::Eq(field, value) => (field, "==", Some(value)),
                     Self::Ne(field, value) => (field, "!=", Some(value)),
@@ -51,14 +71,29 @@ impl FilterExpr {
                     Self::In(field, _) => (field, "in", None),
                     Self::And(_) => unreachable!(),
                 };
+                // Use the same borrowed lookup and comparison helper as the
+                // boolean evaluator. Diagnostic formatting uses that already
+                // selected value, so an absent key remains distinct from a JSON
+                // null.
                 let actual = lookup(field);
                 let leaf_matched = node.matches_value(actual);
+                // Unlike boolean filtering, an explanation includes every leaf in
+                // expression order, even after the first failed conjunct.
                 matched &= leaf_matched;
+                // Reserve the new array slot before formatting the reason. If
+                // string construction fails, the unfinished reason stays in the
+                // writer and the caller receives the error without an incomplete
+                // result.
                 work.reserve_vec(&mut reasons, 1, kind)?;
                 let mut out = JsonTextWriter::new(context, kind);
                 let written = (|| {
                     write!(out, "{field} {op} ")?;
                     if let Self::In(_, values) = node {
+                        // A successful membership reason shows the expected
+                        // choices in their original order. A failed membership
+                        // reason uses a compact placeholder for the list and
+                        // proceeds to the same failed-condition suffix as other
+                        // leaves.
                         if leaf_matched {
                             out.write_char('[')?;
                             for (index, value) in values.iter().enumerate() {
@@ -73,6 +108,10 @@ impl FilterExpr {
                     } else {
                         write_label(&mut out, expected.unwrap())?;
                     }
+                    // Describe the actual slot on a failed comparison, including
+                    // the literal word missing for a lookup that yielded no value.
+                    // The inequality reason deliberately omits a separate
+                    // actual-value suffix.
                     if !leaf_matched {
                         out.write_str(" failed")?;
                         if !matches!(node, Self::Ne(_, _)) {
@@ -85,10 +124,16 @@ impl FilterExpr {
                     }
                     Ok(())
                 })();
+                // Finish the checked writer before inserting its string. The
+                // returned reservation covers that string and transfers into the
+                // same work object that keeps the reasons vector alive.
                 let (reason, reserved) = out.finish(written)?;
                 reasons.push(reason);
                 work.merge(reserved);
             }
+            // Resume the deepest open conjunction first. Once its iterator is
+            // exhausted, pop it and resume its parent. This preserves the
+            // left-to-right leaf order without a second walk.
             next = loop {
                 let Some(parent) = parents.last_mut() else {
                     break None;
@@ -99,16 +144,26 @@ impl FilterExpr {
                 parents.pop();
             };
         }
+        // Only the boolean outcome, reason strings and their reservation cross
+        // this boundary. The traversal stack drops here even if the input
+        // expression remains available for more candidates.
         Ok((Eval { matched, reasons }, work))
     }
 }
 
 fn write_label(out: &mut JsonTextWriter, value: &JsonValue) -> std::fmt::Result {
+    // These labels are human-readable fragments of explanation strings. Strings
+    // are shown directly, while compound actual values are formatted using the
+    // validated JSON writer so nested metadata is rendered through the same
+    // budgets.
     match value {
         JsonValue::String(value) => out.write_str(value),
         JsonValue::Null => out.write_str("null"),
         JsonValue::Bool(value) => out.write_str(if *value { "true" } else { "false" }),
         JsonValue::Number(value) => {
+            // Integral numbers are shown without a decimal suffix. Retain the
+            // ordinary formatter for fractional values so reasons distinguish the
+            // operands a caller supplied.
             if value.fract() == 0.0 {
                 write!(out, "{value:.0}")
             } else {

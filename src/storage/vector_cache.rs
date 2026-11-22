@@ -7,7 +7,11 @@ use crate::json::{btree_workspace, CacheReservation, JsonOperationContext};
 // Payload must be dropped before its credit. This type is deliberately not
 // Clone: reusing a segment moves its existing allocation and reservation.
 pub(crate) struct CachedVectorSegment {
+    // Decoded segment for one collection. Its covered commit and vector
+    // configuration travel with the entries when the segment moves between caches.
     payload: VectorIndexSegmentPayload,
+    // Cache credit for the segment's owned identifiers, entry slots and coordinate
+    // buffers. The map's copy of the collection ID has separate credit.
     reservation: CacheReservation,
 }
 
@@ -19,9 +23,15 @@ impl CachedVectorSegment {
         context: &JsonOperationContext,
         limit: usize,
     ) -> crate::Result<Option<Self>> {
+        // Admit the segment header's variable-length fields and the entire array
+        // of row slots up front. Chunk IDs, embedding IDs and coordinate buffers
+        // arrive with each decoded row and are transferred separately.
         let bytes = collection.collection_id.len() as u128
             + collection.embedding_model.as_ref().map_or(0, String::len) as u128
             + count as u128 * std::mem::size_of::<VectorIndexEntry>() as u128;
+        // A cache limit refusal means this segment can still be written or
+        // streamed without a resident copy. An allocator failure after the
+        // reservation is granted remains a real error to the caller.
         let Some(reservation) = context.cache_reservation(bytes, limit) else {
             return Ok(None);
         };
@@ -29,6 +39,9 @@ impl CachedVectorSegment {
         vectors
             .try_reserve_exact(count)
             .map_err(std::io::Error::other)?;
+        // Copy the collection's scoring settings with the directory identity.
+        // Reusing these vectors later requires comparing them against the
+        // collection and checkpoint that a new request expects.
         let payload = VectorIndexSegmentPayload {
             collection_id: collection.collection_id.clone(),
             covered_commit_sequence_no: commit,
@@ -38,6 +51,9 @@ impl CachedVectorSegment {
             vectors_normalized: collection.vectors_normalized,
             vectors,
         };
+        // The reservation was made for exact capacities. If the allocator supplies
+        // extra slots or string space, drop this provisional payload instead of
+        // exposing a cache that understates its memory.
         if payload.vectors.capacity() != count
             || payload.collection_id.capacity() != collection.collection_id.len()
             || payload.embedding_model.as_ref().map_or(0, String::capacity)
@@ -51,7 +67,13 @@ impl CachedVectorSegment {
     }
 
     pub(super) fn push_retained(&mut self, embedding: RetainedEmbedding, limit: usize) -> bool {
+        // The producer counted the candidate rows before creating this array. A
+        // full array indicates that its count and traversal disagree, not that the
+        // cache can grow by silently allocating another row slot.
         assert!(self.payload.vectors.len() < self.payload.vectors.capacity());
+        // Moving a retained row may still be refused under the active limit. Do
+        // not add a partial entry when its owned IDs and coordinate buffer could
+        // not be transferred together.
         let Some(entry) = embedding.try_into_cache_entry(&mut self.reservation, limit) else {
             return false;
         };
@@ -66,6 +88,10 @@ impl CachedVectorSegment {
     ) -> Option<CacheReservation> {
         // Keep the existing 8x decoder headroom, including owned IDs, vector
         // slots and strings. Directories hold their own allocation credit.
+        // The encoded byte count includes framing, while the retained
+        // representation owns native strings and a row array. Use a wide product
+        // for the admission estimate before comparing with the effective cache
+        // limit.
         context.cache_reservation(encoded_len as u128 * 8, cache_limit)
     }
 
@@ -73,18 +99,27 @@ impl CachedVectorSegment {
         payload: VectorIndexSegmentPayload,
         mut reservation: CacheReservation,
     ) -> Self {
+        // The serialized extent length was only an admission estimate. Measure the
+        // decoded payload by actual capacities, including unused vector slots,
+        // before releasing excess cache credit.
         let bytes = payload.collection_id.capacity()
             + payload.embedding_model.as_ref().map_or(0, String::capacity)
             + payload.vectors.capacity() * std::mem::size_of::<VectorIndexEntry>()
             + payload
                 .vectors
                 .iter()
+                // The vector-entry array holds String and Vec headers inline. Each
+                // initialized entry also owns both ID buffers and f32 storage,
+                // whose allocations must be counted separately from that array.
                 .map(|entry| {
                     entry.chunk_id.capacity()
                         + entry.embedding_id.capacity()
                         + entry.vector.capacity() * std::mem::size_of::<f32>()
                 })
                 .sum::<usize>();
+        // Trim the reservation only after the payload's final representation is
+        // known. This owner subsequently moves with the segment and also covers
+        // any spare component capacity that will remain resident.
         reservation.retain(bytes);
         Self {
             payload,
@@ -97,20 +132,34 @@ impl CachedVectorSegment {
     }
 
     pub(crate) fn set_covered_commit(&mut self, commit: u64) {
+        // Reusing an unchanged collection can carry its same entries into a newer
+        // checkpoint. Only the sequence stamp changes here; the configuration and
+        // coordinate data must already be valid for the new view.
         self.payload.covered_commit_sequence_no = commit;
     }
 }
 
 pub(crate) struct VectorCache {
+    // Maps collection ID to its current in-memory segment. A second segment for the
+    // same ID replaces the first while keeping the existing map key.
     entries: BTreeMap<String, CachedVectorSegment>,
+    // Shared cache credit assigned to this B-tree's nodes and heap-owned keys. Each
+    // segment carries its own payload credit.
     directory: CacheReservation,
+    // High-water byte allowance for B-tree nodes. Removing keys can release their
+    // strings without establishing that any particular node was freed.
     node_bytes: usize,
+    // Bytes held in heap allocations for the current map keys. A key moved between
+    // directories transfers its credit alongside the String.
     key_bytes: usize,
 }
 
 impl VectorCache {
     pub(crate) fn new(context: &JsonOperationContext) -> Self {
         Self {
+            // Create the directory reservation on the operation's ledger even
+            // while the map is empty. Later cache merges can transfer
+            // already-owned key storage only between compatible ledgers.
             entries: BTreeMap::new(),
             directory: context
                 .cache_reservation(0, usize::MAX)
@@ -121,6 +170,9 @@ impl VectorCache {
     }
 
     pub(crate) fn reserved_bytes(&self) -> usize {
+        // Combine the directory's actual charge with all the independently owned
+        // segment reservations. Summing vector lengths alone would omit spare
+        // capacity, identifiers and the B-tree's admitted nodes.
         self.directory.reserved_bytes()
             + self
                 .entries
@@ -138,10 +190,16 @@ impl VectorCache {
         mut keep: impl FnMut(&String, &mut CachedVectorSegment) -> bool,
     ) {
         let mut removed = 0;
+        // The predicate can adjust a retained segment in place, for example when
+        // its covered commit is updated. Evicting an entry drops that segment's
+        // payload reservation independently of the directory.
         self.entries.retain(|id, segment| {
             if keep(id, segment) {
                 true
             } else {
+                // Refund the discarded key's owned capacity after the map releases
+                // it. Only the directory's key bytes are accumulated here;
+                // charging the segment payload again would subtract it twice.
                 removed += id.capacity();
                 false
             }
@@ -149,12 +207,21 @@ impl VectorCache {
         self.key_bytes -= removed;
         // Retain node headroom: removal does not promise that all empty nodes
         // have been deallocated. The entire tree drops before this reservation.
+        // Even an empty map reached by retaining no entries can still carry node
+        // headroom. Clearing the entire cache takes a different path that drops
+        // the tree before returning all directory credit.
         self.directory.retain(self.node_bytes + self.key_bytes);
     }
 
+    // Admit the directory growth before allocating a new B-tree entry. Existing
+    // node credit is a lower bound even after removals, because the allocator need
+    // not immediately return empty nodes.
     fn admit_node(&mut self, key_bytes: usize, limit: usize) -> bool {
         let nodes = btree_workspace::<String, CachedVectorSegment>(self.entries.len() + 1)
             .max(self.node_bytes);
+        // Only the increase in tree capacity needs a new grant. A brand-new
+        // collection key also needs its own allocation, distinct from the
+        // collection ID already stored inside the segment.
         if !self
             .directory
             .try_grow((nodes - self.node_bytes) as u128 + key_bytes as u128, limit)
@@ -166,14 +233,23 @@ impl VectorCache {
     }
 
     pub(crate) fn insert(&mut self, segment: CachedVectorSegment, limit: usize) -> bool {
+        // The directory and the retained segment must participate in the same
+        // budget. A separate ledger could make their combined live memory
+        // invisible to the connection's cache accounting.
         self.directory.assert_same_ledger(&segment.reservation);
         if let Some(existing) = self.entries.get_mut(&segment.collection_id) {
+            // Replacement can reuse the existing directory slot. A zero-byte
+            // growth check still tests the current shared cache limit before
+            // dropping the old segment and accepting the new one.
             if !self.directory.try_grow(0, limit) {
                 return false;
             }
             *existing = segment;
             return true;
         }
+        // Reserve space for a new directory key before cloning it. If admission
+        // fails, returning drops the incoming segment and leaves the destination
+        // with its existing entries.
         let bytes = segment.collection_id.len();
         if !self.admit_node(bytes, limit) {
             return false;
@@ -186,12 +262,22 @@ impl VectorCache {
 
     pub(crate) fn append(&mut self, mut other: Self, limit: usize) {
         self.directory.assert_same_ledger(&other.directory);
+        // An empty destination can take ownership of the whole tree. Otherwise move
+        // entries individually so duplicate keys can keep the existing node and new
+        // keys can claim destination node space.
+        // Swapping an empty destination makes the other tree and all of its key
+        // and node reservations move as one unit. The limit check after both paths
+        // is still required.
         if self.entries.is_empty() {
             std::mem::swap(self, &mut other);
         } else {
             while let Some((id, segment)) = other.entries.pop_first() {
                 let bytes = id.capacity();
                 other.key_bytes -= bytes;
+                // Duplicate keys reuse the destination's key allocation. Drop the
+                // transfer key and the displaced segment through their original
+                // owners so that only the surviving identity and new vector remain
+                // charged.
                 if let Some(existing) = self.entries.get_mut(&id) {
                     *existing = segment;
                     drop(id);
@@ -202,12 +288,19 @@ impl VectorCache {
                     other.directory.transfer_to(&mut self.directory, bytes);
                     self.key_bytes += bytes;
                     self.entries.insert(id, segment);
+                // A refused directory node does not prevent movement of later
+                // entries. Release this candidate and its key space while
+                // retaining the source tree's node headroom until the entire
+                // source tree drops.
                 } else {
                     drop((id, segment));
                     other.directory.retain(other.node_bytes + other.key_bytes);
                 }
             }
         }
+        // Drop the remaining source directory before trying the final limit check.
+        // A rejected cache is optional and can be cleared as a unit, so it never
+        // prevents access through the underlying index.
         drop(other);
         if !self.directory.try_grow(0, limit) {
             self.clear();
@@ -215,6 +308,9 @@ impl VectorCache {
     }
 
     pub(crate) fn clear(&mut self) {
+        // Drop the tree and all retained segments before releasing their remaining
+        // directory credit. Reset both capacities so a later insertion budgets its
+        // cold-start allocation.
         self.entries = BTreeMap::new();
         self.directory.retain(0);
         self.node_bytes = 0;

@@ -5,17 +5,30 @@ use crate::json::{JsonOperationContext, WorkspaceReservation};
 use crate::Result;
 
 #[derive(Debug, Default)]
+// A temporary pathname can remain owned by a guard or a deferred cleanup after its
+// creating function returns. Keep its workspace lease alongside the native path
+// for that entire lifetime, including any unused buffer capacity.
 pub(crate) struct TemporaryPath {
+    // Owned native path used for filesystem calls. Clearing the name disables a
+    // pending cleanup while retaining the allocation until drop.
     value: PathBuf,
+    // Credit for the path buffer's allocated byte capacity. Absent for a default
+    // path or a path explicitly adopted without an operation reservation.
     _work: Option<WorkspaceReservation>,
 }
 
 impl TemporaryPath {
+    // Term-statistics collection uses the system temporary directory when it needs
+    // spill files. Keeping the directory itself on the operation budget accounts
+    // for it even before any run file exists.
     pub(crate) fn system_temp_in(context: &JsonOperationContext) -> Result<Self> {
         let mut work = context.workspace_reservation();
         // The OS/standard-library discovery allocation precedes adoption; its
         // resident capacity, not just its path length, remains charged here.
         let value = std::env::temp_dir();
+        // If admission fails, the discovered path is still local and drops on
+        // return. No path backed only by a failed workspace request escapes to the
+        // caller.
         work.grow_to(value.capacity(), value.capacity(), "operation_scratch")?;
         Ok(Self {
             value,
@@ -23,13 +36,21 @@ impl TemporaryPath {
         })
     }
 
+    // The unbudgeted file constructor already owns its PathBuf. Move that
+    // allocation into its guard without entering the operation ledger.
     pub(super) fn unreserved(value: PathBuf) -> Self {
         Self { value, _work: None }
     }
 
     pub(super) fn copy_in(value: &Path, context: &JsonOperationContext) -> Result<Self> {
+        // External sorting owns the directory for the lifetime of its runs. Make
+        // an independent catalog-build copy rather than keeping a borrow of the
+        // caller's path.
         Self::copy_with_capacity(
             value,
+            // A borrowed path carries no capacity information. Use its native
+            // encoded length as the requested copy size so non-UTF-8 directory
+            // names remain intact.
             value.as_os_str().as_encoded_bytes().len(),
             context,
             "catalog_build",
@@ -42,6 +63,9 @@ impl TemporaryPath {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // Make the cleanup owner's copy independently payable for the full source
+        // capacity. The original and copy can stay live for different lengths of
+        // time and cannot share one buffer lease.
         Self::copy_with_capacity(&self.value, self.value.capacity(), context, phase)
     }
 
@@ -51,15 +75,26 @@ impl TemporaryPath {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // Check the supplied bound before allocating. An oversized source must
+        // never reach OsString::push, which would silently grow its buffer outside
+        // the admitted capacity.
         if value.as_os_str().as_encoded_bytes().len() > capacity {
             return Err(std::io::Error::other("path copy exceeds admitted capacity").into());
         }
+        // Obtain an empty native buffer together with its grant. The copy borrows
+        // the source, so an allocation or capacity error can discard this attempt
+        // without disturbing the directory the caller owns.
         let (mut bytes, work) = Self::allocate(capacity, context, phase)?;
         bytes.push(value.as_os_str());
+        // Moving the OsString into a PathBuf should keep the admitted backing
+        // allocation. Verify the observed capacity after the copy before returning
+        // the new owner.
         Self::from_parts(bytes, capacity, work)
     }
 
     #[cfg(unix)]
+    // Build a temporary path in a buffer charged for its full capacity. The caller
+    // provides a bound for the directory and a single generated file name.
     pub(super) fn join_name(
         directory: &Path,
         name: &str,
@@ -67,29 +102,40 @@ impl TemporaryPath {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // Count the separator only when it will be written. Check native encoded
+        // byte lengths before allocating so paths with non-UTF-8 directory
+        // components use the same bound as the copy.
         let directory_bytes = directory.as_os_str().as_encoded_bytes();
         let separator = usize::from(directory_bytes.last().is_some_and(|&byte| byte != b'/'));
         let required = directory_bytes
             .len()
             .checked_add(separator)
             .and_then(|bytes| bytes.checked_add(name.len()));
+        // Treat overflow like a path outside the admitted bound. Reject either
+        // before creating an allocation or copying a prefix.
         if required.map_or(true, |bytes| bytes > capacity) {
             return Err(std::io::Error::other("path join exceeds admitted capacity").into());
         }
         let (mut bytes, work) = Self::allocate(capacity, context, phase)?;
         bytes.push(directory.as_os_str());
+        // Insert a slash when a nonempty directory does not already end in one. An
+        // empty directory leaves the generated name relative.
         if directory
             .as_os_str()
             .as_encoded_bytes()
             .last()
             .is_some_and(|&byte| byte != b'/')
         {
+            // The write and its length check use the same separator rule. Changing
+            // the join rule also requires changing the preflight count above.
             bytes.push("/");
         }
         bytes.push(name);
         Self::from_parts(bytes, capacity, work)
     }
 
+    // Return an empty OsString with its workspace owner. Reserve the full bound
+    // before the allocator is called, so budget refusal has no buffer to unwind.
     fn allocate(
         capacity: usize,
         context: &JsonOperationContext,
@@ -101,14 +147,21 @@ impl TemporaryPath {
         bytes
             .try_reserve_exact(capacity)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // Reject any spare capacity beyond the grant. The local buffer and guard
+        // then drop together before a pathname can escape.
         if bytes.capacity() != capacity {
             return Err(std::io::Error::other("path allocation exceeds admitted capacity").into());
         }
         Ok((bytes, work))
     }
 
+    // Recheck capacity after copying or joining components. That prevents the
+    // returned path from carrying an allocation larger than the reservation that
+    // follows it.
     fn from_parts(bytes: OsString, capacity: usize, work: WorkspaceReservation) -> Result<Self> {
         if bytes.capacity() != capacity {
+            // Free the buffer before returning its charge. Other operations can
+            // consume that credit once the release reaches the shared ledger.
             drop(bytes);
             drop(work);
             return Err(std::io::Error::other("path growth exceeds admitted capacity").into());
@@ -119,6 +172,8 @@ impl TemporaryPath {
         })
     }
 
+    // Clear the visible pathname without discarding its backing allocation.
+    // Cleanup can disarm the path while its workspace remains charged until drop.
     pub(super) fn clear(&mut self) {
         self.value.clear();
     }

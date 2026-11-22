@@ -1,3 +1,12 @@
+//! A benchmark dataset has two kinds of identity. The manifest and artifact
+//! digests identify input bytes. Query, document and chunk IDs connect records
+//! across those byte streams. A correctly hashed relevance judgment still needs to
+//! name a chunk in this corpus.
+//!
+//! Validation builds the workload in query-file order. It retains the query inputs
+//! and their positive judgments for repeated searches, while the corpus files
+//! remain inputs to the generated import manifest. Inline and sidecar describe the
+//! origin of a query vector. The runner selects the retrieval modes separately.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -18,6 +27,9 @@ pub(crate) use result::validate_benchmark_result_contract;
 mod runner;
 pub(crate) use runner::{run_benchmark, BenchmarkOptions};
 
+// Allowed row fields are specific to each benchmark artifact. A query-side vector
+// identifies a query, while a corpus vector identifies a chunk, even though both
+// carry model, dimension and coordinates.
 const BENCHMARK_DOCUMENT_FIELDS: &[&str] = &["external_id", "title", "source_uri", "metadata"];
 const BENCHMARK_CHUNK_FIELDS: &[&str] = &[
     "document_external_id",
@@ -28,94 +40,187 @@ const BENCHMARK_CHUNK_FIELDS: &[&str] = &[
     "source_span",
 ];
 const BENCHMARK_EMBEDDING_FIELDS: &[&str] = &["chunk_external_id", "model_name", "dim", "vector"];
+// The query file can carry an inline vector and a top-k token. Its row parser
+// validates top-k from the source number token and preserves the resulting
+// integer; a corpus embedding row instead carries its own model and declared
+// dimension.
 const BENCHMARK_QUERY_FIELDS: &[&str] = &["query_id", "text", "filter", "top_k", "embedding"];
 const BENCHMARK_QREL_FIELDS: &[&str] = &["query_id", "chunk_external_id", "relevance"];
 const BENCHMARK_QUERY_EMBEDDING_FIELDS: &[&str] = &["query_id", "model_name", "dim", "vector"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// One dataset chooses one source of query embeddings for all rows. The mode
+// determines which paths and hashes are required in the manifest and how each
+// retained query gets its vector.
 pub enum QueryEmbeddingSource {
+    // Match query IDs to vectors read from a separate query-embedding artifact.
     Sidecar,
+    // Take each query's vector from its own JSONL row.
     Inline,
+    // Run queries without embeddings and reject conflicting query-vector inputs.
     None,
 }
 
 #[derive(Clone, Debug)]
 pub struct BenchmarkDatasetManifest {
+    // Tokenizer configuration used when constructing the import manifest. Omitted
+    // manifest settings use the default tokenizer.
     pub tokenizer: crate::TokenizerConfig,
+    // Dataset identifier reported together with its declared version and artifact
+    // digests.
     pub dataset_id: String,
+    // Producer's version of the dataset, independent of the manifest schema
+    // version.
     pub version: String,
+    // Chunking description carried into the dataset identity. A missing description
+    // is represented by JSON null.
     pub chunking: JsonValue,
+    // Model name declared for corpus embeddings, when supplied.
     pub embedding_model: Option<String>,
+    // Corpus vector width selected by dataset validation and used to configure the
+    // benchmark collection.
     pub embedding_dim: usize,
+    // Digest of the exact documents artifact bytes.
     pub documents_sha256: String,
+    // Digest checked again when a reference pass reopens the chunk source.
     pub chunks_sha256: String,
+    // Verified digest of the corpus embedding artifact when a hash was supplied.
     pub embeddings_sha256: Option<String>,
+    // Digest of query rows, whose file order determines the order of samples.
     pub queries_sha256: String,
+    // Digest of the relevance judgements that supply the quality labels.
     pub qrels_sha256: String,
+    // Selects inline, sidecar or absent query vectors for all queries in the
+    // dataset.
     pub query_embedding_source: QueryEmbeddingSource,
+    // Model identity declared for query vectors, distinct from the corpus model
+    // field.
     pub query_embedding_model: Option<String>,
+    // Declared query-vector width when the manifest specifies one.
     pub query_embedding_dim: Option<usize>,
+    // Verified digest of the separate query-vector artifact when present.
     pub query_embeddings_sha256: Option<String>,
+    // Digest of the manifest file's original bytes, including its original
+    // whitespace.
     pub dataset_manifest_sha256: String,
 }
 
 #[derive(Clone, Debug)]
+// Keep the inputs needed for repeated scoring with the validated manifest and
+// queries. Corpus inputs can be reopened from their resolved paths while the query
+// and relevance data remain in memory.
 pub struct BenchmarkDataset {
+    // Validated dataset identity and index settings used by result construction and
+    // import.
     pub manifest: BenchmarkDatasetManifest,
+    // Resolved documents artifact path used by import and source-based
+    // verification.
     pub documents_path: PathBuf,
+    // Resolved chunk source reopened for scoring and for the baseline.
     pub chunks_path: PathBuf,
+    // Resolved path to corpus vectors, when the dataset names an embeddings
+    // artifact.
     pub embeddings_path: Option<PathBuf>,
+    // Queries in their artifact order, joined to any sidecar vectors and positive
+    // relevance judgements.
     pub queries: Vec<BenchmarkQuery>,
+    // Manifest directory used to recover the source-relative path in benchmark
+    // errors.
     base_dir: PathBuf,
+    // Manifest path spelling included alongside artifact and line details in
+    // diagnostics.
     manifest_path_label: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct BenchmarkQuery {
+    // Source identifier used to join query embeddings and relevance judgements.
     pub query_id: String,
+    // Text supplied to BM25-capable benchmark modes.
     pub text: Option<String>,
+    // Validated metadata predicate to apply when selecting eligible chunks.
     pub filter: JsonValue,
+    // Per-query maximum number of results to return and compare.
     pub top_k: usize,
+    // Vector input resolved according to the dataset's single query-embedding
+    // source.
     pub embedding: Option<QueryEmbeddingInput>,
+    // External chunk IDs with positive relevance for this query. These are the
+    // labels for recall and reciprocal rank.
     pub relevant_chunk_ids: BTreeSet<String>,
 }
 
 struct BenchmarkManifestInput {
+    // Manifest file path retained in the list of input paths protected from result
+    // publication.
     manifest_path: PathBuf,
+    // Printable manifest path for errors raised before a dataset exists.
+    // The manifest's source path serves I/O, whereas its requested label is
+    // retained for diagnostics. Passing a directory as the dataset is why these
+    // two spellings can differ.
     manifest_path_label: String,
+    // Directory against which paths written in the manifest are resolved.
     base_dir: PathBuf,
+    // SHA-256 computed while reading the manifest, before converting it into typed
+    // fields.
     manifest_sha256: String,
+    // Parsed manifest fields retained while related artifact declarations are
+    // checked together.
     obj: JsonObject,
+    // Source mode parsed before the checks for required and conflicting embedding
+    // inputs.
     query_embedding_source: QueryEmbeddingSource,
+    // Shared operation context for manifest parsing, artifact row conversion and
+    // retained data.
     context: JsonOperationContext,
+    // Reservation for the parsed manifest. Its retained portion follows data moved
+    // into the final dataset.
     work: JsonReservation,
 }
 
 #[derive(Clone, Debug)]
 struct Artifact {
+    // Manifest spelling of the artifact path, used for source-facing diagnostics.
     raw_path: String,
+    // Resolved filesystem path opened by digest and row readers.
     path: PathBuf,
+    // Artifact category selecting the row schema, allowed fields and error label.
     kind: &'static str,
+    // Manifest hash key corresponding to this artifact's raw bytes.
     hash_field: &'static str,
 }
 
 #[derive(Clone, Debug)]
 struct QueryRow {
+    // Join key shared with query-embedding and relevance rows.
     query_id: String,
+    // One-based source line for reporting failures detected after reading the
+    // query.
     line: usize,
+    // Parsed text retained until the validated query is assembled.
     text: Option<String>,
+    // Filter object after its predicate syntax and JSON limits were checked.
     filter: JsonValue,
+    // Requested result count decoded from the query row.
     top_k: usize,
+    // Inline vector held until the manifest's source-mode contract has been
+    // checked.
     embedding: Option<QueryEmbeddingInput>,
+    // Whether the original query row supplied a non-null embedding. Used to enforce
+    // the source-mode rules.
     has_embedding: bool,
 }
 
 #[derive(Clone, Debug)]
 struct SidecarRow {
+    // First source line for this sidecar ID, retained to diagnose a duplicate.
     line: usize,
 }
 
 impl QueryEmbeddingSource {
+    // These are the manifest and result wire spellings. Report the same source
+    // choice that governed row validation rather than deriving it from the number
+    // of vectors present.
     pub fn as_str(self) -> &'static str {
         match self {
             QueryEmbeddingSource::Sidecar => "sidecar",
@@ -131,12 +236,21 @@ impl BenchmarkDatasetManifest {
         Ok(BenchmarkDataset::load_and_validate(path)?.manifest)
     }
 
+    // Build the dataset section of a benchmark result from the manifest that was
+    // actually validated. Include the exact raw artifact digests alongside the
+    // declared version and preprocessing settings.
     pub(crate) fn build_result_dataset_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
             ("dataset_id", builder.string(&self.dataset_id)?),
             ("tokenizer", self.tokenizer.build_json(builder)?),
             ("version", builder.string(&self.version)?),
+            // The retained manifest continues to own its chunking value. Copy it
+            // with the result's builder so the report can own its own nested data
+            // and reservation.
             ("chunking", builder.copy_validated_value(&self.chunking)?),
+            // Allow a missing corpus model to appear as null. This field describes
+            // the dataset's declaration and is independent of whether timed
+            // queries use text, vectors or both.
             (
                 "embedding_model",
                 builder.optional_str(self.embedding_model.as_deref())?,
@@ -146,9 +260,15 @@ impl BenchmarkDatasetManifest {
                 JsonValue::Number(self.embedding_dim as f64),
             ),
             (
+                // Include the digest of the original manifest itself alongside the
+                // member digests. Editing only manifest metadata can change that
+                // identity even when none of its artifact files changed.
                 "dataset_manifest_sha256",
                 builder.string(&self.dataset_manifest_sha256)?,
             ),
+            // Corpus documents and chunks have independent content identities.
+            // Keep their digests separate from both the dataset manifest's
+            // checksum and any optional embedding artifact.
             ("documents_sha256", builder.string(&self.documents_sha256)?),
             ("chunks_sha256", builder.string(&self.chunks_sha256)?),
             (
@@ -157,6 +277,9 @@ impl BenchmarkDatasetManifest {
             ),
             ("queries_sha256", builder.string(&self.queries_sha256)?),
             ("qrels_sha256", builder.string(&self.qrels_sha256)?),
+            // Record how query vectors were supplied along with their optional
+            // model, dimension and separate file hash. An inline dataset can
+            // identify its query embeddings without a sidecar digest.
             (
                 "query_embedding_source",
                 builder.string(self.query_embedding_source.as_str())?,
@@ -167,6 +290,9 @@ impl BenchmarkDatasetManifest {
             ),
             (
                 "query_embedding_dim",
+                // A missing query-vector width is different from a zero-width
+                // vector. The validation path requires any declared width to be
+                // positive, so retain absence as JSON null.
                 self.query_embedding_dim
                     .map(|dim| JsonValue::Number(dim as f64))
                     .unwrap_or(JsonValue::Null),
@@ -180,11 +306,21 @@ impl BenchmarkDatasetManifest {
 }
 
 impl BenchmarkDataset {
+    // Translate import-facing diagnostic paths back to dataset inputs where
+    // possible. The evaluator may have generated a private import manifest, so
+    // arbitrary staging paths are not useful file locators in a benchmark report.
     fn locate_input_error(&self, error: Error) -> Error {
+        // Only path detail fields are remapped. Keep the original error category
+        // and other diagnostics intact so validation and runtime failures remain
+        // distinguishable.
         let mut error = error.map_path_details(|reported| {
             if reported == self.manifest_path_label {
                 return Some(reported.to_owned());
             }
+            // Only the documents, chunks and optional corpus embeddings feed the
+            // generated import manifest. Queries, qrels and query-side vectors are
+            // read by the benchmark validators and already receive locations from
+            // their own artifact descriptors.
             for path in [
                 Some(&self.documents_path),
                 Some(&self.chunks_path),
@@ -193,10 +329,18 @@ impl BenchmarkDataset {
             .into_iter()
             .flatten()
             {
+                // Accept both the resolved path used to open the artifact and a
+                // canonical spelling returned by lower layers. Failure to
+                // canonicalize should still leave the direct path comparison
+                // usable.
                 if Path::new(reported) == path
                     || fs::canonicalize(path).ok().as_deref() == Some(Path::new(reported))
                 {
                     return Some(
+                        // Prefer paths relative to the manifest directory where
+                        // possible. For a source outside that directory, keep the
+                        // resolved path's spelling instead of inventing a
+                        // misleading relative name.
                         path.strip_prefix(&self.base_dir)
                             .unwrap_or(path)
                             .display()
@@ -207,6 +351,9 @@ impl BenchmarkDataset {
             // Generated manifests and private staging paths have no public locator.
             None
         });
+        // A lower layer may already have identified the dataset manifest. Fill the
+        // public manifest locator only if it was absent rather than appending a
+        // second value for the same key.
         if !error.detail().iter().any(|(key, _)| key == "manifest_path") {
             error = error.with_detail("manifest_path", &self.manifest_path_label);
         }
@@ -227,10 +374,17 @@ impl BenchmarkDataset {
         Self::load_with_sources_in(path, context).map(|(dataset, work, _)| (dataset, work))
     }
 
+    // The caller retains the returned reservation while the dataset is in use. The
+    // separate path list includes validated input files even when their rows have
+    // already been folded into queries in memory.
     pub(crate) fn load_with_sources_in(
         path: impl AsRef<Path>,
         context: &JsonOperationContext,
     ) -> Result<(Self, JsonReservation, Vec<PathBuf>)> {
+        // Validation has to finish before the runner opens or creates its target
+        // database. A failure here leaves no benchmark database work to undo.
+        // Paths returned on success also let the runner reject a result file that
+        // aliases a dataset input.
         BenchmarkManifestInput::load(path, context)?.validate_dataset()
     }
 }
@@ -238,12 +392,18 @@ impl BenchmarkDataset {
 impl BenchmarkManifestInput {
     fn load(path: impl AsRef<Path>, context: &JsonOperationContext) -> Result<Self> {
         let requested_path = path.as_ref();
+        // Accept a manifest file or a dataset directory. Resolve sibling resources
+        // relative to the actual manifest path, but preserve the originally
+        // requested spelling as the diagnostic label.
         let manifest_path = if requested_path.is_dir() {
             requested_path.join("dataset_manifest.json")
         } else {
             requested_path.to_path_buf()
         };
         let manifest_path_label = requested_path.display().to_string();
+        // Hash the manifest through the same reader that supplies the parser. The
+        // recorded identity covers its original bytes, including whitespace, and
+        // cannot drift because of a second open.
         let mut source = Sha256Reader::new(File::open(&manifest_path)?);
         let (mut value, work) = parse_reader_in(
             &mut source,
@@ -252,6 +412,9 @@ impl BenchmarkManifestInput {
         )?
         .into_parts();
         let manifest_sha256 = source.finish();
+        // Take the parsed object's map before dropping its wrapper. Its memory is
+        // still covered by work while the manifest fields are checked and any
+        // retained members are moved out.
         let obj = value.as_object_mut().map(std::mem::take).ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidJsonlSchema,
@@ -259,16 +422,28 @@ impl BenchmarkManifestInput {
             )
             .with_detail("manifest_path", &manifest_path_label)
         })?;
+        // Reject unknown top-level settings before interpreting the selected
+        // source mode. The nested hashes object has its own closed set of member
+        // names checked separately.
         reject_unknown_benchmark_manifest_fields(&obj, &manifest_path_label)?;
+        // Validate the declared hash fields when the member exists and is
+        // non-null. The mandatory-presence check is separate so an absent member
+        // can receive its required-field diagnostic.
         if let Some(hashes) = obj.get("hashes").filter(|value| !value.is_null()) {
             let hashes = hashes.as_object().ok_or_else(|| {
                 Error::new(ErrorCode::InvalidJsonlSchema, "hashes must be an object")
                     .with_detail("field", "hashes")
                     .with_detail("manifest_path", &manifest_path_label)
             })?;
+            // A known hash key and a value of the expected type are separate
+            // checks. Neither is yet evidence that the on-disk artifact actually
+            // has the declared digest.
             reject_unknown_benchmark_hash_fields(hashes, &manifest_path_label)?;
             validate_benchmark_hash_field_values(hashes, &manifest_path_label)?;
         }
+        // The manifest envelope is checked in two steps. Unknown keys, malformed
+        // hash members and an unknown embedding source can be reported here before
+        // validate_dataset examines the schema version or opens any artifact.
         let source = obj
             .get("query_embedding_source")
             .and_then(JsonValue::as_str)
@@ -280,6 +455,9 @@ impl BenchmarkManifestInput {
                 .with_detail("field", "query_embedding_source")
                 .with_detail("manifest_path", &manifest_path_label)
             })?;
+        // Reject unsupported embedding modes before opening artifacts. Silently
+        // guessing a mode could change the meaning of a missing sidecar or inline
+        // query vector.
         let query_embedding_source = match source {
             "sidecar" => QueryEmbeddingSource::Sidecar,
             "inline" => QueryEmbeddingSource::Inline,
@@ -310,6 +488,9 @@ impl BenchmarkManifestInput {
     }
 
     fn validate_dataset(mut self) -> Result<(BenchmarkDataset, JsonReservation, Vec<PathBuf>)> {
+        // The benchmark dataset manifest version selects this input contract. The
+        // producer's own dataset version is a separate required value carried into
+        // the output.
         let schema_version = required_string(&self.obj, "schema_version")?;
         if schema_version != "0.1" {
             return Err(Error::new(
@@ -319,15 +500,27 @@ impl BenchmarkManifestInput {
             .with_detail("manifest_path", &self.manifest_path_label));
         }
         let dataset_id = required_string(&self.obj, "dataset_id")?;
+        // Reject blank dataset identity components before constructing an
+        // externally reported dataset identity. Preserve the original nonblank
+        // values, including their spelling.
         self.require_nonempty_manifest_string(&dataset_id, "dataset_id")?;
         let version = required_string(&self.obj, "version")?;
         self.require_nonempty_manifest_string(&version, "version")?;
+        // Chunking describes how the supplied chunk rows were produced. The checks
+        // validate the declared size and overlap, without re-chunking document
+        // text to verify that the existing rows follow that recipe.
         self.validate_chunking()?;
         let hashes = self.hashes()?;
+        // The four base artifacts are required across all query modes. Construct
+        // their descriptors using the named paths and mandatory hash fields before
+        // opening optional vector sources.
         let documents = self.required_artifact("documents", "documents", "documents_sha256")?;
         let chunks = self.required_artifact("chunks", "chunks", "chunks_sha256")?;
         let queries = self.required_artifact("queries", "queries", "queries_sha256")?;
         let qrels = self.required_artifact("qrels", "qrels", "qrels_sha256")?;
+        // Collect optional paths and digests independently. A named query-vector
+        // file and a digest for a missing file have different implications when
+        // enforcing the source mode.
         let embeddings = self.optional_artifact("embeddings", "embeddings", "embeddings_sha256")?;
         let embeddings_hash = optional_string_field(hashes, "embeddings_sha256");
         let query_embeddings = self.optional_artifact(
@@ -336,6 +529,10 @@ impl BenchmarkManifestInput {
             "query_embeddings_sha256",
         )?;
         let query_embedding_hash = optional_string_field(hashes, "query_embeddings_sha256");
+        // A corpus row is checked against embedding_model. Sidecar rows are
+        // checked against query_embedding_model, while inline vectors take that
+        // name from the manifest. A successful shape check here does not establish
+        // that both model declarations name the same model.
         let embedding_model = optional_string_field(&self.obj, "embedding_model");
         let query_embedding_model = optional_string_field(&self.obj, "query_embedding_model");
         self.reject_empty_optional_manifest_string(embedding_model.as_deref(), "embedding_model")?;
@@ -343,6 +540,9 @@ impl BenchmarkManifestInput {
             query_embedding_model.as_deref(),
             "query_embedding_model",
         )?;
+        // JSON null means no declared query dimension. A present value must
+        // convert to native unsigned size and must be positive before file rows
+        // are reconciled with the manifest.
         let query_embedding_dim = self
             .obj
             .get("query_embedding_dim")
@@ -356,6 +556,9 @@ impl BenchmarkManifestInput {
                     .with_detail("field", "query_embedding_dim")
                     .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+                // Preserve the distinction between a value that cannot be read as
+                // a dimension and an explicitly zero vector width. The latter is
+                // reported as a vector-length failure.
                 if dim > 0 {
                     Ok(dim)
                 } else {
@@ -368,6 +571,8 @@ impl BenchmarkManifestInput {
                 }
             })
             .transpose()?;
+        // Check which combinations of paths, hashes and model metadata the mode
+        // permits before inferring a dimension from any corpus artifact.
         self.validate_source_contract(
             query_embeddings.as_ref(),
             query_embedding_hash.as_ref(),
@@ -376,12 +581,26 @@ impl BenchmarkManifestInput {
             embeddings.as_ref(),
             embeddings_hash.as_ref(),
         )?;
+        // Probe the first corpus embedding for the collection width before the
+        // full hash sweep. A malformed first row can therefore fail ahead of a
+        // checksum for a different artifact. If the probe reaches EOF, its row
+        // reader verifies the digest even for an empty stream.
         let embedding_dim = self.infer_embedding_dim(embeddings.as_ref(), query_embedding_dim)?;
 
+        // Bind the dataset identity to the artifact bytes. Row checks below answer a
+        // different question: even a file with the expected hash can name a chunk or
+        // query missing from another artifact.
+        // Check raw digests in this order before validating the full row
+        // relationships. Each later JSONL pass checks its own byte stream again at
+        // EOF. A path replaced after this first pass cannot make a different valid
+        // stream silently inherit the earlier digest.
         let documents_sha256 = self.validate_hash(&documents)?;
         let chunks_sha256 = self.validate_hash(&chunks)?;
         let queries_sha256 = self.validate_hash(&queries)?;
         let qrels_sha256 = self.validate_hash(&qrels)?;
+        // Store a corpus embedding digest only for an artifact whose declared
+        // checksum was verified. It is the raw file identity, not a checksum of
+        // decoded floating-point values.
         let embeddings_sha256 = embeddings
             .as_ref()
             .filter(|_| embeddings_hash.is_some())
@@ -392,22 +611,45 @@ impl BenchmarkManifestInput {
             .map(|artifact| self.validate_hash(artifact))
             .transpose()?;
 
+        // Resolve references in dependency order. Qrels need both query and chunk
+        // IDs, and chunks must already have been checked against their parent
+        // documents. Keep the validated query data alive for the timed runs.
+        // Query rows and selected filter or vector data will outlive validation.
+        // Give their retained allocations an operation reservation before
+        // validating references in other files.
         let mut retained = self.context.reservation();
+        // Query validation runs before the document and chunk passes. Once the
+        // digest checks above are complete, an invalid query row can take
+        // precedence over a broken document reference in a chunk, even though
+        // import will write the corpus first.
         let query_rows = self.read_queries(&queries, query_embedding_dim, &mut retained)?;
         let document_external_ids = self.read_document_external_ids(&documents)?;
+        // Validate chunk-to-document references while the admitted document IDs
+        // are still available. The resulting chunk IDs are then authoritative for
+        // corpus embeddings and relevance judgements.
         let chunk_external_ids = self.read_chunk_external_ids(&chunks, &document_external_ids)?;
+        // The corpus vector pass uses the whole chunk-ID set. It checks for
+        // missing vectors as well as unknown or repeated chunk IDs. Merely
+        // comparing row counts would accept a duplicate in place of a missing
+        // chunk.
         self.validate_embeddings(
             embeddings.as_ref(),
             embedding_model.as_deref(),
             embedding_dim,
             &chunk_external_ids,
         )?;
+        // Validate query and chunk references before grouping relevance data.
+        // Timed queries can then consume prechecked labels without reopening the
+        // qrels input.
         let mut qrels_rows = self.validate_qrels(&qrels, &query_rows, &chunk_external_ids)?;
         let mut sidecar_embeddings = match self.query_embedding_source {
             QueryEmbeddingSource::Sidecar => {
                 let query_embeddings = query_embeddings
                     .as_ref()
                     .expect("sidecar contract validates query_embeddings is present");
+                // Its validator checks coverage for every workload query and
+                // validates extra sidecar rows, while retaining coordinates only
+                // for query IDs used by the workload.
                 self.validate_sidecar(
                     query_embeddings,
                     &query_rows,
@@ -416,6 +658,9 @@ impl BenchmarkManifestInput {
                     &mut retained,
                 )?
             }
+            // Inline vectors are already held by their query rows. Validate their
+            // source contract without constructing a separate query-ID-to-vector
+            // table.
             QueryEmbeddingSource::Inline => {
                 self.validate_inline_queries(&query_rows)?;
                 BTreeMap::new()
@@ -426,14 +671,23 @@ impl BenchmarkManifestInput {
             }
         };
 
+        // Retain the ordering of the original query rows while consuming the
+        // lookup tables by ID. A sidecar may list the same query vectors in a
+        // different order.
         let benchmark_queries = query_rows
             .into_iter()
             .map(|row| {
+                // Consume the chosen source of a query vector once. Removing a
+                // sidecar entry by ID avoids cloning its coordinates when
+                // assembling the benchmark workload.
                 let embedding = match self.query_embedding_source {
                     QueryEmbeddingSource::Sidecar => sidecar_embeddings.remove(&row.query_id),
                     QueryEmbeddingSource::Inline => row.embedding,
                     QueryEmbeddingSource::None => None,
                 };
+                // Qrel validation required at least one judgment for each query.
+                // An empty positive set here therefore means that every judgment
+                // for this query had relevance zero.
                 let relevant_chunk_ids = qrels_rows.remove(&row.query_id).unwrap_or_default();
                 BenchmarkQuery {
                     query_id: row.query_id,
@@ -446,16 +700,28 @@ impl BenchmarkManifestInput {
             })
             .collect::<Vec<_>>();
 
+        // Tokenizer parsing is deferred until file identities and cross-file
+        // references are valid. A tokenizer error at this point discards the
+        // assembled query data before the runner can consume it.
         let tokenizer = self
             .obj
             .get("tokenizer")
             .map(crate::TokenizerConfig::from_json)
             .transpose()?
             .unwrap_or_default();
+        // Only the chunking subtree needs to survive as raw manifest JSON. Move it
+        // out and drop the remaining manifest map before reconciling its charge to
+        // the retained value.
         let chunking = self.obj.remove("chunking").unwrap_or(JsonValue::Null);
         drop(self.obj);
+        // Reconcile the manifest charge after dropping discarded fields. Merging
+        // that remainder into the query reservation makes the returned guard cover
+        // the surviving raw chunking value.
         chunking.reconcile_retained_in(JsonInputKind::Manifest, &mut self.work)?;
         retained.merge(self.work);
+        // Keep all source locations that participated in validation, including
+        // optional query and corpus vectors. The benchmark runner can use them to
+        // protect inputs from an output-path collision.
         let input_paths = [
             self.manifest_path,
             documents.path.clone(),
@@ -464,6 +730,9 @@ impl BenchmarkManifestInput {
             qrels.path,
         ]
         .into_iter()
+        // The optional corpus vector file can be reopened during import, while the
+        // query-side file may already have been consumed into memory. Both are
+        // still protected dataset inputs.
         .chain(embeddings.as_ref().map(|artifact| artifact.path.clone()))
         .chain(query_embeddings.map(|artifact| artifact.path))
         .collect();
@@ -514,6 +783,9 @@ impl BenchmarkManifestInput {
     }
 
     fn validate_chunking(&self) -> Result<()> {
+        // An absent or null chunking declaration is accepted. For an object,
+        // validate the two required coordinates and retain the entire object for
+        // result provenance, including any producer-specific members.
         let Some(value) = self.obj.get("chunking").filter(|value| !value.is_null()) else {
             return Ok(());
         };
@@ -525,6 +797,9 @@ impl BenchmarkManifestInput {
             .with_detail("field", "chunking")
             .with_detail("manifest_path", &self.manifest_path_label)
         })?;
+        // Parse chunking coordinates as integer sizes. A missing or
+        // non-convertible member is attributed to its nested field; zero is a
+        // separate invalid chunk-size case below.
         let chunk_size = obj.get("chunk_size").and_then(json_usize).ok_or_else(|| {
             Error::new(
                 ErrorCode::MissingRequiredField,
@@ -541,6 +816,9 @@ impl BenchmarkManifestInput {
             .with_detail("field", "chunking.chunk_size")
             .with_detail("manifest_path", &self.manifest_path_label));
         }
+        // A present chunking object requires an overlap member even when it is
+        // zero. Absence cannot be assumed to mean nonoverlapping chunks because
+        // that would alter the declared preprocessing identity.
         let chunk_overlap = obj
             .get("chunk_overlap")
             .and_then(json_usize)
@@ -552,6 +830,9 @@ impl BenchmarkManifestInput {
                 .with_detail("field", "chunking.chunk_overlap")
                 .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+        // The overlap can be zero in a benchmark manifest. It must remain smaller
+        // than the chunk width so a chunking description represents forward
+        // progress.
         if chunk_overlap >= chunk_size {
             return Err(Error::new(
                 ErrorCode::InvalidJsonlSchema,
@@ -563,6 +844,8 @@ impl BenchmarkManifestInput {
         Ok(())
     }
 
+    // Whitespace is used only to decide whether this required label is present.
+    // Preserve accepted strings for bytewise identity and diagnostics.
     fn require_nonempty_manifest_string(&self, value: &str, field: &'static str) -> Result<()> {
         if value.trim().is_empty() {
             return Err(Error::new(
@@ -580,6 +863,9 @@ impl BenchmarkManifestInput {
         value: Option<&str>,
         field: &'static str,
     ) -> Result<()> {
+        // Missing optional strings remain absent. For labels that are present,
+        // trim only for the emptiness test and retain the caller's spelling for
+        // identity and model comparison.
         if matches!(value, Some(value) if value.trim().is_empty()) {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -597,12 +883,17 @@ impl BenchmarkManifestInput {
         kind: &'static str,
         hash_field: &'static str,
     ) -> Result<Artifact> {
+        // If the input path is missing, report the manifest location and artifact
+        // kind even though there is no artifact filename to attach yet.
         let raw_path = required_string(&self.obj, path_field).map_err(|err| {
             Error::new(err.code(), err.message())
                 .with_detail("field", path_field)
                 .with_detail("artifact_kind", kind)
                 .with_detail("manifest_path", &self.manifest_path_label)
         })?;
+        // A required path also needs its corresponding expected hash. At this
+        // point the raw manifest spelling is available to identify which member
+        // lacks byte identity.
         if optional_string_field(self.hashes()?, hash_field).is_none() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -616,18 +907,27 @@ impl BenchmarkManifestInput {
         Ok(self.artifact(raw_path, kind, hash_field))
     }
 
+    // An optional artifact path can be absent at this stage. Its source mode
+    // decides later whether absence is permitted, and whether a hash without that
+    // path is a conflict.
     fn optional_artifact(
         &self,
         path_field: &'static str,
         kind: &'static str,
         hash_field: &'static str,
     ) -> Result<Option<Artifact>> {
+        // Only a string supplies an optional artifact pathname. Other JSON types
+        // yield no descriptor through this helper. The mode check later decides
+        // whether the resulting absence violates a required input.
         Ok(optional_string_field(&self.obj, path_field)
             .map(|raw_path| self.artifact(raw_path, kind, hash_field)))
     }
 
     fn artifact(&self, raw_path: String, kind: &'static str, hash_field: &'static str) -> Artifact {
         Artifact {
+            // Use the manifest directory to resolve relative input paths. Preserve
+            // the original spelling in the descriptor so errors can refer to the
+            // field's value instead of an internal working path.
             path: self.base_dir.join(&raw_path),
             raw_path,
             kind,
@@ -644,6 +944,9 @@ impl BenchmarkManifestInput {
         embeddings: Option<&Artifact>,
         embeddings_hash: Option<&String>,
     ) -> Result<()> {
+        // Corpus model presence and query model or dimension are distinct
+        // conditions. The two vector modes require a corpus model as well as the
+        // metadata that validates their query vectors.
         let embedding_model_present = self
             .obj
             .get("embedding_model")
@@ -651,6 +954,9 @@ impl BenchmarkManifestInput {
             .is_some();
         match self.query_embedding_source {
             QueryEmbeddingSource::Sidecar => {
+                // A sidecar must identify a particular file and its bytes before
+                // rows can be matched by query ID. A query model and width are
+                // also required to interpret those rows.
                 if query_embeddings.is_none() {
                     return Err(self.missing_source_field("query_embeddings"));
                 }
@@ -663,6 +969,9 @@ impl BenchmarkManifestInput {
                 if query_embedding_dim.is_none() {
                     return Err(self.missing_source_field("query_embedding_dim"));
                 }
+                // Query-side vectors alone cannot define a vector benchmark. The
+                // corpus must also declare embeddings and their digest so the
+                // query has a compatible search space.
                 if embeddings.is_none() {
                     return Err(self.missing_source_field("embeddings"));
                 }
@@ -674,6 +983,9 @@ impl BenchmarkManifestInput {
                 }
             }
             QueryEmbeddingSource::Inline => {
+                // Inline vectors come from query rows. Reject both a named sidecar
+                // and a stray sidecar digest even if one of them was supplied
+                // without the other.
                 if query_embeddings.is_some() || query_embedding_hash.is_some() {
                     return Err(self.mode_conflict(
                         "inline mode must not declare query_embeddings or hashes.query_embeddings_sha256",
@@ -685,6 +997,8 @@ impl BenchmarkManifestInput {
                 if query_embedding_dim.is_none() {
                     return Err(self.missing_source_field("query_embedding_dim"));
                 }
+                // Inline mode removes only the separate query artifact. The corpus
+                // vector source is still required just as in sidecar mode.
                 if embeddings.is_none() {
                     return Err(self.missing_source_field("embeddings"));
                 }
@@ -696,6 +1010,18 @@ impl BenchmarkManifestInput {
                 }
             }
             QueryEmbeddingSource::None => {
+                // Result provenance requires a null corpus model for text-only
+                // datasets. Reject a declared model before the runner opens a
+                // database or creates an execution journal.
+                if self
+                    .obj
+                    .get("embedding_model")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    return Err(self
+                        .mode_conflict("none mode requires embedding_model to be omitted or null")
+                        .with_detail("field", "embedding_model"));
+                }
                 if query_embeddings.is_some()
                     || query_embedding_hash.is_some()
                     || query_embedding_model.is_some()
@@ -715,7 +1041,14 @@ impl BenchmarkManifestInput {
     fn validate_hash(&self, artifact: &Artifact) -> Result<String> {
         let expected = optional_string_field(self.hashes()?, artifact.hash_field)
             .expect("required hash presence was validated before hashing");
+        // Hash the original file bytes before folding its rows into dataset state.
+        // Report both actual and declared digests on mismatch so changing
+        // serialization remains distinguishable from malformed row data.
         let actual = sha256_reader(File::open(&artifact.path)?)?;
+        // The earlier manifest check required a nonblank string, without
+        // normalizing its case or whitespace. Compare exactly with the computed
+        // hexadecimal digest, so an uppercase spelling of an otherwise correct
+        // hash is still a checksum mismatch.
         if actual != expected {
             return Err(artifact_hash_mismatch(
                 artifact,
@@ -727,23 +1060,42 @@ impl BenchmarkManifestInput {
         Ok(actual)
     }
 
+    // Choose the collection width before opening the benchmark database. The first
+    // chunk embedding can supply that width, but the later traversal still has to
+    // validate every vector against it.
     fn infer_embedding_dim(
         &self,
         embeddings: Option<&Artifact>,
         query_embedding_dim: Option<usize>,
     ) -> Result<usize> {
+        // A text-only dataset may have no chunk embeddings and no query embedding
+        // dimension. Supply one as the collection width in that case; no vector is
+        // fabricated for a query.
         let Some(embeddings) = embeddings else {
             return Ok(query_embedding_dim.unwrap_or(1));
         };
+        // Probe one record without retaining coordinates. This iterator normally
+        // checks the stream digest at EOF, so a successful nonempty probe alone
+        // cannot verify the file.
         let inferred = self
             .read_artifact_objects(embeddings)?
+            // Consume just the first result from the row iterator. Propagate a
+            // parse or schema error for that row before trying any fallback
+            // dimension.
             .next()
             .transpose()?
             .map(
                 |ArtifactObject {
                      line, obj, _work, ..
                  }| {
+                    // Read the row's declared dimension even if the query manifest
+                    // already gives one. A malformed first row is an artifact
+                    // error and must not fall back to a plausible manifest value.
                     required_usize(&obj, "dim").map_err(|err| {
+                        // Rebuild this field error with the embeddings file's
+                        // source label and physical line. The query declaration is
+                        // only an additional constraint and cannot locate the bad
+                        // corpus row.
                         Error::new(err.code(), err.message())
                             .with_detail("field", "dim")
                             .with_detail("path", &embeddings.raw_path)
@@ -754,13 +1106,26 @@ impl BenchmarkManifestInput {
                 },
             )
             .transpose()?;
+        // An empty embedding stream has no first dimension. The fallback only
+        // completes this inference step; full validation below rejects a supplied
+        // embeddings file with no rows.
         let inferred = inferred.or(query_embedding_dim).unwrap_or(1);
+        // The first row and the query declaration constrain the same collection
+        // width. Report both numbers here so disagreement is distinguishable from
+        // a later short vector.
         if let Some(query_dim) = query_embedding_dim {
+            // The dimension probe precedes the full-file hash checks. A
+            // disagreement here can be reported before reading the rest of the
+            // corpus, including a changed tail.
             if inferred != query_dim {
                 return Err(Error::new(
                     ErrorCode::InvalidEmbeddingDimension,
                     "embedding dimension does not match query_embedding_dim",
                 )
+                // A conflicting query declaration names the manifest and both
+                // widths. Unlike a malformed dim field, neither number is
+                // ill-typed; it is their relationship that makes this dataset
+                // invalid.
                 .with_detail("embedding_dim", inferred)
                 .with_detail("query_embedding_dim", query_dim)
                 .with_detail("manifest_path", &self.manifest_path_label));
@@ -769,6 +1134,9 @@ impl BenchmarkManifestInput {
         Ok(inferred)
     }
 
+    // Read in query-file order, which becomes the order of the benchmark workload.
+    // Source-mode validation later checks which rows were required or forbidden to
+    // carry inline vectors.
     fn read_queries(
         &self,
         artifact: &Artifact,
@@ -776,14 +1144,25 @@ impl BenchmarkManifestInput {
         retained: &mut JsonReservation,
     ) -> Result<Vec<QueryRow>> {
         let mut rows = Vec::new();
+        // Use a separate set for uniqueness so sorting or deduplicating the result
+        // is unnecessary. Repeated query IDs would make sidecar and relevance
+        // joins ambiguous.
         let mut seen_query_ids = BTreeSet::new();
+        // The earlier checksum pass and this row stream open the pathname
+        // separately. Exhaustion checks the digest of the bytes actually parsed. A
+        // row error can end this pass before that second digest is available.
         for row in self.read_artifact_objects(artifact)? {
+            // Take the source line from the iterator, not the number of accepted
+            // queries. Empty lines in JSONL can make those numbers differ.
             let ArtifactObject {
                 line,
                 mut obj,
                 _work: mut work,
                 search_top_k,
             } = row?;
+            // Take owned string fields out of the parsed object. The query can
+            // outlive that object's workspace, and keeping a second copy of its
+            // text would add another live allocation.
             let query_id =
                 crate::json::take_required_string(&mut obj, "query_id").map_err(|err| {
                     Error::new(err.code(), err.message())
@@ -793,7 +1172,12 @@ impl BenchmarkManifestInput {
                         .with_detail("line", line)
                         .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+            // Test for a blank ID without normalizing it. The original spelling is
+            // the key used by the sidecar, qrels and reported results.
             self.require_nonempty_artifact_string(&query_id, "queries.query_id", artifact, line)?;
+            // Query IDs keep their exact spelling. Reject repeats before this
+            // function checks the duplicate's text, filter or coordinates. The row
+            // parser has already validated the envelope and captured top_k.
             if !seen_query_ids.insert(query_id.clone()) {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -803,6 +1187,9 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Text is required in every source mode, including runs that also use
+            // a precomputed query vector. Keep the original text for the eventual
+            // search.
             let text = crate::json::take_required_string(&mut obj, "text").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "queries.text")
@@ -812,9 +1199,15 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Use trimming only for the emptiness test. Keep the accepted text as
+            // supplied so each workload implementation receives the same input
+            // before applying its own normalization.
             if text.trim().is_empty() {
                 return Err(Error::new(
                     ErrorCode::MissingRequiredField,
+                    // A structurally valid vector does not exempt a query from
+                    // supplying its text. This common workload schema keeps the
+                    // same query rows usable by the text-based benchmark methods.
                     "benchmark query requires non-empty text",
                 )
                 .with_detail("field", "queries.text")
@@ -824,9 +1217,16 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Remove a supplied filter so the validated query can take ownership
+            // of the JSON subtree. An omitted filter defaults to an empty object,
+            // while an explicit null is an invalid shape.
             let filter = obj
                 .remove("filter")
                 .map(|value| {
+                    // Reject nonobject filters before passing them to the
+                    // predicate parser. This distinguishes malformed artifact
+                    // shape from a predicate whose operators or operands are
+                    // invalid.
                     if matches!(value, JsonValue::Object(_)) {
                         Ok(value)
                     } else {
@@ -843,7 +1243,14 @@ impl BenchmarkManifestInput {
                     }
                 })
                 .transpose()?
+                // The default empty object represents an unrestricted predicate.
+                // It uses the same validation and retention path as an explicitly
+                // empty object.
                 .unwrap_or_else(JsonValue::object);
+            // Parsing the object also checks the filter language. Keep a JSON limit
+            // failure in its original category and attach the artifact path and
+            // line. Report an invalid predicate as a schema error in the queries
+            // artifact.
             FilterExpr::parse_validated_in(&filter, &self.context, JsonInputKind::Filter).map_err(
                 |err| {
                     if err
@@ -851,12 +1258,18 @@ impl BenchmarkManifestInput {
                         .iter()
                         .any(|(key, _)| key == "json_limit_reason")
                     {
+                        // A JSON-limit failure already carries measured resource
+                        // details. Add the row location to that same error instead
+                        // of losing the original reason and limits.
                         return err
                             .with_detail("path", &artifact.raw_path)
                             .with_detail("artifact_kind", artifact.kind)
                             .with_detail("line", line)
                             .with_detail("manifest_path", &self.manifest_path_label);
                     }
+                    // Keep the predicate parser's own error code and message as
+                    // details on the row-schema error. An invalid operand can then
+                    // be traced back from the query artifact to its filter.
                     Error::new(
                         ErrorCode::InvalidJsonlSchema,
                         "query filter must be a valid metadata filter",
@@ -871,6 +1284,9 @@ impl BenchmarkManifestInput {
                     .with_detail("manifest_path", &self.manifest_path_label)
                 },
             )?;
+            // Treat omission and explicit null alike for this required numeric
+            // field. Both differ from a present value whose type or exact numeric
+            // spelling fails validation.
             let top_k_value = obj
                 .get("top_k")
                 .filter(|value| !value.is_null())
@@ -886,6 +1302,9 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+            // The JSON number alone cannot distinguish all source spellings after
+            // conversion to binary64. Require the integer captured by the row
+            // parser from the original top_k token.
             let top_k = matches!(top_k_value, JsonValue::Number(_))
                 .then_some(search_top_k)
                 .flatten()
@@ -901,6 +1320,9 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+            // Even an exactly decoded integer has to fit the search API's
+            // supported range. Zero would request an empty result set and is
+            // rejected as a schema error here.
             if top_k == 0 || top_k > crate::query::MAX_SEARCH_TOP_K {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -913,16 +1335,27 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Keep the typed vector's allocation separate from the temporary JSON
+            // representation. Their lifetimes diverge when the object is discarded
+            // but the benchmark retains the query.
             let mut typed_work = self.context.reservation();
+            // A present embedding field is fed to the array converter even when
+            // its value is null. Only absence skips creation of the typed vector.
             let vector = obj
                 .get("embedding")
                 .map(|value| self.vector_values(value, &query_id, line, "queries", &mut typed_work))
                 .transpose()
                 .map_err(|err| self.locate_artifact_error(err, artifact, line))?;
+            // Check actual vector length as soon as the manifest supplies an
+            // expected dimension. A later check for presence in inline mode cannot
+            // prove a present vector has the correct shape.
             if let (Some(vector), Some(expected)) = (&vector, query_embedding_dim) {
                 let actual = vector.len();
                 if actual != expected {
                     return Err(self.locate_artifact_error(
+                        // Inline rows have no independent per-row dim member.
+                        // Supply the manifest expectation for the declared-width
+                        // field and carry the observed vector length separately.
                         invalid_vector_len(
                             &self.manifest_path_label,
                             &query_id,
@@ -935,6 +1368,9 @@ impl BenchmarkManifestInput {
                     ));
                 }
             }
+            // An inline row supplies the coordinates only. Carry the model name
+            // from the dataset declaration, and use the validated vector's own
+            // element count as its dimension.
             let embedding = vector
                 .map(|vector| -> Result<_> {
                     Ok(QueryEmbeddingInput {
@@ -942,6 +1378,9 @@ impl BenchmarkManifestInput {
                             .obj
                             .get("query_embedding_model")
                             .and_then(JsonValue::as_str)
+                            // Each retained inline input owns the model spelling
+                            // it reports. Account for that copy even though its
+                            // bytes originated in the shared manifest.
                             .map(|model| {
                                 typed_work.copy_string(model, JsonInputKind::QueryEmbedding)
                             })
@@ -952,23 +1391,37 @@ impl BenchmarkManifestInput {
                 })
                 .transpose()
                 .map_err(|err| self.locate_artifact_error(err, artifact, line))?;
+            // Release discarded row fields before recalculating the JSON charge
+            // for the retained filter. The typed vector and any model copy have a
+            // separate reservation.
             drop(obj);
             filter
                 .reconcile_retained_in(JsonInputKind::Filter, &mut work)
                 .map_err(|err| self.locate_artifact_error(err, artifact, line))?;
+            // Transfer the remaining charges to the dataset owner. Both the filter
+            // JSON and typed input survive the iteration that parsed this row.
             retained.merge(work);
             retained.merge(typed_work);
+            // Remember inline presence separately from the option's contents. The
+            // mode checks can identify the source of the vector before final
+            // assembly moves it into the benchmark query.
             let has_embedding = embedding.is_some();
             rows.push(QueryRow {
                 query_id,
                 line,
                 text: Some(text),
+                // Keep the original filter JSON in the workload. The predicate
+                // parsed above was a validation step. Both the reference search
+                // and the measured engine receive this expression when they
+                // execute the query.
                 filter,
                 top_k,
                 embedding,
                 has_embedding,
             });
         }
+        // EOF with no queries is a missing workload. A successful parse of an
+        // empty file cannot produce meaningful per-query benchmark results.
         if rows.is_empty() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -980,6 +1433,9 @@ impl BenchmarkManifestInput {
         Ok(rows)
     }
 
+    // Join a sidecar by query ID rather than position. It can list other IDs and
+    // use a different order, provided its own rows are valid and every requested
+    // query is covered.
     fn validate_sidecar(
         &self,
         artifact: &Artifact,
@@ -988,6 +1444,12 @@ impl BenchmarkManifestInput {
         expected_dim: Option<usize>,
         retained: &mut JsonReservation,
     ) -> Result<BTreeMap<String, QueryEmbeddingInput>> {
+        // The manifest selects one source of query vectors. With a sidecar, an
+        // inline vector would give the query two possible values, even if both
+        // happened to have the requested dimension.
+        // Check source exclusivity before reopening the sidecar to decode its
+        // rows. The earlier digest pass established the sidecar's identity but
+        // cannot resolve an inline conflict in the queries file.
         if let Some(row) = queries.iter().find(|row| row.has_embedding) {
             return Err(self.mode_conflict(format!(
                 "sidecar mode query {} at line {} must not inline embedding",
@@ -995,15 +1457,26 @@ impl BenchmarkManifestInput {
             )));
         }
 
+        // The caller enforces the manifest's sidecar contract before reading rows.
+        // Missing model or dimension is handled there as a manifest error.
         let expected_model =
             expected_model.expect("sidecar contract validates query_embedding_model is present");
         let expected_dim = expected_dim.expect("sidecar contract validates query_embedding_dim");
+        // Borrow IDs from the query slice for membership checks. The returned
+        // vectors own the model names and coordinates needed after the parsed JSON
+        // rows have been released.
         let query_ids = queries
             .iter()
             .map(|query| query.query_id.as_str())
             .collect::<BTreeSet<_>>();
+        // Keep source lines independently of retained vectors. This lets a
+        // duplicate name identify both occurrences even when the first row belongs
+        // to a query outside the workload.
         let mut seen = BTreeMap::<String, SidecarRow>::new();
         let mut embeddings = BTreeMap::<String, QueryEmbeddingInput>::new();
+        // Consume the entire sidecar before deciding which request IDs are absent.
+        // A trailing invalid row or digest mismatch still fails a sidecar that
+        // already covered the workload.
         for row in self.read_artifact_objects(artifact)? {
             let ArtifactObject {
                 line,
@@ -1020,12 +1493,17 @@ impl BenchmarkManifestInput {
                         .with_detail("line", line)
                         .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+            // A whitespace-only key cannot join to a query. As with the queries
+            // file, retain the exact spelling of each accepted ID.
             self.require_nonempty_artifact_string(
                 &query_id,
                 "query_embeddings.query_id",
                 artifact,
                 line,
             )?;
+            // Check for a repeated ID before interpreting its second vector. The
+            // diagnostic identifies the first accepted row and the line that
+            // conflicts with it.
             if let Some(first) = seen.get(&query_id) {
                 return Err(self.locate_artifact_error(
                     Error::new(
@@ -1033,12 +1511,18 @@ impl BenchmarkManifestInput {
                         "duplicate query_id in query embeddings sidecar",
                     )
                     .with_detail("query_id", &query_id)
+                    // Keep the two line numbers distinct from the location of the
+                    // diagnostic itself. The first is the prior accepted record;
+                    // the duplicate is the row currently being parsed.
                     .with_u64_detail("first_line", first.line as u64)
                     .with_u64_detail("duplicate_line", line as u64),
                     artifact,
                     line,
                 ));
             }
+            // A sidecar row carries its own model identifier. Read it from the row
+            // so the declaration can be checked independently of the vector's
+            // numerical dimension.
             let row_model =
                 crate::json::take_required_string(&mut obj, "model_name").map_err(|err| {
                     self.locate_artifact_error(
@@ -1055,6 +1539,9 @@ impl BenchmarkManifestInput {
                 artifact,
                 line,
             )?;
+            // Check the sidecar row against query_embedding_model. Corpus
+            // embedding rows use the separate embedding_model field. Equal
+            // dimension alone supplies no model identity.
             if row_model != expected_model {
                 return Err(self.locate_artifact_error(
                     Error::new(
@@ -1068,6 +1555,9 @@ impl BenchmarkManifestInput {
                     line,
                 ));
             }
+            // The row declares its dimension separately from the array. Keep that
+            // number until conversion succeeds so a mismatch can show the declared
+            // and actual lengths together.
             let row_dim = required_usize(&obj, "dim").map_err(|err| {
                 self.locate_artifact_error(
                     Error::new(err.code(), err.message())
@@ -1077,8 +1567,14 @@ impl BenchmarkManifestInput {
                     line,
                 )
             })?;
+            // A parsed JSON array and the f32 input coexist during conversion.
+            // Charge the typed allocation at the point it is created, including
+            // for rows later discarded as unused.
             let mut typed_work = self.context.reservation();
             let vector = self
+                // Use the same typed-coordinate checks as an inline vector. This
+                // includes the operation's query-vector representation limit after
+                // conversion to f32.
                 .vector_values(
                     obj.get("vector").ok_or_else(|| {
                         self.locate_artifact_error(
@@ -1098,6 +1594,9 @@ impl BenchmarkManifestInput {
                     &mut typed_work,
                 )
                 .map_err(|err| self.locate_artifact_error(err, artifact, line))?;
+            // Compare three quantities: manifest width, row-declared width and
+            // actual array length. Agreement between any two cannot establish that
+            // the row is usable.
             let vector_len = vector.len();
             if row_dim != expected_dim || vector_len != expected_dim {
                 return Err(self.locate_artifact_error(
@@ -1112,11 +1611,20 @@ impl BenchmarkManifestInput {
                     line,
                 ));
             }
+            // Validate every sidecar row, including IDs unused by this query set.
+            // Keep vectors only for requested IDs, but keep the first line for every
+            // key so a duplicate unused row is still diagnosed.
             if query_ids.contains(query_id.as_str()) {
+                // Only the model string's capacity must survive from this row's
+                // JSON reservation here. The converted coordinates are already
+                // accounted for by typed_work.
                 drop(obj);
                 work.retain(row_model.capacity());
                 typed_work.merge(work);
                 retained.merge(typed_work);
+                // Index the retained result by ID, not sidecar line. Later
+                // assembly removes one entry per query while preserving the query
+                // file's ordering.
                 embeddings.insert(
                     query_id.clone(),
                     QueryEmbeddingInput {
@@ -1129,10 +1637,16 @@ impl BenchmarkManifestInput {
             seen.insert(query_id, SidecarRow { line });
         }
 
+        // Check missing IDs in query-file order after consuming the sidecar. Extra
+        // valid rows are permitted, so the two files' row counts alone cannot
+        // establish coverage.
         if let Some(row) = queries
             .iter()
             .find(|query| !seen.contains_key(&query.query_id))
         {
+            // There is no sidecar line for an absent ID. The diagnostic's source
+            // names the expected artifact type, while path is the filename the
+            // manifest actually supplied, which may differ.
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "query embedding sidecar row missing for query_id",
@@ -1147,12 +1661,18 @@ impl BenchmarkManifestInput {
         Ok(embeddings)
     }
 
+    // The general query reader validates coordinates when present. Inline mode
+    // adds the separate requirement that every workload row actually supplied a
+    // vector.
     fn validate_inline_queries(&self, queries: &[QueryRow]) -> Result<()> {
         if let Some(row) = queries.iter().find(|row| !row.has_embedding) {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "inline query embedding missing for query_id",
             )
+            // A missing inline vector has a real source line in queries.jsonl. A
+            // missing sidecar row, in contrast, can identify the expected query
+            // but has no sidecar line of its own.
             .with_detail("query_id", &row.query_id)
             .with_detail("field", "queries.embedding")
             .with_detail("line", row.line)
@@ -1161,17 +1681,29 @@ impl BenchmarkManifestInput {
         Ok(())
     }
 
+    // Represent benchmark judgments as a set of relevant chunk IDs per query. Keep
+    // all source pairs separately during validation because a zero grade still
+    // counts as a judgment.
     fn validate_qrels(
         &self,
         artifact: &Artifact,
         queries: &[QueryRow],
         chunk_external_ids: &BTreeSet<String>,
     ) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        // Resolve references against the submitted queries. A relevance judgment
+        // for a query outside this workload is a schema error even if its chunk
+        // exists.
         let query_ids = queries
             .iter()
             .map(|query| query.query_id.clone())
             .collect::<BTreeSet<_>>();
+        // These labels describe quality against the source corpus. A judged chunk
+        // can be filtered out by a query or fall outside top_k. The benchmark
+        // constructs its expected ranking independently of these sets.
         let mut qrels = BTreeMap::<String, BTreeSet<String>>::new();
+        // Remember the first line for every pair, including nonrelevant pairs.
+        // Otherwise two zero grades or a zero followed by a positive grade could
+        // pass through the positive-only set.
         let mut seen_pairs = BTreeMap::<(String, String), usize>::new();
         for row in self.read_artifact_objects(artifact)? {
             let ArtifactObject {
@@ -1186,6 +1718,9 @@ impl BenchmarkManifestInput {
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
             self.require_nonempty_artifact_string(&query_id, "qrels.query_id", artifact, line)?;
+            // The chunk key denotes one retrieval unit, so a document ID alone
+            // cannot serve as a relevance target. Validate the second field with
+            // the query ID already known.
             let chunk_external_id = required_string(&obj, "chunk_external_id").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "chunk_external_id")
@@ -1201,11 +1736,17 @@ impl BenchmarkManifestInput {
                 artifact,
                 line,
             )?;
+            // Require a numeric relevance even though evaluation later uses only
+            // the distinction between zero and positive. A missing grade cannot be
+            // inferred from presence of the pair.
             let relevance = json_usize(obj.get("relevance").ok_or_else(|| {
                 Error::new(
                     ErrorCode::MissingRequiredField,
                     "missing numeric field relevance",
                 )
+                // A missing grade still has a source location. Report the query
+                // whose judgment needs repair together with the physical qrels
+                // artifact and line.
                 .with_detail("field", "relevance")
                 .with_detail("query_id", &query_id)
                 .with_detail("path", &artifact.raw_path)
@@ -1213,6 +1754,8 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label)
             })?)
+            // A supplied grade that cannot become a nonnegative native integer is
+            // malformed. A missing field reaches the distinct error branch above.
             .ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1225,6 +1768,9 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Both references must resolve before recording the judgment. Check
+            // the query first so errors on a row with two unknown IDs have a
+            // consistent location.
             if !query_ids.contains(&query_id) {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1238,6 +1784,9 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Check the chunk ID independently of the query ID. A positive grade
+            // for an absent chunk would make the requested recall target
+            // impossible to reach.
             if !chunk_external_ids.contains(&chunk_external_id) {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1252,7 +1801,13 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Treat repeated pairs as an error even if their grades agree.
+            // Silently unioning the judged chunks would hide a duplicate in the
+            // source artifact.
             if let Some(first_line) =
+                // Uniqueness is scoped to the ordered pair. The same chunk can be
+                // relevant to many queries, and each query can have multiple
+                // judged chunks.
                 seen_pairs.insert((query_id.clone(), chunk_external_id.clone()), line)
             {
                 return Err(Error::new(
@@ -1269,15 +1824,26 @@ impl BenchmarkManifestInput {
                 .with_detail("duplicate_line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // A judgment with relevance zero still establishes coverage for the
+            // query. Create the entry before testing relevance so an all-negative
+            // query is distinguishable from a query missing its qrels altogether.
             let relevant = qrels.entry(query_id).or_default();
+            // Positive grades contribute the same membership regardless of
+            // magnitude. A query with only zero grades remains in the timed
+            // workload and contributes zero Recall and reciprocal rank.
             if relevance > 0 {
                 relevant.insert(chunk_external_id);
             }
         }
+        // Coverage is per workload query. Report the first uncovered query in its
+        // input order, even if other queries have many valid judgments.
         if let Some(query) = queries
             .iter()
             .find(|query| !qrels.contains_key(&query.query_id))
         {
+            // There is no offending qrels row when an expected judgment is absent.
+            // Identify the uncovered query and its expected input rather than
+            // assigning a spurious row number.
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "qrels row missing for query_id",
@@ -1290,6 +1856,9 @@ impl BenchmarkManifestInput {
         Ok(qrels)
     }
 
+    // Check chunk-vector rows against the chunk artifact before benchmark
+    // execution. The runner needs their validated identity and shape here, while
+    // import reads the vector artifact separately.
     fn validate_embeddings(
         &self,
         artifact: Option<&Artifact>,
@@ -1297,14 +1866,23 @@ impl BenchmarkManifestInput {
         expected_dim: usize,
         chunk_external_ids: &BTreeSet<String>,
     ) -> Result<()> {
+        // No supplied chunk-vector artifact requires no row checks here. Once a
+        // file is supplied, empty or partially covered contents are errors.
         let Some(artifact) = artifact else {
             return Ok(());
         };
+        // Track only chunk IDs and first source lines across rows. This validation
+        // does not need an in-memory copy of every chunk vector.
         let mut seen = BTreeMap::<String, usize>::new();
+        // Carry the path and digest into the generated import manifest. The
+        // importer verifies the bytes it stages, so a changed file after preflight
+        // still has to pass its own checksum check.
         for row in self.read_artifact_objects(artifact)? {
             let ArtifactObject {
                 line, obj, _work, ..
             } = row?;
+            // A corpus row joins by chunk_external_id. Query-side vector records
+            // have a different key and a different coverage rule.
             let chunk_external_id = required_string(&obj, "chunk_external_id").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "embeddings.chunk_external_id")
@@ -1319,6 +1897,8 @@ impl BenchmarkManifestInput {
                 artifact,
                 line,
             )?;
+            // Validate identity before the model or coordinates. A row must name
+            // an admitted chunk even if the rest of its embedding is well formed.
             if !chunk_external_ids.contains(&chunk_external_id) {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1332,6 +1912,9 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Duplicate chunk vectors use the same external-ID error class as
+            // other duplicate corpus identities. Preserve both lines to locate
+            // entries that might be far apart.
             if let Some(first_line) = seen.insert(chunk_external_id.clone(), line) {
                 return Err(Error::new(
                     ErrorCode::DuplicateExternalId,
@@ -1355,12 +1938,18 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // A chunk vector row always needs its own nonblank model label. The
+            // presence of a manifest binding controls the additional equality
+            // check that follows.
             self.require_nonempty_artifact_string(
                 &row_model,
                 "embeddings.model_name",
                 artifact,
                 line,
             )?;
+            // Match model identifiers exactly when the manifest binds one.
+            // Compatible dimensions alone do not show that the coordinates share
+            // the dataset's embedding space.
             if let Some(expected_model) = expected_model {
                 if row_model != expected_model {
                     return Err(Error::new(
@@ -1376,6 +1965,10 @@ impl BenchmarkManifestInput {
                     .with_detail("manifest_path", &self.manifest_path_label));
                 }
             }
+            // A missing or nonnumeric dim has the missing-field diagnostic. A
+            // numeric fraction or a number outside the native unsigned range is a
+            // schema error here, before the later comparison with the vector's
+            // length.
             let row_dim = required_usize(&obj, "dim").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "embeddings.dim")
@@ -1385,7 +1978,13 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Check every coordinate for conversion to finite f32 and return only
+            // the element count. Keep the on-disk array for the later import
+            // instead of constructing another typed vector here.
             let vector_len = self.validate_embedding_vector(
+                // Report a missing vector field against the chunk key. An array
+                // with invalid elements proceeds to coordinate validation, which
+                // supplies a different error.
                 obj.get("vector").ok_or_else(|| {
                     Error::new(
                         ErrorCode::MissingRequiredField,
@@ -1402,6 +2001,9 @@ impl BenchmarkManifestInput {
                 line,
                 artifact,
             )?;
+            // An incorrect declared width and an incorrect array length are
+            // independent faults. Report both observed values alongside the
+            // inferred collection width.
             if row_dim != expected_dim || vector_len != expected_dim {
                 return Err(Error::new(
                     ErrorCode::InvalidVectorLength,
@@ -1417,7 +2019,13 @@ impl BenchmarkManifestInput {
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
         }
+        // A supplied file must yield at least one embedding. Report this
+        // separately from the first particular missing chunk in an otherwise
+        // nonempty file.
         if seen.is_empty() {
+            // At this point the reader has reached EOF and checked the digest. A
+            // matching hash for zero data rows still does not make the file a
+            // valid corpus.
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "benchmark embeddings must not be empty",
@@ -1428,10 +2036,18 @@ impl BenchmarkManifestInput {
             .with_detail("artifact_kind", artifact.kind)
             .with_detail("manifest_path", &self.manifest_path_label));
         }
+        // When a chunk embedding artifact is supplied it must cover the full chunk
+        // set. Per-row checks rule out unknown and duplicate keys; they do not
+        // detect a missing last row in an otherwise valid file.
+        // The chunk set is ordered by external ID. If several embeddings are
+        // missing, this iteration selects a stable ID for the diagnostic.
         if let Some(missing) = chunk_external_ids
             .iter()
             .find(|chunk_id| !seen.contains_key(*chunk_id))
         {
+            // A missing corpus row cannot supply its own input line. Return the
+            // expected chunk ID and the named embeddings input so the omitted row
+            // can be reconstructed.
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "embedding row missing for chunk_external_id",
@@ -1446,26 +2062,47 @@ impl BenchmarkManifestInput {
         Ok(())
     }
 
+    // Collect checked document IDs for the later parent join. Only the IDs survive
+    // this scan. They are provisional until the iterator reaches EOF. An invalid
+    // row stops the scan immediately, so its error can take precedence over a
+    // digest mismatch in the rest of the file.
     fn read_document_external_ids(&self, artifact: &Artifact) -> Result<BTreeSet<String>> {
+        // Retain a set to make later chunk ownership checks independent of
+        // document row order. A set alone would hide duplicates, so reject failed
+        // insertion at the source row.
         let mut ids = BTreeSet::new();
+        // Drive the artifact iterator through EOF. Its final step compares the
+        // digest of the same byte stream that produced these document rows.
         for row in self.read_artifact_objects(artifact)? {
+            // Keep the row's reservation in scope while reading its object. Moving
+            // fields out for validation must not release the charge before those
+            // fields are finished.
             let ArtifactObject {
                 line, obj, _work, ..
             } = row?;
+            // Read a string identifier and translate a bad field into an artifact
+            // error with its physical line. Retain both the member and owning
+            // manifest labels.
             let external_id = required_string(&obj, "external_id").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "external_id")
                     .with_detail("path", &artifact.raw_path)
+                    // The artifact kind identifies the row schema even when the
+                    // input files share the same basename.
                     .with_detail("artifact_kind", artifact.kind)
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Reject an empty or whitespace-only ID without trimming a valid ID.
+            // Later joins compare the exact supplied spelling.
             self.require_nonempty_artifact_string(
                 &external_id,
                 "documents.external_id",
                 artifact,
                 line,
             )?;
+            // Benchmark document metadata must be an object. Check its outer type
+            // here before downstream code interprets individual keys.
             self.require_artifact_object_field(
                 &obj,
                 "metadata",
@@ -1473,6 +2110,8 @@ impl BenchmarkManifestInput {
                 artifact,
                 line,
             )?;
+            // IDs are global within the documents artifact. A second occurrence is
+            // ambiguous even when other fields of the two rows differ.
             if !ids.insert(external_id.clone()) {
                 return Err(Error::new(
                     ErrorCode::DuplicateExternalId,
@@ -1486,6 +2125,9 @@ impl BenchmarkManifestInput {
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
         }
+        // A digest can identify a completely empty stream, so verify semantic
+        // nonemptiness separately after iteration. Blank lines do not count as
+        // documents.
         if ids.is_empty() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -1496,35 +2138,63 @@ impl BenchmarkManifestInput {
             .with_detail("artifact_kind", artifact.kind)
             .with_detail("manifest_path", &self.manifest_path_label));
         }
+        // Return the ID set only after successful iterator exhaustion. The final
+        // hash failure must prevent later stages from receiving a partially
+        // trusted document index.
         Ok(ids)
     }
 
+    // Build the set of valid chunk IDs and check document ownership while
+    // scanning. Chunk IDs support later artifact joins, while the ordinal table is
+    // only needed during this check.
     fn read_chunk_external_ids(
         &self,
         artifact: &Artifact,
         document_external_ids: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>> {
+        // Keep the ID set global and the ordinal table keyed by document.
+        // Different documents may use the same ordinal without any collision.
         let mut ids = BTreeSet::new();
+        // Store the first line number with each document-local ordinal. The value
+        // is diagnostic state, while the nested key models the uniqueness domain.
         let mut ordinals_by_document = BTreeMap::<String, BTreeMap<usize, usize>>::new();
+        // Validate rows in physical source order. For failures tied to ordering,
+        // retain the reader's line number rather than numbering only successfully
+        // decoded rows.
         for row in self.read_artifact_objects(artifact)? {
+            // The parser can fail before any artifact-specific validation can run.
+            // Propagate that failure before looking up document identity or
+            // counting this row.
             let ArtifactObject {
                 line, obj, _work, ..
             } = row?;
+            // Resolve the parent document before accepting any chunk-specific
+            // fields. A chunk cannot manufacture a new document identity during
+            // benchmark validation.
             let document_external_id =
                 required_string(&obj, "document_external_id").map_err(|err| {
                     Error::new(err.code(), err.message())
                         .with_detail("field", "document_external_id")
                         .with_detail("path", &artifact.raw_path)
+                        // Attribute a malformed parent ID to the chunks artifact
+                        // even though the correct spelling must refer to
+                        // documents. This makes the producer's invalid row the
+                        // error target.
                         .with_detail("artifact_kind", artifact.kind)
                         .with_detail("line", line)
                         .with_detail("manifest_path", &self.manifest_path_label)
                 })?;
+            // Validate the raw parent string for presence before membership
+            // lookup. Reporting a missing value helps distinguish it from a
+            // well-formed but unknown reference.
             self.require_nonempty_artifact_string(
                 &document_external_id,
                 "chunks.document_external_id",
                 artifact,
                 line,
             )?;
+            // Require membership in the already checked documents artifact. A
+            // known chunk external ID cannot compensate for an unknown parent.
             if !document_external_ids.contains(&document_external_id) {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1537,19 +2207,32 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Check the document-local position before later chunk fields and the
+            // dataset-wide chunk ID. A row with both an ordinal collision and an
+            // invalid chunk ID reports the ordinal first.
             let ordinal = required_usize(&obj, "ordinal").map_err(|err| {
                 Error::new(err.code(), err.message())
+                    // Use a qualified field label for ordinal validation. Manifest
+                    // consumers use the same field key for invalid type, numeric
+                    // value, and duplicate document position.
                     .with_detail("field", "chunks.ordinal")
                     .with_detail("path", &artifact.raw_path)
                     .with_detail("artifact_kind", artifact.kind)
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // An ordinal identifies a position within its document; the external
+            // chunk ID identifies a chunk across this dataset. Track the two
+            // constraints independently and retain the first source line for an
+            // ordinal collision.
             if let Some(first_line) = ordinals_by_document
                 .entry(document_external_id.clone())
                 .or_default()
                 .insert(ordinal, line)
             {
+                // Return immediately when a second row uses this document
+                // position. Include the previous and new physical line so the
+                // producer can locate both records.
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
                     "duplicate chunk ordinal for document in benchmark chunks",
@@ -1563,6 +2246,9 @@ impl BenchmarkManifestInput {
                 .with_detail("duplicate_line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Require a string before checking whether the chunk has searchable
+            // text. Keep field errors tied to the artifact and not to a later
+            // retrieval failure.
             let text = required_string(&obj, "text").map_err(|err| {
                 Error::new(err.code(), err.message())
                     .with_detail("field", "chunks.text")
@@ -1571,17 +2257,26 @@ impl BenchmarkManifestInput {
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Reject a blank chunk even if its ID and ordinal are valid. Trimming
+            // is a validation predicate; the original text row is still the
+            // artifact data.
             if text.trim().is_empty() {
                 return Err(Error::new(
                     ErrorCode::MissingRequiredField,
                     "benchmark chunk requires non-empty text",
                 )
+                // Keep a consistent qualified field for missing and blank text.
+                // The reader has already separated malformed JSON from an unusable
+                // text value.
                 .with_detail("field", "chunks.text")
                 .with_detail("path", &artifact.raw_path)
                 .with_detail("artifact_kind", artifact.kind)
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
+            // Check the chunk metadata object independently of the text. A legal
+            // metadata value can be empty, but its enclosing field must still have
+            // object type.
             self.require_artifact_object_field(
                 &obj,
                 "metadata",
@@ -1589,20 +2284,31 @@ impl BenchmarkManifestInput {
                 artifact,
                 line,
             )?;
+            // Read the chunk identity separately from its parent linkage. This
+            // identity is how later embeddings and relevance labels refer back to
+            // the benchmark set.
             let chunk_external_id = required_string(&obj, "chunk_external_id").map_err(|err| {
                 Error::new(err.code(), err.message())
+                    // Attach the row location before testing cross-row uniqueness.
+                    // This preserves the source position for a malformed ID even
+                    // when no valid string is available to insert.
                     .with_detail("field", "chunk_external_id")
                     .with_detail("path", &artifact.raw_path)
                     .with_detail("artifact_kind", artifact.kind)
                     .with_detail("line", line)
                     .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Require a nonblank chunk ID before inserting it into the global set.
+            // Preserve the exact spelling for cross-artifact lookup.
             self.require_nonempty_artifact_string(
                 &chunk_external_id,
                 "chunks.chunk_external_id",
                 artifact,
                 line,
             )?;
+            // Duplicate chunk IDs are invalid across the whole dataset even if
+            // their documents and ordinals differ. Return the duplicate row
+            // location.
             if !ids.insert(chunk_external_id.clone()) {
                 return Err(Error::new(
                     ErrorCode::DuplicateExternalId,
@@ -1616,6 +2322,9 @@ impl BenchmarkManifestInput {
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
         }
+        // The stream may contain only whitespace and still have its declared
+        // digest. Require at least one checked chunk before validating references
+        // from embeddings and relevance labels.
         if ids.is_empty() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -1629,6 +2338,9 @@ impl BenchmarkManifestInput {
         Ok(ids)
     }
 
+    // Use the raw JSON key for lookup and the qualified field label for
+    // diagnostics. Callers can identify the exact schema member without
+    // reconstructing it from the error text.
     fn require_artifact_object_field(
         &self,
         obj: &JsonObject,
@@ -1637,9 +2349,14 @@ impl BenchmarkManifestInput {
         artifact: &Artifact,
         line: usize,
     ) -> Result<()> {
+        // A missing member and a member of the wrong type are distinct failures.
+        // An empty object remains legal here because the check only establishes
+        // shape.
         match obj.get(field) {
             Some(JsonValue::Object(_)) => Ok(()),
             Some(_) => Err(Error::new(
+                // A value of null reaches the wrong-type branch. A missing key
+                // instead yields the distinct required-field error below.
                 ErrorCode::InvalidJsonlSchema,
                 format!("{detail_field} must be a JSON object"),
             )
@@ -1648,6 +2365,9 @@ impl BenchmarkManifestInput {
             .with_detail("artifact_kind", artifact.kind)
             .with_detail("line", line)
             .with_detail("manifest_path", &self.manifest_path_label)),
+            // Preserve the same artifact context for a missing key as for a
+            // wrong-type value. The error code tells callers which condition
+            // occurred.
             None => Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 format!("missing object field {detail_field}"),
@@ -1660,6 +2380,8 @@ impl BenchmarkManifestInput {
         }
     }
 
+    // Validate required content after the type check. Use trim only to decide
+    // whether the supplied string has any content.
     fn require_nonempty_artifact_string(
         &self,
         value: &str,
@@ -1681,32 +2403,56 @@ impl BenchmarkManifestInput {
         Ok(())
     }
 
+    // Resolve the expected hash from the descriptor's manifest field before
+    // opening a row stream. Every row and any final checksum error share that
+    // descriptor.
     fn read_artifact_objects<'a>(&'a self, artifact: &'a Artifact) -> Result<ArtifactRows<'a>> {
         let expected = self
+            // Use the root manifest's hashes object for member verification. It
+            // was validated for known fields and types before artifact-specific
+            // preflight.
             .hashes()?
             .get(artifact.hash_field)
             .and_then(JsonValue::as_str)
+            // Use the full hashes path when an expected value was never declared.
+            // A missing digest is a manifest error, independent of whether the
+            // data file is readable.
             .ok_or_else(|| {
                 self.missing_benchmark_field(&format!("hashes.{}", artifact.hash_field))
             })?;
         read_jsonl_objects(artifact, &self.manifest_path_label, &self.context, expected)
     }
 
+    // Attach the physical line when a later validation stage provides one. The
+    // shared helper retains a more specific location that the error already
+    // carries.
     fn locate_artifact_error(&self, error: Error, artifact: &Artifact, line: usize) -> Error {
         locate_artifact_error(error, artifact, &self.manifest_path_label, Some(line))
     }
 
+    // Text-only mode requires text and prohibits inline vectors. Check these rules
+    // before any execution code can infer a modality from the query payload.
     fn validate_text_only_queries(&self, queries: &[QueryRow]) -> Result<()> {
+        // Within this mode check, report vector presence before inspecting text.
+        // The artifact loader also validates each row's text when it first parses
+        // the workload.
         if let Some(row) = queries.iter().find(|row| row.has_embedding) {
             return Err(self.mode_conflict(format!(
                 "none mode query {} at line {} must not inline embedding",
                 row.query_id, row.line
             )));
         }
+        // Treat an absent retained text value like blank text. Either leaves the
+        // text-only request without searchable input.
         if let Some(row) = queries
             .iter()
+            // Use trimming to test for a populated lexical channel. The core
+            // search still applies its normal tokenization, so a nonblank string
+            // can produce no searchable terms.
             .find(|row| row.text.as_deref().unwrap_or("").trim().is_empty())
         {
+            // Include both query ID and source line in the validation failure so a
+            // producer can locate the unusable row.
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
                 "text-only benchmark query requires text",
@@ -1719,6 +2465,9 @@ impl BenchmarkManifestInput {
         Ok(())
     }
 
+    // Build an owned typed query vector and keep its allocation charged to the
+    // caller's reservation. The result can survive deletion of the decoded
+    // artifact row.
     fn vector_values(
         &self,
         value: &JsonValue,
@@ -1727,6 +2476,8 @@ impl BenchmarkManifestInput {
         artifact_kind: &str,
         work: &mut JsonReservation,
     ) -> Result<Vec<f32>> {
+        // Require the vector member to have array shape. Record which benchmark
+        // artifact and query supplied it so this error remains actionable.
         let values = value.as_array().ok_or_else(|| {
             Error::new(
                 ErrorCode::MissingRequiredField,
@@ -1739,10 +2490,18 @@ impl BenchmarkManifestInput {
             .with_detail("manifest_path", &self.manifest_path_label)
         })?;
         let mut vector = Vec::new();
+        // Charge typed capacity while the parsed JSON array is live. The actual
+        // array length controls the reservation. The manifest and row dimensions
+        // are declarations checked separately from allocation.
         work.reserve_vec(&mut vector, values.len(), JsonInputKind::QueryEmbedding)?;
+        // Inspect every coordinate as a numeric JSON value. A valid prefix is
+        // insufficient, since a later member can still invalidate the row.
         for entry in values {
             let value = entry.as_f64().ok_or_else(|| {
                 Error::new(
+                    // Use the vector validation category for a nonnumeric member.
+                    // The array's presence was already established, so this
+                    // failure describes its contents.
                     ErrorCode::InvalidVectorLength,
                     "query embedding vector entries must be finite numbers",
                 )
@@ -1750,6 +2509,9 @@ impl BenchmarkManifestInput {
                 .with_detail("line", line)
                 .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Narrow before testing finiteness. JSON may hold a finite binary64
+            // number that overflows when converted to a binary32 scoring
+            // coordinate.
             let value = value as f32;
             if !value.is_finite() {
                 return Err(Error::new(
@@ -1762,10 +2524,18 @@ impl BenchmarkManifestInput {
             }
             vector.push(value);
         }
+        // Check the library's typed query-vector processing rules after
+        // conversion. This ensures the values passed to scoring also fit the
+        // canonical spelling used for query limits.
         crate::json::validate_query_vector(&vector)?;
+        // Transfer the typed vector out while its caller-held charge remains
+        // active. The caller decides how long the query data must stay alive.
         Ok(vector)
     }
 
+    // Validate a collection embedding row and return only its width. Preflight can
+    // check its structure and binary32 range without keeping a second vector
+    // allocation.
     fn validate_embedding_vector(
         &self,
         value: &JsonValue,
@@ -1773,6 +2543,9 @@ impl BenchmarkManifestInput {
         line: usize,
         artifact: &Artifact,
     ) -> Result<usize> {
+        // Report the fully qualified embeddings.vector field and chunk identifier.
+        // The caller can map this failure to the source row without interpreting
+        // its position as a query index.
         let values = value.as_array().ok_or_else(|| {
             Error::new(
                 ErrorCode::MissingRequiredField,
@@ -1785,7 +2558,13 @@ impl BenchmarkManifestInput {
             .with_detail("line", line)
             .with_detail("manifest_path", &self.manifest_path_label)
         })?;
+        // Check that every coordinate remains finite when narrowed to f32. Only
+        // the length survives this pass. The importer builds its typed record when
+        // it captures the artifact later.
         for entry in values {
+            // Inspect the same binary64 values that import would narrow. The
+            // preflight pass avoids allocating typed copies for an entire
+            // embedding artifact.
             let value = entry.as_f64().ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidVectorLength,
@@ -1796,8 +2575,14 @@ impl BenchmarkManifestInput {
                 .with_detail("artifact_kind", artifact.kind)
                 .with_detail("chunk_external_id", chunk_external_id)
                 .with_detail("line", line)
+                // Carry the manifest and member labels together. The chunk ID
+                // identifies the embedding logically, and the physical line
+                // identifies it in the member file.
                 .with_detail("manifest_path", &self.manifest_path_label)
             })?;
+            // Validate in the precision storage uses, since the original JSON
+            // number's range may be wider. Return an artifact-specific error for
+            // an unrepresentable coordinate.
             let value = value as f32;
             if !value.is_finite() {
                 return Err(Error::new(
@@ -1812,9 +2597,14 @@ impl BenchmarkManifestInput {
                 .with_detail("manifest_path", &self.manifest_path_label));
             }
         }
+        // Return the array length after its contents passed. The caller compares
+        // the actual width with manifest and row declarations independently.
         Ok(values.len())
     }
 
+    // Report a field required by the manifest generally. Mode-dependent
+    // requirements use the separate constructor so the selected source is visible
+    // in the details.
     fn missing_benchmark_field(&self, field: &str) -> Error {
         Error::new(
             ErrorCode::MissingRequiredField,
@@ -1824,6 +2614,9 @@ impl BenchmarkManifestInput {
         .with_detail("manifest_path", &self.manifest_path_label)
     }
 
+    // Record the mode that made this field mandatory. The same manifest key can be
+    // required, optional or disallowed depending on how query vectors are
+    // supplied.
     fn missing_source_field(&self, field: &'static str) -> Error {
         Error::new(
             ErrorCode::MissingRequiredField,
@@ -1837,9 +2630,14 @@ impl BenchmarkManifestInput {
         .with_detail("manifest_path", &self.manifest_path_label)
     }
 
+    // Use a mode-conflict error when the artifact supplies incompatible inputs.
+    // Preserve the selected query embedding source and manifest label for
+    // remediation.
     fn mode_conflict(&self, message: impl Into<String>) -> Error {
         Error::new(ErrorCode::BenchmarkArtifactModeConflict, message)
             .with_detail(
+                // Expose the selected mode as data so a consumer need not parse it
+                // out of the mode-conflict message.
                 "query_embedding_source",
                 self.query_embedding_source.as_str(),
             )
@@ -1847,11 +2645,18 @@ impl BenchmarkManifestInput {
     }
 }
 
+// Keep the manifest schema closed to the recognized top-level keys. Adding a new
+// option elsewhere does not make a new manifest field accepted here.
 fn reject_unknown_benchmark_manifest_fields(
     obj: &JsonObject,
     manifest_path_label: &str,
 ) -> Result<()> {
+    // Inspect the entire root object for unknown keys. A recognizable subset
+    // cannot excuse a typo or a field introduced by a newer unsupported schema.
     for field in obj.keys() {
+        // Select the expected property family before checking mode combinations.
+        // For example, a sidecar property can be known to this schema while being
+        // disallowed for a text-only dataset.
         if !matches!(
             field.as_str(),
             "schema_version"
@@ -1862,6 +2667,9 @@ fn reject_unknown_benchmark_manifest_fields(
                 | "embeddings"
                 | "queries"
                 | "qrels"
+                // Accept the fields used by any supported query embedding source
+                // at this layer. Mode validation separately decides which of these
+                // may coexist in one manifest.
                 | "query_embedding_source"
                 | "query_embeddings"
                 | "embedding_model"
@@ -1875,6 +2683,8 @@ fn reject_unknown_benchmark_manifest_fields(
                 ErrorCode::InvalidJsonlSchema,
                 "benchmark dataset manifest contains unsupported field",
             )
+            // Use manifest as the error location for an unsupported root field.
+            // This failure concerns the accepted shape of the root object.
             .with_detail("field", "manifest")
             .with_detail("manifest_path", manifest_path_label));
         }
@@ -1882,7 +2692,11 @@ fn reject_unknown_benchmark_manifest_fields(
     Ok(())
 }
 
+// Validate the hash object's field names independently of the manifest root. Each
+// admitted name refers to one recognized artifact member.
 fn reject_unknown_benchmark_hash_fields(obj: &JsonObject, manifest_path_label: &str) -> Result<()> {
+    // Allow digest fields for artifacts that only some modes require. The selected
+    // mode later checks required values and rejects conflicting members.
     for field in obj.keys() {
         if !matches!(
             field.as_str(),
@@ -1897,6 +2711,9 @@ fn reject_unknown_benchmark_hash_fields(obj: &JsonObject, manifest_path_label: &
                 ErrorCode::InvalidJsonlSchema,
                 "benchmark dataset manifest hashes contains unsupported field",
             )
+            // Name the hashes object for an unknown digest key. Known digest keys
+            // receive a more specific hashes.member label when their associated
+            // value is invalid.
             .with_detail("field", "hashes")
             .with_detail("manifest_path", manifest_path_label));
         }
@@ -1904,8 +2721,16 @@ fn reject_unknown_benchmark_hash_fields(obj: &JsonObject, manifest_path_label: &
     Ok(())
 }
 
+// Validate hash value types and presence before any file comparison. A string can
+// still be wrong, so digest equality is checked against the actual artifact
+// stream.
 fn validate_benchmark_hash_field_values(obj: &JsonObject, manifest_path_label: &str) -> Result<()> {
+    // Validate every digest value present in the manifest, including optional
+    // ones. Later checks decide whether a recognized digest is applicable to the
+    // selected mode.
     for (field, value) in obj {
+        // Reject nonstring hash values before testing their content. Record the
+        // fully qualified hashes member so the caller can repair the manifest.
         let Some(hash) = value.as_str() else {
             return Err(Error::new(
                 ErrorCode::InvalidJsonlSchema,
@@ -1914,6 +2739,8 @@ fn validate_benchmark_hash_field_values(obj: &JsonObject, manifest_path_label: &
             .with_detail("field", format!("hashes.{field}"))
             .with_detail("manifest_path", manifest_path_label));
         };
+        // A blank hash is treated as missing information, while an actual digest
+        // is taken verbatim for comparison later.
         if hash.trim().is_empty() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -1926,27 +2753,47 @@ fn validate_benchmark_hash_field_values(obj: &JsonObject, manifest_path_label: &
     Ok(())
 }
 
+// Return an owned optional string when the value has that type. Callers that need
+// to distinguish a missing key from a wrong type use explicit validation.
 fn optional_string_field(obj: &JsonObject, field: &str) -> Option<String> {
     obj.get(field)
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
 }
 
+// Pair the parsed row with its physical line and memory guard. The query parser
+// carries the lexically captured top_k separately because the general JSON number
+// cannot distinguish all adjacent integers at the boundary.
 struct ArtifactObject {
+    // Physical JSONL line used when locating schema and cross-artifact errors.
     line: usize,
+    // Owned fields of this row after checking the artifact's allowed property
+    // names.
     obj: JsonObject,
+    // Memory charge kept with the parsed fields and transferable to retained
+    // conversions.
     _work: JsonReservation,
+    // Exact top_k captured by the query-row parser when present, before a JSON
+    // number could lose integer precision.
     search_top_k: Option<usize>,
 }
 
 // Rows remain provisional until exhaustion verifies the digest of the parsed stream.
 struct ArtifactRows<'a> {
+    // Descriptor shared with every row and final digest error from this stream.
     artifact: &'a Artifact,
+    // Identifies the owning manifest in failures surfaced by the iterator.
     manifest_path_label: &'a str,
+    // Active JSONL parser over a hashing reader. Taking it marks the iterator
+    // exhausted or failed.
     rows: Option<JsonLines<Sha256Reader<File>>>,
+    // Expected digest checked at the end of the same byte stream that supplied the
+    // rows.
     expected_sha256: &'a str,
 }
 
+// Enrich a row or stream error with the artifact location. Retain any already
+// populated path or physical line supplied by a more specific layer.
 fn locate_artifact_error(
     mut error: Error,
     artifact: &Artifact,
@@ -1955,15 +2802,23 @@ fn locate_artifact_error(
 ) -> Error {
     // Location is additive: core diagnostics, numeric types and original IO causes
     // survive unchanged. Only caller-supplied labels may enter public paths.
+    // Use the source labels from the descriptor rather than resolved filesystem
+    // paths. The benchmark identifies the caller's manifest and member by their
+    // supplied spellings.
     for (key, value) in [
         ("path", artifact.raw_path.as_str()),
         ("artifact_kind", artifact.kind),
         ("manifest_path", manifest),
     ] {
+        // Existing error details win when layers add context. A generic artifact
+        // wrapper must not replace a more precise path or line produced by the
+        // source failure.
         if !error.detail().iter().any(|(field, _)| field == key) {
             error = error.with_detail(key, value);
         }
     }
+    // Only add line when this caller knows it. Open and end-of-file checksum
+    // failures often belong to the whole artifact instead of a particular row.
     if let Some(line) = line {
         if !error.detail().iter().any(|(key, _)| key == "line") {
             error = error.with_detail("line", line);
@@ -1972,6 +2827,9 @@ fn locate_artifact_error(
     error
 }
 
+// Use a dedicated checksum mismatch error together with both digests. The manifest
+// key and artifact label identify exactly which declared input failed
+// verification.
 fn artifact_hash_mismatch(
     artifact: &Artifact,
     manifest: &str,
@@ -1982,31 +2840,52 @@ fn artifact_hash_mismatch(
         ErrorCode::ChecksumMismatch,
         format!("{} hash mismatch", artifact.kind),
     )
+    // Point at the manifest's digest field, even though the bytes being checked
+    // came from a member file.
     .with_detail("field", format!("hashes.{}", artifact.hash_field))
     .with_detail("path", &artifact.raw_path)
     .with_detail("artifact_kind", artifact.kind)
+    // Report the expected and observed SHA-256 independently. A caller can verify
+    // the manifest's recorded value without losing the digest computed from the
+    // file.
     .with_detail("expected_sha256", expected)
     .with_detail("actual_sha256", actual)
     .with_detail("manifest_path", manifest)
 }
 
+// Hash the same descriptor that supplies the decoder. A successful digest covers
+// the bytes consumed during this pass, including line separators. It does not say
+// that a later open of the pathname will select the same file or contents.
 fn read_jsonl_objects<'a>(
     artifact: &'a Artifact,
     manifest_path_label: &'a str,
     context: &JsonOperationContext,
     expected_sha256: &'a str,
 ) -> Result<ArtifactRows<'a>> {
+    // Use the resolved path for I/O and the caller-supplied label for diagnostics.
+    // An open failure occurs before there is a row number.
     let file = fs::File::open(&artifact.path)
         .map_err(|err| locate_artifact_error(err.into(), artifact, manifest_path_label, None))?;
+    // Select the schema before reading rows. Query top-k and query embedding
+    // arrays need their own parsing behavior, while qrels use the general
+    // benchmark record form.
     let schema = match artifact.kind {
         "documents" => JsonSchema::DocumentRow,
         "chunks" => JsonSchema::ChunkRow,
         "embeddings" => JsonSchema::EmbeddingRow,
         "queries" => JsonSchema::QueryRow,
+        // Use the dedicated query embedding record schema for sidecar rows, so its
+        // vector member receives the same processing context as an inline query
+        // vector.
         "query_embeddings" => JsonSchema::QueryEmbeddingObject,
         _ => JsonSchema::BenchmarkRecord,
     };
+    // Apply the JSON line reader over the hashing input. This path uses the
+    // maximum stream byte setting while row-level JSON limits still apply.
     let rows = JsonLines::new(Sha256Reader::new(file), schema, context, u64::MAX)
+        // Construction can fail before the first decoded record. Add descriptor
+        // context here and let the iterator add physical lines for errors raised
+        // while reading.
         .map_err(|error| locate_artifact_error(error, artifact, manifest_path_label, None))?;
     Ok(ArtifactRows {
         artifact,
@@ -2016,13 +2895,24 @@ fn read_jsonl_objects<'a>(
     })
 }
 
+// Yield one row at a time, with a terminal checksum error if all decoding finishes
+// but the exact stream fails its expected digest.
 impl Iterator for ArtifactRows<'_> {
     type Item = Result<ArtifactObject>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Give a row error its original precedence. Only normal exhaustion enters
+        // final digest comparison.
         let row = match self.rows.as_mut()?.next() {
             Some(row) => row,
+            // The normal EOF branch closes the digest over every raw byte read,
+            // including blank lines and framing. Hashing reconstructed JSON would
+            // lose this identity.
             None => {
+                // Take the reader before comparing the digest. The final mismatch
+                // is yielded once, and a successful comparison yields no
+                // additional row. Consumers must exhaust the iterator to reach
+                // either outcome.
                 let actual = self.rows.take().unwrap().into_inner().finish();
                 return (actual != self.expected_sha256).then(|| {
                     Err(artifact_hash_mismatch(
@@ -2035,14 +2925,28 @@ impl Iterator for ArtifactRows<'_> {
             }
         };
         let result = (|| {
+            // Use the same artifact labels for a parser failure, wrong root type
+            // and unsupported key. A caller can identify the source consistently
+            // across validation stages.
             let artifact = self.artifact;
             let manifest_path_label = self.manifest_path_label;
+            // Preserve errors from the JSON line reader, including its physical
+            // line, then supply missing artifact details. A row error aborts the
+            // stream below.
             let (line, parsed) = row.map_err(|error| {
                 locate_artifact_error(error, artifact, manifest_path_label, None)
             })?;
+            // Keep the parsed reservation and exact top-k alongside the object
+            // fields. Moving the map out avoids copying its keys and values.
             let (mut value, work, search_top_k) = parsed.into_parts_with_search_top_k();
+            // Reject scalar or array rows before inspecting allowed fields. An
+            // artifact can have valid JSON syntax without containing the required
+            // object shape.
             let obj = value.as_object_mut().map(std::mem::take).ok_or_else(|| {
                 Error::new(
+                    // Distinguish valid JSON with a non-object root from
+                    // unreadable JSON. Downstream artifact validators expect a map
+                    // of named fields.
                     ErrorCode::InvalidJsonlSchema,
                     format!("{} row must be a JSON object", artifact.kind),
                 )
@@ -2051,7 +2955,13 @@ impl Iterator for ArtifactRows<'_> {
                 .with_detail("line", line)
                 .with_detail("manifest_path", manifest_path_label)
             })?;
+            // Check allowed keys before handing the object to artifact-specific
+            // logic. Common row checks stay with the iterator so every consumer
+            // receives the same validation.
             reject_unknown_benchmark_artifact_fields(&obj, artifact, line, manifest_path_label)?;
+            // The caller can move individual fields out of this object. Carry the
+            // original reservation through that transfer so handing off the map
+            // cannot release credit for the still-live data.
             Ok(ArtifactObject {
                 line,
                 obj,
@@ -2059,6 +2969,8 @@ impl Iterator for ArtifactRows<'_> {
                 search_top_k,
             })
         })();
+        // Discard the active reader on an error. Once validation stops, a later
+        // next call must not surface a checksum for only the consumed prefix.
         if result.is_err() {
             self.rows = None;
         }
@@ -2066,14 +2978,20 @@ impl Iterator for ArtifactRows<'_> {
     }
 }
 
+// The terminal state is represented by absence of the reader. Both successful EOF
+// and any yielded error leave subsequent calls at None.
 impl std::iter::FusedIterator for ArtifactRows<'_> {}
 
+// Match allowed properties to the artifact's declared kind. Validation of required
+// members and their values belongs to callers parsing that specific row type.
 fn reject_unknown_benchmark_artifact_fields(
     obj: &JsonObject,
     artifact: &Artifact,
     line: usize,
     manifest_path_label: &str,
 ) -> Result<()> {
+    // Select the row-level allowlist for known benchmark members. Unknown
+    // descriptor kinds have no special property screening in this helper.
     let allowed = match artifact.kind {
         "documents" => BENCHMARK_DOCUMENT_FIELDS,
         "chunks" => BENCHMARK_CHUNK_FIELDS,
@@ -2081,8 +2999,13 @@ fn reject_unknown_benchmark_artifact_fields(
         "queries" => BENCHMARK_QUERY_FIELDS,
         "qrels" => BENCHMARK_QREL_FIELDS,
         "query_embeddings" => BENCHMARK_QUERY_EMBEDDING_FIELDS,
+        // Qrels uses the general parser schema and has an explicit allowlist
+        // above. A new kind that falls through both matches would be decoded
+        // without row-specific property checks.
         _ => return Ok(()),
     };
+    // Check only top-level keys. Nested metadata and other fields have their own
+    // validation rules where they are interpreted.
     for field in obj.keys() {
         if !allowed.contains(&field.as_str()) {
             return Err(Error::new(
@@ -2091,6 +3014,8 @@ fn reject_unknown_benchmark_artifact_fields(
             )
             .with_detail("field", artifact.kind)
             .with_detail("path", &artifact.raw_path)
+            // Report the artifact identity and physical row together. A disallowed
+            // top-level field has the same validation category across artifacts.
             .with_detail("artifact_kind", artifact.kind)
             .with_detail("line", line)
             .with_detail("manifest_path", manifest_path_label));
@@ -2099,6 +3024,9 @@ fn reject_unknown_benchmark_artifact_fields(
     Ok(())
 }
 
+// Report mismatched dimensions with the manifest width, row declaration and actual
+// vector length. Keeping all three values identifies which source contradicted the
+// rest.
 fn invalid_vector_len(
     manifest_path: &str,
     query_id: &str,
@@ -2111,6 +3039,8 @@ fn invalid_vector_len(
         "query embedding dimension does not match dataset manifest",
     )
     .with_detail("query_id", query_id)
+    // Keep independent dimensions in typed numeric details for callers that
+    // compare them programmatically.
     .with_u64_detail("expected_dim", expected_dim as u64)
     .with_u64_detail("row_dim", row_dim as u64)
     .with_u64_detail("actual_vector_length", actual_vector_length as u64)

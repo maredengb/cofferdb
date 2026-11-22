@@ -8,19 +8,32 @@ use std::collections::BTreeSet;
 
 #[derive(Default)]
 struct TermCounts {
+    // Occurrences of this query term in the chunk currently being tokenized. Reset
+    // for each chunk in both passes.
     frequency: usize,
+    // Number of collection chunks containing this term at least once, accumulated
+    // during the first pass and reused throughout scoring.
     document_frequency: usize,
 }
 
+// Both the statistics pass and the scoring pass call this same tokenizer. A change
+// in what counts as a token can alter document length as well as term frequency,
+// even when the extra token is absent from the query.
 fn count_terms(
     text: &str,
     terms: &QueryTerms<'_>,
     counts: &mut [TermCounts],
     context: &JsonOperationContext,
 ) -> Result<usize> {
+    // Keep the collection-level counts across chunks. Only the per-chunk
+    // frequencies are reset here, so a repeated term can increase term frequency
+    // several times while contributing only one document to its document frequency.
     for count in counts.iter_mut() {
         count.frequency = 0;
     }
+    // Count all emitted tokens toward normalization. Only a member of the query
+    // vocabulary needs an occurrence counter, so the per-chunk work array depends
+    // on the query's size.
     let mut length = 0;
     crate::tokenizer::visit_tokens_in(text, context, |token| {
         length += 1;
@@ -29,10 +42,16 @@ fn count_terms(
         }
         Ok(())
     })?;
+    // A chunk that produces no tokens still contributes one unit to the corpus
+    // length and keeps a positive scoring length. This matches the length stored
+    // in the text index.
     Ok(length.max(1))
 }
 
 impl TextIndex {
+    // The snapshot supplies visibility while the callback supplies text for each
+    // selected version. Holding one snapshot across both passes keeps their chunk
+    // population consistent as corpus statistics become scores.
     pub(crate) fn search_from_snapshot<F, T>(
         snapshot: &VisibleSnapshot<'_>,
         collection_id: &str,
@@ -45,6 +64,9 @@ impl TextIndex {
         F: FnMut(&VisibleChunk<'_>) -> Result<T>,
         T: AsRef<str>,
     {
+        // Leave the ID filter absent for lexical recall. After corpus statistics
+        // are fixed, the second pass may choose any matching chunk in this
+        // collection for the bounded result.
         Self::search_snapshot_selected(
             snapshot,
             collection_id,
@@ -68,6 +90,9 @@ impl TextIndex {
         F: FnMut(&VisibleChunk<'_>) -> Result<T>,
         T: AsRef<str>,
     {
+        // Score completion needs term contributions for the rows already named by
+        // another retrieval route. Keep the caller's row count as the limit so one
+        // requested chunk's low or zero lexical score cannot displace it.
         Self::search_snapshot_selected(
             snapshot,
             collection_id,
@@ -94,21 +119,36 @@ impl TextIndex {
         T: AsRef<str>,
     {
         let limit = options.limit;
+        // Skip both passes for a zero output limit. In particular, the fallback
+        // does not need to open chunk payloads or allocate query vocabulary
+        // storage just to return an empty list.
         if limit == 0 {
             return Ok(Bm25Hits::empty(context));
         }
         let terms = crate::tokenizer::query_terms_in(query, context)?;
+        // The scan has no postings list. Its first pass computes document frequencies
+        // and average length across the whole collection, even when the caller asks
+        // for scores for a few IDs. Restricting these statistics to those IDs would
+        // give them different BM25 scores from the ordinary retrieval path.
+        // The table scales with the query vocabulary. Each slot holds the current
+        // chunk's count alongside its accumulating document frequency, avoiding
+        // storage proportional to all chunks or all corpus terms.
         let mut counts = ReservedVec::with_capacity(terms.len(), context, "operation_scratch")?;
         for _ in 0..terms.len() {
             counts.push(TermCounts::default());
         }
         let mut chunks = 0;
         let mut total_length = 0;
-        // First pass fixes collection-wide BM25 statistics without retaining postings.
+        // Both passes iterate the same visible snapshot. Ignore foreign collection
+        // rows before loading any text so their terms and lengths cannot change
+        // this collection's scores.
         for visible in snapshot.live_chunks() {
             if visible.chunk.collection_id != collection_id {
                 continue;
             }
+            // Charge a text visit only after the collection filter and before
+            // attempting the payload read. The second pass counts any repeated
+            // visit to that same document separately.
             context.search_cost_add(crate::search_cost::Counter::TextDocumentVisits, 1);
             total_length += count_terms(
                 load_text(&visible)?.as_ref(),
@@ -116,11 +156,23 @@ impl TextIndex {
                 counts.as_mut_slice(),
                 context,
             )?;
+            // Every visible chunk in the collection contributes to the population,
+            // including a chunk with no matching terms. Its effective length still
+            // influences the average used for other chunks.
             chunks += 1;
             for count in counts.as_mut_slice() {
+                // A chunk contributes at most one document even if the term
+                // repeats. This pass uses the occurrence count only as a presence
+                // test. Scoring counts it again when the chunk is loaded.
                 count.document_frequency += usize::from(count.frequency != 0);
             }
         }
+        // Ordinary recall with no matching term is already complete. A selected-ID
+        // lookup must still visit the requested chunks and return their real zero
+        // scores if they exist.
+        // An empty visible collection returns immediately for either mode.
+        // Dividing by chunks and checking requested-ID completeness below both
+        // require reaching the nonempty-collection path.
         if chunks == 0
             || (ids.is_none()
                 && counts
@@ -130,20 +182,35 @@ impl TextIndex {
         {
             return Ok(Bm25Hits::empty(context));
         }
+        // count_terms gives even a tokenless chunk an effective length of one.
+        // Thus a nonempty collection has a positive average here even if none of
+        // its texts produced a token.
         let avg_len = total_length as f64 / chunks as f64;
+        // Compute each term's inverse document frequency once from the complete
+        // corpus. Keep its index aligned with the query terms and counts as each
+        // second-pass chunk is retokenized.
         let mut idfs = ReservedVec::with_capacity(terms.len(), context, "operation_scratch")?;
         for count in counts.as_slice() {
             let df = count.document_frequency as f64;
             idfs.push(((chunks as f64 - df + 0.5) / (df + 0.5) + 1.0).ln());
         }
         let idfs = idfs.as_slice();
+        // With collection statistics fixed, load text again to score each eligible
+        // chunk. Ordinary recall retains a bounded ranked window. Score completion
+        // needs an entry for every requested ID, including zero matches, in ID order
+        // for the later merge.
         let mut candidates = TextCandidates::new(limit, context);
+        // Allocating the selected table can fail before the first eligible
+        // second-pass row. Its known bound avoids growing the result in response
+        // to each payload that the scan happens to encounter.
         let mut selected = ids
             .map(|ids| Bm25Hits::with_capacity(ids.len(), context))
             .transpose()?;
-        // Second pass retains only top-k candidates and any requested explanations.
         for visible in snapshot.live_chunks() {
             if visible.chunk.collection_id != collection_id
+                // Completion supplies chunk ID strings in lexical order.
+                // Binary-search that slice before opening a payload on this second
+                // pass. The first pass still visited every collection member.
                 || ids
                     .is_some_and(|ids| ids.binary_search(&visible.chunk.chunk_id.as_str()).is_err())
             {
@@ -158,20 +225,33 @@ impl TextIndex {
             )?;
             let mut score = 0.0;
             let mut matched_count = 0;
+            // The counts now describe this chunk's occurrences while the IDFs
+            // still describe the first pass's collection. Accumulate one
+            // contribution per distinct matching term, using this chunk's own
+            // length.
             for (count, idf) in counts.as_slice().iter().zip(idfs) {
                 if count.frequency != 0 {
                     matched_count += 1;
                     score += contribution(count.frequency, length, avg_len, *idf);
                 }
             }
+            // Omit an unmatched chunk from the lexical recall window. Score
+            // completion was explicitly asked about its ID, so keep a zero-scoring
+            // row with an empty term list in that case.
             if matched_count == 0 && ids.is_none() {
                 continue;
             }
             let matched_terms = terms
                 .iter()
+                // A score-only query takes no explanation entries. Ranking has
+                // already used the full occurrence counts, so suppressing term
+                // details changes neither the score nor the admission order.
                 .take(if options.explanations { terms.len() } else { 0 })
                 .enumerate()
                 .filter(|(index, _)| counts.as_slice()[*index].frequency != 0)
+                // This iterator borrows counts that will be overwritten for the
+                // next chunk. A retained hit copies the matched fields while they
+                // still describe the row just scored.
                 .map(|(index, term)| MatchedTerm {
                     document_frequency: counts.as_slice()[index].document_frequency,
                     chunk_length: length,
@@ -185,13 +265,22 @@ impl TextIndex {
                         idfs[index],
                     ),
                 });
+            // Completion pre-admitted enough output slots for the supplied IDs.
+            // Ordinary recall hands the borrowed details to the bounded heap,
+            // which can reject a losing row before copying them.
             if let Some(selected) = &mut selected {
                 selected.push(&visible.chunk.chunk_id, score, matched_terms)?;
             } else {
                 candidates.push(&visible.chunk.chunk_id, score, matched_terms)?;
             }
         }
+        // Completion joins by ID in fusion. Check that every requested visible
+        // chunk supplied a row before sorting the table, or a missing chunk could
+        // be mistaken for a genuine zero match.
         if let Some(mut selected) = selected {
+            // The snapshot supplies at most one row per visible chunk. A missing
+            // ID or a repeated requested ID consequently leaves the nonempty
+            // collection's completion table short.
             if selected.len() != ids.unwrap().len() {
                 return Err(crate::Error::new(
                     crate::ErrorCode::RecoveryError,
@@ -201,6 +290,9 @@ impl TextIndex {
             selected.sort_by_id();
             Ok(selected)
         } else {
+            // The candidate heap finishes in ranking order for ordinary recall.
+            // Completion instead returns the ID-ordered table consumed by score
+            // fusion.
             Ok(candidates.finish())
         }
     }

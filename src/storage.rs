@@ -1,3 +1,19 @@
+//! The main log contains batches of data records delimited by commit records.
+//! Catalog entries may refer back to payloads in that log. The optional index
+//! checkpoint follows the last committed batch and can be replaced on append.
+//!
+//! Recovery has to distinguish an interrupted main-data write from a damaged
+//! checkpoint. Losing the former may hide business records; losing a recognized
+//! checkpoint leaves the committed records available for an index rebuild.
+//! Main-log append, checkpoint replacement and compaction publish at different
+//! boundaries. An append confirms a new commit in the existing file. A checkpoint
+//! starts at the committed end and replaces any previous index suffix without
+//! moving that boundary. Compaction validates a separate main log before changing
+//! the pathname to a new inode.
+//!
+//! Keep catalog payload references with their original descriptor until the reader
+//! releases that view. A reopened pathname can already refer to a different
+//! generation after compaction.
 use crate::physical_file::ManagedFile;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
@@ -16,6 +32,11 @@ use crate::model::{Chunk, CollectionInfo, DistanceMetric, Document, Embedding, T
 use crate::profile::Durability;
 use crate::time;
 
+// The main log has the file header followed by zero or more batches. For example, a
+// batch containing a document and its chunk places those two frames before a single
+// commit. A checkpoint, when present, starts immediately after the last commit. A
+// catalog payload offset points into a data frame. An index extent instead names a
+// range within one particular checkpoint.
 mod checkpoint_writer;
 mod codec;
 mod index_source;
@@ -42,8 +63,17 @@ pub(crate) use prepared::{
 };
 pub(crate) use vector_cache::{CachedVectorSegment, VectorCache};
 
+// Both file codecs start with the same magic. The fields that follow choose the
+// header layout and checksum rules. Use the on-disk lengths when computing offsets.
+// The Rust structures below contain decoded values and can have an entirely
+// different size.
 const MAGIC: &[u8; 8] = b"COFFERDB";
+/// Version recorded in the main file header. The derived-index suffix has its own
+/// version and compatibility checks.
 pub const FORMAT_VERSION: u16 = 1;
+// All lengths in this group are byte counts. A main-log frame consists of a fixed
+// header and the encoded payload. Even a commit has its own frame. Batch sizing
+// must leave room for the complete commit after the last data record.
 const HEADER_LEN: usize = 58;
 const RECORD_HEADER_LEN: usize = 50;
 pub(crate) const COMMIT_RECORD_BYTES: u64 =
@@ -55,28 +85,50 @@ pub(crate) fn encoded_record_len(record: &RecordPayload) -> Result<u64> {
         .checked_add(RECORD_HEADER_LEN as u64)
         .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "record length overflow"))
 }
+// The older layout has no binary record magic at the beginning of each frame. Keep
+// its header sizes separate so that a stored payload reference lands on the first
+// byte of its JSON body.
 const LEGACY_HEADER_LEN: usize = 42;
 const LEGACY_RECORD_HEADER_LEN: usize = 40;
+// A checkpoint occupies the suffix after the committed main stream. The outer
+// header names the commit it covers and gives the sizes of the index payload and
+// extent table. Within the payload, each index record has its own header. A trailer
+// marks completion of the entire suffix.
 const INDEX_CHECKPOINT_MAGIC: &[u8; 8] = b"CFIDXCHK";
 const INDEX_COMPLETE_MARKER: &[u8; 4] = b"CFOK";
 const INDEX_RECORD_MAGIC: &[u8; 4] = b"CFIR";
 const INDEX_CHECKPOINT_VERSION: u16 = 1;
 const INDEX_CHECKPOINT_HEADER_LEN: usize = 105;
 const INDEX_CHECKPOINT_TRAILER_LEN: usize = 10;
+// Coverage describes the full visible snapshot at one commit. The extent directory
+// lets readers locate individual index records without confusing a partial or stale
+// set of segments with the complete catalog named by the checkpoint.
 const INDEX_COVERAGE_FULL_VISIBLE_SNAPSHOT: u8 = 1;
 const INDEX_RECORD_HEADER_LEN: usize = 50;
 const INDEX_EXTENT_ENTRY_LEN: usize = 46;
 const INDEX_COMMIT_METADATA_LEN: usize = 58;
+// These type codes belong to the checkpoint record namespace. The commit metadata
+// describes coverage of an existing main-log commit. Reading it never commits a new
+// batch of business records.
 const INDEX_COMMIT_METADATA: u16 = 0x8001;
 const INDEX_TEXT_SEGMENT: u16 = 0x8002;
 const INDEX_VECTOR_SEGMENT: u16 = 0x8003;
 const TEXT_INDEX_KIND_BM25: u16 = 1;
 const VECTOR_INDEX_KIND_EXACT_F32: u16 = 2;
+// A text segment carries its own schema version and tokenizer identity. Recovery
+// has to recognize both before interpreting postings. The outer checkpoint format
+// can remain recognizable even when its contained text format cannot be used.
 const INDEX_SEGMENT_SCHEMA_VERSION: u16 = 1;
 const TEXT_SEGMENT_SCHEMA_VERSION: u16 = 2;
 const DEFAULT_EN_TOKENIZER_ID: u16 = 1;
+// Limit the payload length independently of the header, extent table and trailer.
+// It comes from the file and is checked before the reader uses the declared range
+// for index traversal.
 const MAX_INDEX_CHECKPOINT_PAYLOAD_LEN: u64 = 512 * 1024 * 1024;
 
+// Main-log record type numbers appear on disk. The payload decoder uses the type
+// from the record header, and the commit validator also includes binary data-frame
+// headers in the batch checksum.
 const COLLECTION_CREATE: u16 = 1;
 const COLLECTION_DROP: u16 = 2;
 const DOCUMENT_PUT: u16 = 3;
@@ -86,43 +138,109 @@ const TOMBSTONE: u16 = 6;
 const COMMIT: u16 = 7;
 const COMPACT_MARKER: u16 = 8;
 
+/// Decoded body of a main-log record. A catalog scan can retain just the identity
+/// and metadata needed for replay alongside the record's file reference. A caller
+/// that needs full chunk text or vector components can read that body from the
+/// referenced frame.
 #[derive(Clone, Debug)]
 pub enum RecordPayload {
+    /// Defines the collection identity and the configuration under which its chunks
+    /// and embeddings are interpreted.
     CollectionCreate(CollectionInfo),
+    /// Closes the lifetime of a collection by its stored ID. The name and other
+    /// details belong to the drop record and need not be retained in its catalog
+    /// summary.
     CollectionDrop {
+        /// Persistent ID of the collection being dropped. Replay uses it to locate
+        /// the collection and reserve its name.
         collection_id: String,
+        /// Collection name at the time of the drop. The compact in-memory summary
+        /// can omit the text.
         name: String,
+        /// Timestamp supplied for the drop and carried into the catalog's deletion
+        /// state.
         dropped_at: String,
+        /// Optional explanation supplied for the drop. An absent reason is a valid
+        /// record.
         reason: Option<String>,
     },
+    /// Installs the document identified in the payload. Readers that retain
+    /// metadata can still locate the original frame.
     DocumentPut(Document),
+    /// Associates a chunk with its document and collection. Its full text can be
+    /// read from the record later.
     ChunkPut(Chunk),
+    /// Associates vector data with a chunk. A summary can carry the dimension and
+    /// IDs while leaving the vector on disk.
     EmbeddingPut(Embedding),
+    /// Records deletion by target type and ID. A tombstone can precede its target.
+    /// Replay also uses the ID to recover the allocation high watermark for its
+    /// namespace.
     Tombstone(Tombstone),
+    /// Terminates one batch. Recovery checks the pending data records against this
+    /// body before making them visible.
     Commit(CommitPayload),
+    /// Carries the ID allocation history and a checksum of the rewritten data into
+    /// the compacted file.
     CompactMarker(CompactMarker),
 }
 
+/// Evidence that a particular range of data records belongs to one completed batch.
+/// The commit frame has its own sequence number after that range. It is excluded
+/// from the count and from the checksum described here.
 #[derive(Clone, Debug)]
 pub struct CommitPayload {
+    /// ID shared by the data frames and the commit frame. Binary recovery checks it
+    /// against the enclosing frame header.
     pub batch_id: u64,
+    /// Sequence number of the first data frame, inclusive.
     pub first_sequence_no: u64,
+    /// Sequence number of the last data frame, inclusive. In a binary batch the
+    /// commit itself must occupy the next sequence.
     pub last_sequence_no: u64,
+    /// Number of data records delimited by this commit. A compact marker in the
+    /// batch is a data record for this purpose.
     pub record_count: usize,
+    /// Binary files store the CRC32C over the data frames, including their headers,
+    /// in this value. The legacy codec combines its per-payload checksums by XOR.
     pub batch_checksum: u64,
+    /// Commit timestamp decoded for the caller. Replay establishes log order from
+    /// sequence numbers, independently of wall-clock ordering.
     pub committed_at: String,
 }
 
+/// State carried across a compaction that discards superseded records. The
+/// surviving records alone cannot establish all of the old ID allocation history.
+/// The marker also binds the rewrite to a checksum over its preceding data frames.
 #[derive(Clone, Debug)]
 pub struct CompactMarker {
+    /// Identifies this rewrite generation. The compactor uses the source's last
+    /// commit sequence when producing a binary marker.
     pub compact_generation: u64,
+    /// Sequence number of the last commit in the source file. For binary recovery
+    /// it must precede the first sequence of the output batch containing this
+    /// marker.
     pub source_last_commit_sequence_no: u64,
+    /// Time recorded when preparing the compaction. It is descriptive and does not
+    /// establish the order of commits.
     pub compacted_at: String,
+    /// Number of live collection, document, chunk and embedding records rewritten.
+    /// The compactor counts retained drop history and the marker separately when
+    /// planning output frames.
     pub records_rewritten: usize,
+    /// Greatest allocated numeric suffix for each stored ID prefix. For example,
+    /// deleting the highest-numbered document and compacting away its put record
+    /// must still leave the next document ID above it.
     pub id_high_watermarks: BTreeMap<String, u64>,
+    /// CRC32C of preceding binary data frames in the replacement, accumulated
+    /// across batch boundaries. Commit frames and this marker's own frame are
+    /// excluded from the value being checked.
     pub compacted_main_checksum: u32,
 }
 
+// Selects the file and frame layout after the common file prefix has been read.
+// Legacy frames carry JSON payloads. A fresh file or compacted replacement uses the
+// binary codec.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum FileCodec {
     Legacy,
@@ -130,69 +248,146 @@ enum FileCodec {
     Binary,
 }
 
+/// Location and integrity information for one encoded payload in its source file.
+/// Opening a reader on the same file preserves the meaning of these absolute
+/// offsets across a later pathname replacement.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PayloadRef {
+    /// Absolute byte offset of the first payload byte, immediately after its frame
+    /// header.
     pub offset: u64,
+    /// Encoded payload length in bytes. The size of a decoded value or catalog
+    /// summary can differ.
     pub len: u64,
+    /// Checksum stored for the payload bytes. The source file's codec selects the
+    /// legacy 64-bit checksum or binary CRC32C.
     pub checksum: u64,
 }
 
+/// Identifies both the physical frame and its place in the batch. This lets the
+/// catalog retain a small summary while later reads verify and decode the
+/// referenced bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordRef {
+    /// Absolute byte offset of the record header, useful when identifying a damaged
+    /// frame.
     pub offset: u64,
+    /// Stable name corresponding to the on-disk record type. Selects the payload
+    /// decoder on a later read.
     pub record_type: &'static str,
+    /// Batch ID read from the frame header, also carried by the batch's commit.
     pub batch_id: u64,
+    /// Sequence number of this individual frame in the main log.
     pub sequence_no: u64,
+    /// Payload range and checksum within the same file as the frame header.
     pub payload: PayloadRef,
 }
 
+/// A record delivered to the catalog after batch validation, or returned from a
+/// completed append. It pairs replay data with the file reference used to retrieve
+/// omitted fields.
 #[derive(Clone, Debug)]
 pub struct CommittedRecord {
+    /// Decoded data available to apply to the catalog. A binary scan may omit large
+    /// fields from this representation.
     pub payload: RecordPayload,
+    /// Identifies the original data frame even when the retained payload is only a
+    /// summary.
     pub record_ref: RecordRef,
+    // Per-payload checksum retained separately for the legacy commit's XOR
+    // calculation. Binary recovery accumulates its batch CRC from encoded bytes as
+    // they are read.
     payload_checksum: u64,
 }
 
+/// Describes a finished physical batch. A writer that collects individual records
+/// returns them in log order for the caller to apply to the catalog.
 #[derive(Debug)]
 pub struct AppendSummary {
+    /// Body of the emitted commit. Its sequence range and count describe the data
+    /// frames.
     pub commit: CommitPayload,
+    /// Sequence number of the commit frame itself. This is the position used when
+    /// binding a checkpoint to the new log tip.
     pub commit_sequence_no: u64,
+    /// Data records collected for the caller. A replacement writer can omit this
+    /// list and validate the replacement by scanning it afterwards.
     pub records: Vec<CommittedRecord>,
+    // Keeps the owned commit timestamp charged for the lifetime of the summary when
+    // a reservation accompanied it.
     _commit_work: Option<crate::json::WorkspaceReservation>,
 }
 
+/// Result of scanning one file image. The accepted commit and its byte boundary
+/// describe the visible prefix. Counts of frames examined and diagnostics can
+/// include further uncommitted input.
 #[derive(Debug, Default)]
 #[cfg_attr(test, derive(Clone))]
 pub struct ScanReport {
+    // Codec selected by the file header. Reuse it for subsequent reads using the
+    // references obtained from this scan.
     codec: FileCodec,
     #[cfg(test)]
     pub records: Vec<CommittedRecord>,
+    /// Findings encountered while scanning main data and the optional index. Their
+    /// stream and visibility impact let callers distinguish a blocking error from
+    /// disposable tail bytes.
     pub findings: Vec<CheckIssue>,
+    /// Checkpoint description when enough of the suffix could be decoded. Consult
+    /// the findings as well because a parsed checkpoint can carry diagnostics.
     pub index_suffix: Option<IndexSuffixReport>,
     #[cfg(test)]
     pub index_checkpoint: Option<IndexCheckpointPayload>,
+    /// Source of on-demand segment reads when scanning retained a usable index
+    /// directory. A summary scan can report checkpoint metadata without keeping
+    /// this source.
     pub lazy_vector_checkpoint: Option<LazyVectorCheckpoint>,
+    /// Number of decoded main-log frames examined, including commit frames and data
+    /// that may still be awaiting a commit.
     pub records_scanned: usize,
+    /// Number of commit frames accepted with their data batches.
     pub commits: usize,
+    /// ID of the last accepted commit batch. Zero represents a file with no
+    /// accepted commit.
     pub last_valid_commit: u64,
+    /// Sequence number of that commit frame. Zero before the first accepted batch.
     pub last_valid_commit_sequence_no: u64,
+    /// Exclusive byte end of the committed main stream, initially the end of the
+    /// file header. Repair and append use this position independently of the
+    /// physical file length.
     pub critical_end_offset: u64,
+    /// Highest batch ID observed among decoded frames. An uncommitted tail can
+    /// advance this past the last valid commit.
     pub max_batch_id: u64,
+    /// Highest sequence number observed among decoded frames, including frames in
+    /// an unfinished batch.
     pub max_sequence_no: u64,
 }
 
+/// A single finding from a read-only scan of the database or its derived index.
 #[derive(Clone, Debug)]
 pub struct CheckIssue {
+    /// Severity used to derive the overall check status.
     pub severity: String,
+    /// Machine-readable identifier for this finding.
     pub code: String,
+    /// Human-readable explanation of the finding.
     pub message: String,
+    /// Storage stream in which the issue was observed.
     pub stream: String,
+    /// Classification of how the issue affects access to committed data.
     pub visibility_impact: String,
+    /// Byte offset in the file, when it can be identified.
     pub offset: Option<u64>,
+    /// Storage extent associated with the finding, when known.
     pub extent_id: Option<String>,
+    /// Kind of record involved, when known.
     pub record_type: Option<String>,
+    /// Commit batch associated with the finding, when known.
     pub batch_id: Option<u64>,
+    /// Whether the checker identifies a supported repair for this issue.
     pub repair_available: bool,
+    /// Suggested CLI action when one can safely be associated with this finding.
     pub suggested_command: Option<String>,
 }
 
@@ -204,17 +399,33 @@ pub struct IndexCheckpointPayload {
     pub vector_segments: Vec<VectorIndexSegmentPayload>,
 }
 
+/// Coverage declared by a checkpoint builder. The commit identity, catalog checksum
+/// and live object counts identify the snapshot for which the text and vector
+/// segments were produced.
 #[derive(Clone, Debug)]
 pub struct IndexCheckpointMetadata {
+    /// ID of the main-log batch whose visible state was indexed.
     pub covered_last_batch_id: u64,
+    /// Sequence number of that batch's commit frame in the main log.
     pub covered_last_commit_sequence_no: u64,
+    /// Coverage checksum calculated from the visible catalog and log position. This
+    /// is separate from the checksums over the encoded index records.
     pub coverage_hash: u32,
+    /// Number of live collections included in the covered catalog.
     pub collection_count: usize,
+    /// Visible document count at the covered commit.
     pub live_document_count: usize,
+    /// Visible chunk count at the covered commit, including chunks with no
+    /// embedding.
     pub live_chunk_count: usize,
+    /// Visible embedding count at the covered commit.
     pub live_embedding_count: usize,
+    /// Number of text segment records the directory must account for.
     pub text_segment_count: usize,
+    /// Number of vector segment records the directory must account for.
     pub vector_segment_count: usize,
+    /// Builder's description of how the index was produced, carried into the suffix
+    /// report.
     pub build_mode: String,
 }
 
@@ -251,18 +462,33 @@ pub struct TextIndexPostingEntry {
     pub term_frequency: usize,
 }
 
+/// An owned exact-vector segment for one collection. Its metric, model and
+/// normalization settings are part of the interpretation of every stored vector.
 #[derive(Clone, Debug)]
 pub struct VectorIndexSegmentPayload {
+    /// Stored ID of the collection that owns every entry in this segment.
     pub collection_id: String,
+    /// Sequence number of the main-log commit covered when the segment was built.
     pub covered_commit_sequence_no: u64,
+    /// Number of scalar components expected per vector.
     pub dim: usize,
+    /// Metric used when comparing vectors for this collection.
     pub distance_metric: DistanceMetric,
+    /// Optional model identity. An unspecified model participates in the collection
+    /// match as an absent value.
     pub embedding_model: Option<String>,
+    /// Collection's normalization setting at build time. A reader checks it before
+    /// reusing a segment with the current collection.
     pub vectors_normalized: bool,
+    /// Owned entries with the coordinates and persistent IDs needed for
+    /// exact-vector lookup.
     pub vectors: Vec<VectorIndexEntry>,
 }
 
 impl VectorIndexSegmentPayload {
+    // This check compares the properties that determine how the coordinates are
+    // interpreted. Commit coverage is a property of the surrounding checkpoint and
+    // is checked separately.
     pub(crate) fn matches_collection(&self, collection: &CollectionInfo) -> bool {
         self.collection_id == collection.collection_id
             && self.dim == collection.embedding_dim
@@ -272,55 +498,130 @@ impl VectorIndexSegmentPayload {
     }
 }
 
+/// One stored embedding in an owned vector segment. The lookup result identifies a
+/// chunk, while the embedding ID distinguishes the particular embedding record.
 #[derive(Clone, Debug)]
 pub struct VectorIndexEntry {
+    /// Internal ID of the chunk that should receive this candidate score.
     pub chunk_id: String,
+    /// Internal ID of the embedding represented by these coordinates.
     pub embedding_id: String,
+    /// Owned coordinates in collection dimension order, one binary32 value per
+    /// component.
     pub vector: Vec<f32>,
 }
 
+/// Persisted checkpoint metadata observed by a database scan.
 #[derive(Clone, Debug)]
 pub struct IndexSuffixReport {
+    /// Classification of this checkpoint suffix.
+    /// A metadata-only checkpoint can still identify the commit it covers. Its
+    /// segment counts distinguish it from a checkpoint containing serialized search
+    /// data.
     pub status: String,
+    /// Byte offset at which this checkpoint begins in the database file.
     pub offset: u64,
+    /// Generation recorded in the checkpoint header.
+    /// The binary writer uses the absolute byte offset of the suffix as its
+    /// generation. Rebuilding the index at the same main-log boundary can reuse
+    /// this value.
     pub checkpoint_generation: u64,
+    /// End offset in bytes of the committed stream covered by this checkpoint.
     pub covered_critical_end_offset: u64,
+    /// Last committed batch ID covered by this checkpoint.
     pub covered_last_batch_id: u64,
+    /// Last commit sequence number indexed by this checkpoint.
     pub covered_last_commit_sequence_no: u64,
+    /// Checksum used to compare checkpoint coverage with the visible catalog.
+    /// This value describes the visible catalog at the covered commit. The
+    /// serialized checkpoint records carry separate checksums for detecting damaged
+    /// bytes.
     pub coverage_hash: u32,
+    /// Number of collections recorded in the checkpoint's coverage metadata.
     pub collection_count: usize,
+    /// Number of visible documents covered by the checkpoint.
     pub live_document_count: usize,
+    /// Number of visible chunks covered by the checkpoint.
     pub live_chunk_count: usize,
+    /// Number of visible embeddings covered by the checkpoint.
     pub live_embedding_count: usize,
+    /// Number of text index segments reported in the checkpoint.
     pub text_segment_count: usize,
+    /// Number of vector index segments reported in the checkpoint.
     pub vector_segment_count: usize,
+    /// Number of index records represented by this suffix.
+    /// Includes the checkpoint metadata record itself. A metadata-only checkpoint
+    /// therefore has one record even though it has no text or vector segments.
     pub index_record_count: usize,
+    /// Number of index extents represented by this suffix.
     pub index_extent_count: usize,
+    /// Length of the checkpoint payload in bytes.
+    /// Excludes the outer header, extent directory and completion trailer. Add
+    /// those separately when computing the end of the suffix.
     pub payload_len: u64,
+    /// Mode recorded by the index builder when creating the checkpoint.
     pub build_mode: String,
 }
 
+/// The open generation of a database file, together with the state needed to append
+/// to its verified main log. Compaction may change which file the pathname denotes.
+/// Pair references and locking with the open descriptor when reading the generation
+/// they came from.
 pub struct Storage {
+    // Layout of the open file. A legacy file may be scanned and used as a source
+    // for a binary replacement.
     codec: FileCodec,
+    // Set once a critical write has an uncertain outcome or the old descriptor has
+    // been displaced during publication. Reopening reconstructs the log counters
+    // before another append can use them.
     write_failed: bool,
+    // Lifetime of the exclusive writer lock, including the lock on the data file. A
+    // read-only handle has no writer lock.
     _lock: Option<FileLock>,
+    // Canonical database pathname used for lock diagnostics and as the destination
+    // when publishing a replacement.
     path: PathBuf,
+    // Open descriptor for this file generation. A clone can keep reading its inode
+    // after a different generation is published at the same path.
     file: ManagedFile,
+    // Absolute byte offset just after the last accepted commit, or after the header
+    // in an empty file. A valid index can extend the file beyond this point without
+    // changing where the next batch starts.
     critical_end_offset: u64,
+    // Batch ID reserved for the following append. A freshly created file begins at
+    // one. The next value on reopen is derived from the last accepted commit.
     next_batch_id: u64,
+    // Sequence number of the next frame to write. Data and commit frames consume
+    // the same sequence space.
     next_sequence_no: u64,
 }
 
+// Hooks distinguish failures while the output exists only under its temporary name
+// from failures after the database name has switched to it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RewriteStage {
+    // The temporary name still points to the unvalidated candidate. The original
+    // database name is untouched.
     BeforeValidate,
+    // The destination has switched to the replacement. A subsequent error belongs
+    // to confirmation of publication.
     AfterRename,
 }
 
+/// Limits and resource ownership shared by the passes that write a compacted
+/// replacement. The count covers the entire input iterator, including its
+/// maintenance records. Batch limits apply individually within that output.
 pub(crate) struct RewritePlan {
+    /// Exact number of non-commit records expected from the source iterator. Each
+    /// output batch generates its own commit.
     pub records: usize,
+    /// Maximum number of data records placed in one replacement batch.
     pub batch_record_limit: usize,
+    /// Encoded-byte target for finishing a batch. A single record is indivisible
+    /// and may take its batch over the target.
     pub batch_byte_target: u64,
+    /// Shared temporary-disk quota that covers the replacement while it is staged
+    /// beside the live database.
     pub temporary_disk: std::sync::Arc<crate::temporary::TemporaryDiskBudget>,
 }
 
@@ -342,14 +643,59 @@ impl Storage {
         Self::create_in(path, &crate::json::JsonOperationContext::standalone())
     }
 
+    // Create a new binary file without ever installing a partially initialized
+    // header under the requested name. Writers coordinate through the pathname
+    // while creation is in progress. The data-file lock must already cover the
+    // initialized inode when the database name first points to it.
     pub(crate) fn create_in(
         path: impl AsRef<Path>,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        // Acquire the exclusive lock before choosing the staging name. Both files
+        // are created in the destination directory so a hard link can publish this
+        // inode there in one operation.
         let mut lock = FileLock::acquire_exclusive(&path)?;
-        let file = ManagedFile::create_in(context, || create_storage_file(&path))?;
-        drop(lock.replace_data_lock(DataFileLock::acquire(&file, &path)?));
+        // The staging name is only a candidate. Exclusive creation in
+        // create_storage_file arbitrates a collision, so the timestamp or process
+        // ID need not guarantee uniqueness for correctness.
+        let temporary = path.with_extension(format!(
+            "{}.{}.init",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        // Creation writes and syncs the new header under the staging name.
+        // hard_link fails if another file already occupies the destination,
+        // preserving that file. Closing the temporary name afterwards leaves the
+        // open descriptor on the published inode.
+        let file = ManagedFile::create_in(context, || create_storage_file(&temporary))?;
+        let publish = (|| {
+            drop(lock.replace_data_lock(DataFileLock::acquire(&file, &path)?));
+            std::fs::hard_link(&temporary, &path)?;
+            Ok(())
+        })();
+        // Attempt to remove the staging name on both the success and error paths.
+        // If publication failed, retain that error and attach any cleanup failure.
+        // If the link succeeded, a cleanup failure must tell the caller that the
+        // requested database already exists.
+        let cleanup = std::fs::remove_file(&temporary);
+        publish.map_err(|mut e: Error| {
+            if let Err(failure) = &cleanup {
+                e = e.with_detail("cleanup_error", failure);
+            }
+            e
+        })?;
+        cleanup.map_err(|e| {
+            Error::from(e).maintenance_phase("cleanup_initial_file", "database_created")
+        })?;
+        // An empty main log ends at the header. Initialize the next IDs for its
+        // first batch directly rather than deriving them from a byte length that
+        // might also include a checkpoint in a nonempty file.
+        // The target has already been linked. Resolving the final path can fail
+        // after publication, so inspect the destination before retrying.
         let path = path.canonicalize()?;
         Ok(Self {
             codec: FileCodec::Binary,
@@ -384,12 +730,17 @@ impl Storage {
         Self::open_scanned(
             path,
             read_only,
+            None,
             index_budget_bytes.into(),
             &crate::json::JsonOperationContext::standalone(),
             |record, _| visit(record),
         )
     }
 
+    // Open for ordinary database use and feed committed data to the caller as the
+    // catalog is constructed. The visitor can move ownership out of its per-record
+    // reservation for values it keeps. Lazy index mode allows the database to
+    // retain a directory for later segment reads.
     pub(crate) fn open_with_retained_records(
         path: impl AsRef<Path>,
         read_only: bool,
@@ -400,6 +751,7 @@ impl Storage {
         Self::open_scanned(
             path,
             read_only,
+            None,
             IndexReadOptions {
                 budget_bytes: index_budget_bytes,
                 mode: IndexReadMode::LazyIndexes,
@@ -409,19 +761,9 @@ impl Storage {
         )
     }
 
-    pub(crate) fn open_summary_with_records(
-        path: impl AsRef<Path>,
-        read_only: bool,
-        mut visit: impl FnMut(CommittedRecord) -> Result<()>,
-    ) -> Result<(Self, ScanReport)> {
-        Self::open_summary_with_retained_records(
-            path,
-            read_only,
-            &crate::json::JsonOperationContext::standalone(),
-            |record, _| visit(record),
-        )
-    }
-
+    // Open the same main-log stream for a caller interested in checkpoint coverage
+    // and diagnostics. Summary mode can inspect the checkpoint without constructing
+    // the segment source used for queries.
     pub(crate) fn open_summary_with_retained_records(
         path: impl AsRef<Path>,
         read_only: bool,
@@ -431,6 +773,7 @@ impl Storage {
         Self::open_scanned(
             path,
             read_only,
+            None,
             IndexReadOptions {
                 budget_bytes: u64::MAX,
                 mode: IndexReadMode::Summary,
@@ -440,28 +783,75 @@ impl Storage {
         )
     }
 
+    // Repair needs the writer's content lock to outlive this scan. Place it in the
+    // caller's slot before examining the file so it covers both the decision about
+    // the tail and the eventual repair.
+    pub(crate) fn open_for_repair(
+        path: &Path,
+        context: &crate::json::JsonOperationContext,
+        guard: &mut Option<crate::lock::RangeLock>,
+        visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
+    ) -> Result<(Self, ScanReport)> {
+        Self::open_scanned(
+            path,
+            false,
+            Some(guard),
+            IndexReadOptions {
+                budget_bytes: u64::MAX,
+                mode: IndexReadMode::Summary,
+            },
+            context,
+            visit,
+        )
+    }
+
+    // Initialize append position and sequence numbers from the last valid
+    // commit. The physical file may extend beyond it with an index suffix or
+    // records left by an interrupted append. Resuming from the end of those
+    // bytes would turn an uncommitted sequence into a gap in the main log.
     fn open_scanned(
         path: impl AsRef<Path>,
         read_only: bool,
+        content: Option<&mut Option<crate::lock::RangeLock>>,
         index_options: IndexReadOptions,
         context: &crate::json::JsonOperationContext,
         mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
     ) -> Result<(Self, ScanReport)> {
+        // Canonicalize the existing name before opening it or acquiring its writer
+        // lock. Read-only callers pass through this routine without taking the
+        // exclusive writer lock. Callers needing a consistent check view also
+        // coordinate access to the contents.
         let path = path.as_ref().canonicalize()?;
         let mut lock = if read_only {
             None
         } else {
             Some(FileLock::acquire_exclusive(&path)?)
         };
+        // Open the descriptor with access matching the requested handle. Bind the
+        // exclusive lock to that same data file before handing any of its offsets
+        // to the visitor.
         let mut file = ManagedFile::open_in(context, || {
             Ok(OpenOptions::new()
                 .read(true)
                 .write(!read_only)
                 .open(&path)?)
         })?;
+        // Two different paths can be hard links to one file and have different
+        // sidecars. Acquiring writer admission on the opened data inode closes that
+        // aliasing gap.
         if let Some(lock) = &mut lock {
             drop(lock.replace_data_lock(DataFileLock::acquire(&file, &path)?));
         }
+        // Only the repair entry point supplies a guard slot here. Assign it before
+        // scanning so the recorded repair boundary and the file eventually
+        // truncated belong to the same locked contents.
+        if let Some(slot) = content {
+            *slot = Some(crate::lock::RangeLock::writer(&file, &path)?);
+        }
+        // A scan can return a report containing findings. Keep the report alongside
+        // the handle so its caller can act on visibility or repair diagnostics. An
+        // I/O or callback error that aborts the scan propagates before a handle is
+        // returned.
         let scan = scan_open_file_with_records_in(&mut file, index_options, context, &mut visit)?;
         Ok((
             Self {
@@ -470,6 +860,9 @@ impl Storage {
                 _lock: lock,
                 path,
                 file,
+                // Scan maxima can include a well-formed data frame whose commit
+                // never arrived. Starting from those maxima would spend sequence
+                // numbers for discarded work and leave a gap at the next recovery.
                 critical_end_offset: scan.critical_end_offset,
                 next_batch_id: next_counter(scan.last_valid_commit)?,
                 next_sequence_no: next_counter(scan.last_valid_commit_sequence_no)?,
@@ -478,10 +871,23 @@ impl Storage {
         ))
     }
 
+    // Borrow the descriptor for this generation when another operation needs a read
+    // view bound to the same file. Looking up the pathname later could select a
+    // compacted replacement.
+    pub(crate) fn descriptor(&self) -> &ManagedFile {
+        &self.file
+    }
+
+    // Return the canonical name retained by this handle. Use the descriptor for
+    // reads that must remain on the existing generation.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    // A write needs three independent conditions. The handle must hold an exclusive
+    // lock, its append history must be settled, and its managed file must still
+    // admit writers. A retired inode can remain open for readers after its pathname
+    // has switched to a replacement.
     pub(crate) fn require_writer(&self) -> Result<()> {
         if self._lock.is_none() {
             return Err(Error::new(
@@ -497,10 +903,14 @@ impl Storage {
         self.file.require_writer()
     }
 
+    // Physical file length includes any checkpoint and uncommitted tail. Use the
+    // critical end offset for the replay and append boundary.
     pub fn file_size(&self) -> Result<u64> {
         Ok(self.file.metadata()?.len())
     }
 
+    // Request data synchronization on the writable descriptor so prior completed
+    // batches can be made durable together.
     pub(crate) fn flush_committed(&mut self) -> Result<()> {
         self.flush_committed_with(File::sync_data)
     }
@@ -509,6 +919,9 @@ impl Storage {
         &mut self,
         sync: impl FnOnce(&File) -> std::io::Result<()>,
     ) -> Result<()> {
+        // Flush pending output before calling the synchronization primitive. A
+        // read-only handle can share the flush path but has no writer lock and
+        // issues no data sync here.
         self.file.flush()?;
         if self._lock.is_some() {
             sync(&self.file)?;
@@ -516,23 +929,102 @@ impl Storage {
         Ok(())
     }
 
+    /// Check the independently encoded suffix bounds before discarding bytes after a commit.
+    pub(crate) fn verified_tail(&mut self, scan: &ScanReport) -> Result<bool> {
+        verified_file_tail(&mut self.file, scan)
+    }
+
+    // Return the exclusive end of the accepted main log. Appending a derived index
+    // changes the physical length without moving this boundary.
     pub fn critical_end_offset(&self) -> u64 {
         self.critical_end_offset
     }
 
-    pub fn truncate_to_critical_end(&mut self, durability: Durability) -> Result<(u64, u64)> {
+    // Remove a tail that the repair caller has already established can be
+    // discarded. The caller supplies the expected surviving batch ID. Success
+    // includes the original and verified final lengths, in bytes, so the caller can
+    // report the amount removed.
+    pub fn truncate_to_critical_end(
+        &mut self,
+        durability: Durability,
+        commit: u64,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(u64, u64)> {
         self.require_writer()?;
         let before = self.file.metadata()?.len();
+        // Do not extend a shorter file to manufacture the expected boundary. Shrink
+        // only when the current length exceeds it. A length already at or below the
+        // boundary still goes through the final validation.
         if before > self.critical_end_offset {
-            self.file.set_len(self.critical_end_offset)?;
-            self.file.seek(SeekFrom::Start(self.critical_end_offset))?;
-            self.file.flush()?;
-            if durability == Durability::Commit {
-                self.file.sync_data()?;
-            }
+            self.file.set_len(self.critical_end_offset).map_err(|e| {
+                Error::from(e)
+                    .with_detail("effect", "unknown")
+                    .with_detail("stage", "truncate")
+            })?;
+            // After set_len succeeds, the shortened file is already observable.
+            // Reposition and flush before the durability step. If a later operation
+            // fails, callers must distinguish an applied truncation with uncertain
+            // durability from a failure of the truncation itself.
+            let verify = (|| -> std::io::Result<()> {
+                self.file.seek(SeekFrom::Start(self.critical_end_offset))?;
+                self.file.flush()?;
+                // Data-sync durability applies to the surviving file length and
+                // prefix. Fast mode still flushes and verifies their contents
+                // through this descriptor before returning.
+                if durability == Durability::Commit {
+                    #[cfg(all(test, unix))]
+                    crate::maintenance_faults::check(crate::maintenance_faults::Stage::SyncRepair)?;
+                    self.file.sync_data()?;
+                }
+                Ok(())
+            })();
+            verify.map_err(|e| {
+                Error::from(e)
+                    .with_detail("stage", "verify_truncation")
+                    .with_detail("effect", "tail_truncated")
+                    .with_detail("durability", "unknown")
+            })?;
         }
-        let after = self.file.metadata()?.len();
-        Ok((before, after))
+        // Independently scan the resulting bytes even when set_len did no work.
+        // Matching the file length alone would miss an incorrect commit boundary or
+        // corruption in the surviving prefix. Require the expected commit and a
+        // scan with no findings.
+        let verify = (|| {
+            let after = self.file.metadata()?.len();
+            // Use the scanner without a catalog-building callback. At this point
+            // the repair needs an independent parse of the remaining critical
+            // records and their commit markers, including the last one it expects
+            // to keep.
+            let scan = scan_open_file_with_records_in(
+                &mut self.file,
+                IndexReadOptions {
+                    budget_bytes: u64::MAX,
+                    mode: IndexReadMode::Summary,
+                },
+                context,
+                &mut |_, _| Ok(()),
+            )?;
+            if after != self.critical_end_offset
+                || scan.last_valid_commit != commit
+                || !scan.findings.is_empty()
+            {
+                return Err(Error::new(
+                    ErrorCode::RecoveryError,
+                    "truncated file failed commit verification",
+                ));
+            }
+            Ok((before, after))
+        })();
+        // A verification failure after set_len has no rollback. The operation
+        // reports its verification stage separately, so a caller can reopen the
+        // file to establish the surviving commit before deciding on another action.
+        // This label also applies when the length was already at or below the
+        // boundary and no truncation was attempted. Use the stage and a fresh scan
+        // to establish the surviving commit.
+        verify.map_err(|e| {
+            e.with_detail("effect", "tail_truncated")
+                .with_detail("stage", "verify_commits")
+        })
     }
 
     #[cfg(test)]
@@ -540,6 +1032,12 @@ impl Storage {
         self.payload_reader()?.read_payload(record_ref)
     }
 
+    // Clone the open file and carry its codec together with it. Payload references
+    // describe absolute byte ranges within this generation. A fresh pathname lookup
+    // could silently redirect them after compaction.
+    // A duplicated descriptor can share its cursor with the writer. Payload reads
+    // use positioned I/O or save and restore the cursor so their random offsets do
+    // not disturb the writer's sequential position.
     pub fn payload_reader(&self) -> Result<PayloadReader> {
         Ok(PayloadReader {
             codec: self.codec,
@@ -571,6 +1069,10 @@ impl Storage {
             .map(|(append, _)| append)
     }
 
+    // Append records whose binary encoding requirements were calculated before
+    // taking the write path. The batch owns its record values, their allocation
+    // reservations and any prepared commit timestamp. Return ownership of retained
+    // payloads beside the physical append result.
     pub(crate) fn append_owned_batch_in(
         &mut self,
         batch: EncodedRecordBatch,
@@ -578,6 +1080,9 @@ impl Storage {
         reclaim: impl FnOnce() -> bool,
     ) -> Result<(AppendSummary, RecordReservation)> {
         self.require_writer()?;
+        // Admit reusable encoding space before modifying the log. Reclaiming
+        // optional memory can allow admission to succeed here without requiring a
+        // second attempt at a physical append.
         let encoding = batch.encoding.admit(reclaim)?;
         let (records, mut work, mut payloads, commit_timestamp) = batch.batch.into_parts();
         let context = work.context().clone();
@@ -588,11 +1093,18 @@ impl Storage {
             commit_timestamp,
             Some(encoding),
         )?;
+        // The input record array has been consumed. Retain the capacity of the
+        // outgoing array of committed records and transfer that credit with their
+        // payloads so the caller can safely keep them during catalog application.
         work.retain(append.records.capacity() * std::mem::size_of::<CommittedRecord>());
         payloads.merge_workspace(work);
         Ok((append, payloads))
     }
 
+    // A prepared batch stores encoded payload ranges in its source file and holds
+    // the decoded summaries needed by the caller. Make the source validation pass
+    // before entering the main-log write path. An invalid staged range can then
+    // fail with no suffix truncation or partial batch.
     pub(crate) fn append_prepared_batch(
         &mut self,
         batch: PreparedBatch<'_>,
@@ -606,6 +1118,9 @@ impl Storage {
     )> {
         batch.validate()?;
         let context = batch.records_work.context().clone();
+        // Pass each summary together with its range in the same prepared source.
+        // The writer copies and checks those bytes into the main log. The source
+        // must remain alive for the whole iterator, including its final record.
         let append = self.append_record_batch(
             batch.records.into_iter().map(|record| WriteRecord {
                 payload: record.payload,
@@ -625,6 +1140,9 @@ impl Storage {
         Ok((append, (batch.metadata_work, records_work)))
     }
 
+    // Write one nonempty batch to the current main-log generation. Both ordinary
+    // values and already encoded spans use this path so they share the same
+    // sequence allocation, commit boundary and write-progress reporting.
     fn append_record_batch<'a>(
         &mut self,
         records: impl ExactSizeIterator<Item = WriteRecord<'a>>,
@@ -634,12 +1152,28 @@ impl Storage {
         encoding: Option<codec::BatchEncoding>,
     ) -> Result<AppendSummary> {
         self.require_writer()?;
+        // The handle's writer lock excludes other writers. Take the content range
+        // as well so readers acquiring a consistent view cannot inspect the
+        // interval between dropping the previous suffix and finishing the new
+        // batch.
+        let _content = crate::lock::RangeLock::writer(
+            self._lock.as_ref().expect("writer admitted").data_file(),
+            &self.path,
+        )?;
+        // A successfully scanned legacy file still has binary headers in the older
+        // layout and JSON payloads. Explicit compaction writes a new file with the
+        // current binary layout. Mixing current frames into the legacy stream would
+        // make them unreadable using the codec selected by the original file
+        // header.
         if self.codec == FileCodec::Legacy {
             return Err(Error::new(
                 ErrorCode::UnsupportedVersion,
                 "legacy experimental files must be explicitly compacted before writing",
             ));
         }
+        // The commit format identifies a first and a last data frame. Reject an
+        // empty input before constructing a writer or touching an existing
+        // checkpoint.
         let record_count = records.len();
         if record_count == 0 {
             return Err(Error::new(
@@ -647,6 +1181,10 @@ impl Storage {
                 "cannot append an empty batch",
             ));
         }
+        // Initialize the writer with the exact record count while the log is still
+        // untouched. It can reserve space for the summaries it will return, check
+        // that enough sequence numbers remain, and reserve space for the commit
+        // timestamp before the append becomes uncertain.
         let mut writer = BatchWriter::new(
             &mut self.file,
             &mut self.next_batch_id,
@@ -657,16 +1195,24 @@ impl Storage {
             commit_timestamp,
         )?;
         writer.raw_encoding = encoding;
-        // All admission precedes this point. A failed append/flush may still
-        // have written a complete commit, so retain an uncertain outcome.
+        // From begin_append onward, even an error preparing another record can
+        // follow a truncation or write. Reopen and scan to settle an uncertain
+        // outcome; retrying the batch here could duplicate a complete commit.
         context.begin_append(record_count);
         let append = match (|| {
+            // A writer reopened on a complete checkpoint starts at the physical end
+            // of the file. The next batch belongs at the end of the committed log.
+            // A crash after truncation can leave the previous batch with no index.
             if writer.batch_start > self.critical_end_offset {
                 writer.file.set_len(self.critical_end_offset)?;
             }
             writer
                 .file
                 .seek(SeekFrom::Start(self.critical_end_offset))?;
+            // The writer uses batch_start as its rollback point if a staged payload
+            // copy fails. Reset it after removing the old suffix, otherwise a
+            // rollback to the original EOF could extend the file back beyond the
+            // surviving commit.
             writer.batch_start = self.critical_end_offset;
             writer.append_all(records.map(Ok), durability)
         })() {
@@ -677,11 +1223,18 @@ impl Storage {
                 return Err(err.with_detail("reason", "writer_reopen_required"));
             }
         };
+        // The complete batch can now be reported as confirmed. Preserve that
+        // receipt even if the subsequent query for the physical append position
+        // fails. The new position includes the commit frame and establishes the
+        // next main-log boundary.
         context.confirm_append(
             record_count,
             append.commit.batch_id,
             append.commit_sequence_no,
         );
+        // A position error leaves the old in-memory boundary in place even though
+        // the operation has confirmed the new commit. The receipt must retain that
+        // confirmation.
         self.critical_end_offset = self.file.stream_position()?;
         Ok(append)
     }
@@ -724,6 +1277,10 @@ impl Storage {
         )
     }
 
+    // Replace the index suffix for a committed main-log snapshot. Segments can come
+    // from an iterator so they need not coexist in memory. The completion callback
+    // receives each encoded segment and its byte length while the outer checkpoint
+    // is still being assembled.
     pub(crate) fn write_index_segments_in<'a>(
         &mut self,
         checkpoint: &IndexCheckpointMetadata,
@@ -734,37 +1291,87 @@ impl Storage {
         allow_optional_memory: bool,
     ) -> Result<(IndexSuffixReport, IndexSegmentSource)> {
         self.require_writer()?;
+        // Protect the bytes after the commit with the same content locking used for
+        // append. A reader that acquires a stable check view must see the old
+        // suffix or the result of this attempt.
+        let _content = crate::lock::RangeLock::writer(
+            self._lock.as_ref().expect("writer admitted").data_file(),
+            &self.path,
+        )?;
         if self.codec == FileCodec::Legacy {
             return Err(Error::new(
                 ErrorCode::UnsupportedVersion,
                 "legacy experimental files must be explicitly compacted before writing",
             ));
         }
+        // Reserve the directory before disturbing the old suffix. Once truncation
+        // starts, errors must tell the caller the index may need rebuilding; the
+        // main-log commit ends at critical_end_offset and is outside this rewrite.
         let directory = checkpoint_writer::reserve_directory(checkpoint, context)?;
-        if self.file.metadata()?.len() > self.critical_end_offset {
-            self.file.set_len(self.critical_end_offset)?;
-        }
-        let (payload_len, vectors) = checkpoint_writer::write_checkpoint_segments_in(
-            &mut self.file,
-            checkpoint,
-            segments,
-            self.critical_end_offset,
-            completed,
-            directory,
-            allow_optional_memory,
-        )?;
-        self.file.flush()?;
-        #[cfg(test)]
-        tests::crash_boundary("index_suffix_flushed")?;
-        if durability == Durability::Commit {
-            self.file.sync_data()?;
-        }
+        let phase_error = |err: Error| {
+            err.with_detail("effect", "index_may_need_rebuild")
+                .with_detail("stage", "write_checkpoint")
+        };
+        // Once the old suffix is shortened, an error in segment iteration, encoding
+        // or persistence can leave this commit with a missing or partial index.
+        // Mark errors in that phase as requiring a possible rebuild. The main
+        // stream ends immediately before those bytes.
+        let (payload_len, vectors) = (|| -> Result<_> {
+            context.maintenance.update(|state| state.writing_index());
+            if self.file.metadata()?.len() > self.critical_end_offset {
+                self.file.set_len(self.critical_end_offset)?;
+            }
+            #[cfg(all(feature = "native-test-support", unix))]
+            crate::maintenance_probe::pause("write_checkpoint")?;
+            // The directory reservation follows the output writer even if optional
+            // write buffering is disabled. Directory entries are required to locate
+            // every emitted segment and finalize the suffix.
+            let (payload_len, vectors) = checkpoint_writer::write_checkpoint_segments_in(
+                &mut self.file,
+                checkpoint,
+                segments,
+                self.critical_end_offset,
+                completed,
+                directory,
+                allow_optional_memory,
+            )?;
+            // Flush the completed suffix before honoring the requested durability.
+            // Commit durability adds a data sync. If that sync fails the bytes may
+            // already be present, and the durability detail records what the writer
+            // could establish.
+            self.file.flush()?;
+            #[cfg(test)]
+            tests::crash_boundary("index_suffix_flushed")?;
+            if durability == Durability::Commit {
+                context
+                    .maintenance
+                    .update(|state| state.syncing_index(true));
+                #[cfg(all(feature = "native-test-support", unix))]
+                crate::maintenance_probe::pause("sync_checkpoint")
+                    .map_err(|err| err.with_detail("durability", "unknown"))?;
+                self.file
+                    .sync_data()
+                    .map_err(|e| Error::from(e).with_detail("durability", "unknown"))?;
+                context
+                    .maintenance
+                    .update(|state| state.syncing_index(false));
+            }
+            Ok((payload_len, vectors))
+        })()
+        .map_err(phase_error)?;
+        // A completed suffix can consist solely of its metadata record. Report it
+        // distinctly so a reader can distinguish checkpoint coverage information
+        // from persisted index segments that a search can actually open.
         let segment_record_count = checked_segment_record_count(checkpoint)? as usize;
         let status = if segment_record_count == 0 {
             "metadata_record_only"
         } else {
             "persistent_checkpoint"
         };
+        // The checkpoint generation records its start at the end of the committed
+        // stream. Report the batch and sequence it covers along with the physical
+        // location so subsequent callers can match a segment source to the snapshot
+        // it describes.
         Ok((
             IndexSuffixReport {
                 status: status.into(),
@@ -779,6 +1386,9 @@ impl Storage {
                 live_chunk_count: checkpoint.live_chunk_count,
                 live_embedding_count: checkpoint.live_embedding_count,
                 text_segment_count: checkpoint.text_segment_count,
+                // The metadata record has its own extent, just like a data-bearing
+                // segment. It contributes one to both totals even when every text
+                // and vector count is zero.
                 vector_segment_count: checkpoint.vector_segment_count,
                 index_record_count: 1 + segment_record_count,
                 index_extent_count: 1 + segment_record_count,
@@ -855,6 +1465,10 @@ impl Storage {
         )
     }
 
+    // Build the compacted main log in a separate file in the database directory.
+    // The supplied iterator produces records in their required replay order. The
+    // visitor receives the records recovered from the candidate so its caller can
+    // build a catalog with references into the replacement.
     #[allow(clippy::too_many_arguments)]
     fn rewrite_records_with_hook<'a, I, F>(
         &mut self,
@@ -863,21 +1477,27 @@ impl Storage {
         durability: Durability,
         context: &crate::json::JsonOperationContext,
         reclaim: impl FnOnce() -> bool,
-        mut hook: F,
-        mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
+        hook: F,
+        visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
     ) -> Result<ScanReport>
     where
         I: IntoIterator<Item = Result<WriteRecord<'a>>>,
         F: FnMut(RewriteStage, &Path) -> Result<()>,
     {
         self.require_writer()?;
+        // Each pass through write_replacement opens a new batch while records
+        // remain. A positive record limit guarantees it can take an input record,
+        // and a positive byte target gives nonempty batches a meaningful boundary.
         if plan.batch_record_limit == 0 || plan.batch_byte_target == 0 {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
                 "invalid compaction batch limits",
             ));
         }
-        let record_count = plan.records;
+        // Keep the replacement on the destination filesystem for the final rename.
+        // Its guard owns the temporary name and disk credit while the source
+        // generation is still readable. A pre-publication error can therefore clean
+        // up this file without changing the live pathname.
         let directory = self
             .path
             .parent()
@@ -887,22 +1507,72 @@ impl Storage {
             directory,
             "compact",
             "tmp",
-            plan.temporary_disk,
+            plan.temporary_disk.clone(),
             context,
             "operation_scratch",
             reclaim,
         )?;
-        // Keep the file's drop before the guard, including during unwinding.
-        let mut file = file;
+        self.write_replacement(
+            records,
+            plan,
+            durability,
+            context,
+            hook,
+            visit,
+            file,
+            &mut temporary,
+        )
+        // Before rename this guard still owns the staged pathname. Successful
+        // publication clears that name, so reporting a late error through the same
+        // cleanup path cannot unlink the newly published database.
+        .map_err(|error| temporary.cleanup_after_error(error))
+    }
+
+    // A rewrite has three distinct file lifetimes. First encode complete batches on
+    // the temporary descriptor. Next reopen the staged name and read it through
+    // ordinary recovery. Finally acquire a writable descriptor for the verified
+    // replacement and publish it. Only the last stage changes what a fresh open of
+    // the database name sees.
+    #[allow(clippy::too_many_arguments)]
+    fn write_replacement<'a, I, F>(
+        &mut self,
+        records: I,
+        plan: RewritePlan,
+        durability: Durability,
+        context: &crate::json::JsonOperationContext,
+        mut hook: F,
+        mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
+        mut file: crate::temporary::TemporaryFile,
+        temporary: &mut crate::temporary::TempFileGuard,
+    ) -> Result<ScanReport>
+    where
+        I: IntoIterator<Item = Result<WriteRecord<'a>>>,
+        F: FnMut(RewriteStage, &Path) -> Result<()>,
+    {
+        let record_count = plan.records;
+        #[cfg(all(feature = "native-test-support", unix))]
+        crate::maintenance_probe::pause("prepare_replacement")?;
+        // Account for the file header before writing any bytes. Start a new binary
+        // stream even when the old file used the legacy layout. Its first frame can
+        // use a sequence well above one because sequence allocation continues from
+        // the source.
         temporary.reserve_disk(HEADER_LEN as u64)?;
         write_header(&mut file)?;
         let mut records = records.into_iter();
         let mut lookahead = None;
         let mut remaining = record_count;
+        // Advance local copies of the live counters while constructing the
+        // candidate. An encoding error must leave the old writer free to use its
+        // original next IDs. The running compact CRC spans the data records in all
+        // output batches.
         let mut next_batch_id = self.next_batch_id;
         let mut next_sequence_no = self.next_sequence_no;
         let mut compact_crc = Crc32c::default();
         while remaining > 0 {
+            // Use the smaller of the remaining input count and the per-batch limit
+            // when opening a writer. This writer need not collect summaries because
+            // the validation scan will produce the actual record offsets and
+            // reservations used by the replacement catalog.
             let limit = remaining.min(plan.batch_record_limit);
             let mut writer = BatchWriter::new(
                 &mut file,
@@ -914,12 +1584,19 @@ impl Storage {
                 None,
             )?;
             writer.compact_crc = Some(&mut compact_crc);
-            writer.temporary_disk = Some(&mut temporary);
+            // Charge each frame, including each batch's commit, to the temporary
+            // file. The old source is still open and all replacement bytes must be
+            // admitted while both generations coexist.
+            writer.temporary_disk = Some(temporary);
             let mut retained_json_bytes = 0usize;
             for _ in 0..limit {
                 // The next source decode shares this ledger and must not compete
                 // with an optional buffer retained from the preceding record.
                 writer.encoding.release_buffer();
+                // A record can already have been decoded when the previous batch
+                // reached its retained-JSON limit. Consume that record before
+                // advancing the source iterator. Reading the iterator first would
+                // omit a record and invalidate the promised count.
                 let record = lookahead
                     .take()
                     .map(Ok)
@@ -930,6 +1607,10 @@ impl Storage {
                             "compaction record count mismatch",
                         )
                     })??;
+                // Track retained JSON separately from encoded bytes. A small
+                // serialized document can require a larger object representation in
+                // the recovery visitor. Stored input carries the reservation that
+                // measures this part of the batch.
                 let json_bytes = match &record.encoding {
                     RecordEncoding::Stored(_, work) => work.json_bytes(),
                     _ => 0,
@@ -940,6 +1621,9 @@ impl Storage {
                     && retained_json_bytes.saturating_add(json_bytes)
                         > crate::json::JsonProcessingPolicyV1::WORK_BUDGET_BYTES / 2
                 {
+                    // Deferring this record leaves remaining unchanged. It becomes
+                    // the first record of the next batch, where the nonempty-batch
+                    // test permits even a single large value to make progress.
                     lookahead = Some(record);
                     break;
                 }
@@ -947,6 +1631,10 @@ impl Storage {
                 writer.append(record)?;
                 remaining -= 1;
                 // A record is indivisible; finish at the first boundary reaching the target.
+                // This is a target for encoded data frames. A single record may
+                // cross it and the commit frame still follows. The disk reservation
+                // must cover both even if the caller's target was smaller than this
+                // record.
                 if writer.encoded_bytes >= plan.batch_byte_target {
                     break;
                 }
@@ -958,12 +1646,19 @@ impl Storage {
                 tests::crash_boundary("compact_between_batches")?;
             }
         }
+        // Check the other direction of the cardinality promise as well. A left-over
+        // record indicates that the caller counted a different logical stream.
+        // Publishing only its expected prefix could silently drop valid state.
         if lookahead.is_some() || records.next().is_some() {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
                 "compaction record count mismatch",
             ));
         }
+        // Release the iterator and any source resources it still owns before
+        // synchronizing and checking the new file. Individual batches above have
+        // already been flushed. The temporary file must pass a data sync even when
+        // the caller chose fast durability for the later rename.
         drop(records);
         #[cfg(test)]
         tests::crash_boundary("compact_before_sync")?;
@@ -971,9 +1666,17 @@ impl Storage {
         #[cfg(test)]
         tests::crash_boundary("compact_after_sync")?;
         drop(file);
+        // Open the staged pathname afresh and verify the format and the complete
+        // log. This catches a truncated or otherwise invalid candidate even if
+        // every individual write returned success. At this stage the original name
+        // and its catalog remain usable.
         hook(RewriteStage::BeforeValidate, temporary.path())?;
         let mut validated_count = 0usize;
         let mut validation_file = File::open(temporary.path())?;
+        // Read the candidate's own header to select and validate its codec. A
+        // compacted legacy source must also produce a binary candidate. Passing the
+        // source codec to this read would make a successful conversion unreadable
+        // here.
         if read_header(&mut validation_file)? != FileCodec::Binary {
             return Err(Error::new(
                 ErrorCode::RecoveryError,
@@ -987,12 +1690,19 @@ impl Storage {
                 mode: IndexReadMode::Summary,
             },
             context,
+            // Count records delivered by recovery. Summing the headers the writer
+            // attempted would also count the data of an incomplete batch. Forward
+            // each validated record with its live reservation so the caller can
+            // transfer allocations into the replacement catalog.
             &mut |record, work| {
                 validated_count += 1;
                 visit(record, work)
             },
         )?;
         drop(validation_file);
+        // A shorter recovery prefix, any critical-stream finding, or a finding that
+        // blocks main data disqualifies the candidate before rename. A successful
+        // syscall that wrote a malformed commit cannot bypass these checks.
         if validated_count != record_count
             || scan
                 .findings
@@ -1004,6 +1714,10 @@ impl Storage {
                 "compaction output failed validation",
             ));
         }
+        // Prepare the next counters from the validated commit and acquire the
+        // replacement descriptor and data-file lock while the caller can still
+        // abandon the temporary file. These operations can fail independently of
+        // the scan.
         let next_batch_id = next_counter(scan.last_valid_commit)?;
         let next_sequence_no = next_counter(scan.last_valid_commit_sequence_no)?;
         let replacement = ManagedFile::open_in(context, || {
@@ -1012,16 +1726,32 @@ impl Storage {
                 .write(true)
                 .open(temporary.path())?)
         })?;
+        // Writer admission on the new inode has to be secured under its temporary
+        // name. After publication there is no second opportunity to acquire it
+        // without exposing the new pathname to competing opens.
         let mut replacement_lock = Some(DataFileLock::acquire(&replacement, &self.path)?);
         #[cfg(test)]
         tests::crash_boundary("compact_before_rename")?;
+        // Both content locks use the same start time. Waiting for the first inode
+        // must consume part of the total wait allowed for the second. Hold both
+        // guards through the handover even though only one inode can be reached
+        // through the database pathname at a time.
+        let start = std::time::Instant::now();
+        // Guard content on both sides of the rename so the pathname can switch
+        // inodes without opening a gap in content locking.
+        let _old_content = crate::lock::RangeLock::writer_since(&self.file, &self.path, start)?;
+        let _new_content = crate::lock::RangeLock::writer_since(&replacement, &self.path, start)?;
         let writer_lock = self._lock.as_mut().expect("writer lock required");
         let write_failed = &mut self.write_failed;
+        // Keep the displaced data lock in an outer slot. Its destructor closes a
+        // managed descriptor and may re-enter the registry that serializes the
+        // rename and writer handoff.
         let mut previous_lock = None;
         self.file
-            .publish_replacement(&mut temporary, &self.path, &mut || {
+            .publish_replacement(temporary, &self.path, &mut || {
                 // Publish the new lock and disable old writes before admission resumes.
                 *write_failed = true;
+                context.maintenance.update(|state| state.replaced());
                 previous_lock = writer_lock
                     .replace_data_lock(replacement_lock.take().expect("prepared replacement lock"));
             })?;
@@ -1029,10 +1759,35 @@ impl Storage {
         drop(previous_lock);
         #[cfg(test)]
         tests::crash_boundary("compact_after_rename")?;
-        hook(RewriteStage::AfterRename, &self.path)?;
+        // The name now refers to the replacement; the writer still carries the
+        // old file and offsets. Keep writes disabled if post-rename confirmation
+        // fails. Only install the new file and counters once the required sync
+        // has succeeded.
+        let replaced = |e: Error| {
+            e.with_detail("effect", "main_replaced")
+                .with_detail("stage", "confirm_replacement")
+                .with_detail("durability", "unknown")
+        };
+        #[cfg(all(feature = "native-test-support", unix))]
+        crate::maintenance_probe::pause("confirm_replacement").map_err(&replaced)?;
+        hook(RewriteStage::AfterRename, &self.path).map_err(&replaced)?;
+        // The replacement bytes were synchronized before validation. Commit
+        // durability now asks the parent directory to persist the new name. A
+        // failure at this step can leave the new file visible to the current
+        // process while its survival across a crash remains unknown.
         if durability == Durability::Commit {
-            sync_parent_dir(&self.path)?;
+            sync_parent_dir(&self.path).map_err(replaced)?;
         }
+        // The progress record distinguishes a rename that has occurred from one
+        // confirmed under the requested durability. The caller installs catalog
+        // references into the new file only after this routine successfully
+        // returns.
+        context
+            .maintenance
+            .update(|state| state.confirmed_replacement());
+        // Install the verified descriptor, codec and offsets together while the
+        // guard still excludes competing content changes. Only after all three
+        // refer to the replacement can this handle admit another append.
         self.file = replacement;
         self.codec = scan.codec;
         self.critical_end_offset = scan.critical_end_offset;
@@ -1043,8 +1798,15 @@ impl Storage {
     }
 }
 
+/// Reader for payload references from a particular open file. It retains its own
+/// descriptor so catalog lookups can fetch a body after the code that originally
+/// scanned the frame has returned.
 pub struct PayloadReader {
+    // Decoder selected when the source file was opened. Legacy and binary payloads
+    // are interpreted and checked differently.
     codec: FileCodec,
+    // Managed descriptor kept alive for the lifetime of this reader. Payload
+    // locations are relative to this file's beginning.
     file: ManagedFile,
 }
 
@@ -1077,12 +1839,155 @@ pub(crate) fn scan_file_with_records_in(
     scan_file_with_retained_records_in(path, context, |record, _| visit(record))
 }
 
+#[cfg(test)]
 pub(crate) fn scan_file_with_retained_records_in(
     path: impl AsRef<Path>,
     context: &crate::json::JsonOperationContext,
     mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
 ) -> Result<ScanReport> {
-    let mut file = ManagedFile::open_in(context, || Ok(File::open(path.as_ref())?))?;
+    scan_check_view(path.as_ref(), None, context, &mut visit)
+}
+
+// A reader can stop at the last valid commit. Repair needs stronger evidence
+// before it can remove everything after that boundary. An uncommitted batch
+// has no visible records. For a damaged checkpoint, also verify that its
+// declared extent accounts for the tail; a later main-data frame must survive.
+pub(crate) fn verified_file_tail(file: &mut File, scan: &ScanReport) -> Result<bool> {
+    // A clean report or one containing only complete data frames missing their
+    // commit needs no checkpoint proof here. Other cases proceed only if every
+    // finding identifies checkpoint metadata. A mixed tail with uncertain main-data
+    // findings must be left intact.
+    if scan.findings.iter().all(|f| f.code == "uncommitted_batch") {
+        return Ok(true);
+    }
+    // An index diagnosis with an unknown record type can be sufficient to fall back
+    // to scanning main data. Requiring the named checkpoint metadata here prevents
+    // that same diagnosis from authorizing destructive truncation.
+    if scan
+        .findings
+        .iter()
+        .any(|f| f.stream != "index" || f.record_type.as_deref() != Some("IndexCheckpointMetadata"))
+    {
+        return Ok(false);
+    }
+    // Use the verified main-log end as the start of the candidate suffix. Re-read
+    // the header from that exact byte position. An offset supplied by a damaged
+    // index cannot establish where it is safe to truncate.
+    let start = scan.critical_end_offset;
+    let actual = file.metadata()?.len();
+    let mut header = [0; INDEX_CHECKPOINT_HEADER_LEN];
+    if actual.saturating_sub(start) < header.len() as u64 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut header)?;
+    let count = read_u64(&header[65..73]);
+    let table = read_u64(&header[73..81]);
+    let table_len = read_u64(&header[81..89]);
+    let payload = read_u64(&header[93..101]);
+    // The stored checkpoint start and covered main end must both equal the scanned
+    // byte boundary. The batch ID and commit sequence must name the same snapshot.
+    // Independently derive the directory size from the nonzero extent count and
+    // require the table to follow the payload.
+    if &header[..8] != INDEX_CHECKPOINT_MAGIC
+        || read_u16(&header[8..10]) != INDEX_CHECKPOINT_VERSION
+        || read_u16(&header[10..12]) as usize != header.len()
+        || read_u64(&header[20..28]) != start
+        || read_u64(&header[28..36]) != start
+        || read_u64(&header[36..44]) != scan.last_valid_commit
+        || read_u64(&header[44..52]) != scan.last_valid_commit_sequence_no
+        || count == 0
+        || read_u64(&header[57..65]) != count
+        || count.checked_mul(INDEX_EXTENT_ENTRY_LEN as u64) != Some(table_len)
+        || payload.checked_add(header.len() as u64) != Some(table)
+    {
+        return Ok(false);
+    }
+    // The table offset is relative to the beginning of the suffix. Add it to the
+    // absolute main-log boundary before including the directory and trailer. Reject
+    // overflow at each addition. Wrapping to a small apparent end could otherwise
+    // authorize removal of unrelated data.
+    let end = start
+        .checked_add(table)
+        .and_then(|n| n.checked_add(table_len))
+        .and_then(|n| n.checked_add(INDEX_CHECKPOINT_TRAILER_LEN as u64));
+    let Some(end) = end else { return Ok(false) };
+    // A partial trailing frame shorter than its header cannot conceal a later commit.
+    // For example, a complete record header could fit in a full-header-sized
+    // remainder after the calculated checkpoint. Refuse that case even if the
+    // expected trailer is intact. A shorter fragment cannot contain another
+    // complete frame there.
+    if end > actual || actual - end >= RECORD_HEADER_LEN as u64 {
+        return Ok(false);
+    }
+    // At the computed end, a valid completion marker and its own checksum can
+    // establish the suffix boundary even when the original finding concerned a
+    // damaged index record. The proof here concerns which bytes may be discarded.
+    // The rebuilt index will supply usable search data.
+    if check_index_checkpoint_trailer(file, end)?.is_ok() {
+        return Ok(true);
+    }
+    // A damaged completion marker can still be attributed to this index if
+    // both independently checksummed extents occupy the declared range.
+    // The trailer probe left the file cursor near the end. Return to the first
+    // payload byte and checksum the declared payload and table consecutively, using
+    // the two independent values from the header.
+    file.seek(SeekFrom::Start(start + header.len() as u64))?;
+    let mut data_crc = Crc32c::default();
+    checksum_index_bytes(file, payload, &mut data_crc)?;
+    let mut table_crc = Crc32c::default();
+    checksum_index_bytes(file, table_len, &mut table_crc)?;
+    Ok(data_crc.finish() == read_u32(&header[101..105])
+        && table_crc.finish() == read_u32(&header[89..93]))
+}
+
+// Scan a file image already selected by the caller. Rewind it before reading the
+// shared header, then stream committed records to the visitor. Summary mode
+// suffices for a snapshot consumer that needs main data and checkpoint diagnostics.
+pub(crate) fn scan_snapshot(
+    file: &mut File,
+    context: &crate::json::JsonOperationContext,
+    mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
+) -> Result<ScanReport> {
+    file.rewind()?;
+    scan_open_file_with_records_in(
+        file,
+        IndexReadOptions {
+            budget_bytes: u64::MAX,
+            mode: IndexReadMode::Summary,
+        },
+        context,
+        &mut visit,
+    )
+}
+
+// Run the integrity check against one content-locked generation. If a stable view
+// cannot be acquired, report which part of the check was left undone before
+// invoking the visitor. Otherwise an empty set of findings could be mistaken for a
+// completed check.
+pub(crate) fn scan_check_view(
+    path: &Path,
+    bound: Option<&ManagedFile>,
+    context: &crate::json::JsonOperationContext,
+    mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
+) -> Result<ScanReport> {
+    let view = try_read_view(path, bound, context)?;
+    let (mut file, _lock) = view.ok_or_else(|| {
+        Error::new(
+            ErrorCode::RecoveryError,
+            "cannot acquire a consistent check view; retry after the active write",
+        )
+        .with_detail("reason", "check_view_unavailable")
+        .with_detail("uncompleted_scope", "main_and_index")
+        .with_detail("effect", "unchanged")
+        .with_detail("stage", "check_view")
+    })?;
+    // Keep the returned guard in scope for the entire scan. A lock held only while
+    // opening the file would allow a writer to truncate the index or append records
+    // while checks were comparing offsets and checksums.
+    // The size limit below disables the declared payload-size gate for this check.
+    // Summary decoding still admits scratch memory under the operation context and
+    // can report resource exhaustion separately from an invalid suffix.
     scan_open_file_with_records_in(
         &mut file,
         IndexReadOptions {
@@ -1092,6 +1997,73 @@ pub(crate) fn scan_file_with_retained_records_in(
         context,
         &mut visit,
     )
+}
+
+// A path-based reader must lock the generation that the name still denotes.
+// Compaction can rename a replacement between open and lock, so compare the
+// opened inode to the named one after acquiring the lock. A bound reader
+// already chose its generation and must stay with that file across a rename.
+pub(crate) fn try_read_view(
+    path: &Path,
+    bound: Option<&ManagedFile>,
+    context: &crate::json::JsonOperationContext,
+) -> Result<Option<(ManagedFile, crate::lock::RangeLock)>> {
+    // Retry a short period of content-lock contention or a rename race by opening
+    // and locking again. Exhaustion returns None so each caller can translate an
+    // unavailable snapshot into its own result. An unrelated I/O failure remains an
+    // error.
+    for delay in [0, 10, 30] {
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        let file = match bound {
+            Some(f) => {
+                // Linux can open the existing descriptor through procfs to obtain a
+                // separate open file description for this scan. That preserves the
+                // chosen inode and gives the scanning cursor its own seek position.
+                // On other platforms clone the bound descriptor.
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::fd::AsRawFd;
+                    ManagedFile::open_in(context, || {
+                        Ok(File::open(format!("/proc/self/fd/{}", f.as_raw_fd()))?)
+                    })?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    f.try_clone()?
+                }
+            }
+            None => ManagedFile::open_in(context, || Ok(File::open(path)?))?,
+        };
+        match crate::lock::RangeLock::reader(&file, path) {
+            Ok(lock) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    // For an unbound open, compare device and inode while the read
+                    // lock is held. If compaction replaced the name in the
+                    // meantime, dropping these locals releases the stale view
+                    // before the next attempt. A bound caller deliberately keeps
+                    // its earlier generation.
+                    if bound.is_none() {
+                        let opened = file.metadata()?;
+                        let named = path.metadata()?;
+                        if (opened.dev(), opened.ino()) != (named.dev(), named.ino()) {
+                            continue;
+                        }
+                    }
+                }
+                // Return the descriptor together with its guard. Keeping only the
+                // path would allow a later open to select a replacement even though
+                // the original generation was successfully locked.
+                return Ok(Some((file, lock)));
+            }
+            Err(e) if e.code() == ErrorCode::LockContention => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1119,31 +2091,59 @@ fn scan_open_file_with_records(
     )
 }
 
+// Drive the scan from the file header through its matching frame layout. A
+// successful result can contain findings and describes exactly how far the scan
+// got. Errors opening or reading the stream, an exhausted reader budget and
+// failures returned by the visitor can instead abort the operation.
 fn scan_open_file_with_records_in(
     file: &mut File,
     index_options: IndexReadOptions,
     context: &crate::json::JsonOperationContext,
     visit: &mut dyn FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
 ) -> Result<ScanReport> {
+    // Always start at byte zero. Header validation consumes the header for the
+    // selected codec and leaves the cursor at its first frame. A valid common magic
+    // alone does not say which frame size or payload representation follows.
     file.seek(SeekFrom::Start(0))?;
     let format = read_header(file)?;
     if format == FileCodec::Binary {
         return scan_binary_file(file, index_options, context, visit);
     }
+    // For an empty legacy stream the entire accepted prefix is its header. Until a
+    // commit is accepted nothing beyond this initial offset is established as
+    // visible data.
     let mut report = ScanReport {
         codec: FileCodec::Legacy,
         critical_end_offset: LEGACY_HEADER_LEN as u64,
         ..ScanReport::default()
     };
+    // The legacy stream associates records with a commit by batch ID. Keep the
+    // summaries and their reservations together until that batch's commit arrives.
+    // Reading a valid data record alone does not make it visible to the catalog.
+    // Legacy membership is by the ID stored in each header. Two IDs can have
+    // pending entries at the same time. Committing one removes that entry alone.
+    // Changing this to the binary scanner's single pending range would change which
+    // old files can be recovered.
     let mut pending: BTreeMap<u64, (Vec<CommittedRecord>, RecordReservation)> = BTreeMap::new();
 
     loop {
+        // Take the offset before the read. At a clean EOF the cursor stays here,
+        // but a short read may already have consumed part of the header. Findings
+        // and later payload references use the original frame start in both cases.
         let offset = file.stream_position()?;
         let mut header = [0u8; LEGACY_RECORD_HEADER_LEN];
         match file.read_exact(&mut header) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // An exact end of file between frames is normal. Bytes left over
+                // from a short header need a finding, even though there is too
+                // little information to decode a record type.
                 if file.metadata()?.len() > offset {
+                    // The old format has no per-record magic to identify a fragment
+                    // shorter than the header. After a visible commit this path
+                    // labels the fragment as a possible index tail. That
+                    // classification supplies a finding for inspection. Destructive
+                    // tail verification has stronger requirements.
                     let (stream, visibility_impact, message) =
                         if is_after_visible_critical_prefix(&report, offset) {
                             (
@@ -1174,9 +2174,17 @@ fn scan_open_file_with_records_in(
             Err(err) => return Err(Error::from(err)),
         }
 
+        // Legacy indexes are rebuilt from the main log. When the checkpoint
+        // signature follows a visible prefix, stop the old frame decoder here. Its
+        // first bytes would otherwise be interpreted as a main record type and
+        // version.
         if is_after_visible_critical_prefix(&report, offset)
             && &header[0..INDEX_CHECKPOINT_MAGIC.len()] == INDEX_CHECKPOINT_MAGIC
         {
+            // The eight signature bytes are enough for this compatibility finding.
+            // This path does not decode a checkpoint directory or bind an index
+            // record type to it, so it supplies no directory of reusable legacy
+            // indexes.
             push_index_suffix_issue(
                 &mut report,
                 offset,
@@ -1188,6 +2196,10 @@ fn scan_open_file_with_records_in(
             break;
         }
 
+        // The legacy header carries a checksum of its own fields and a separate
+        // checksum of the payload. Read the small fixed header first. The payload
+        // length and type cannot direct allocation and decoding until the header
+        // has passed its version and integrity checks.
         let record_type = read_u16(&header[0..2]);
         let version = read_u16(&header[2..4]);
         let batch_id = read_u64(&header[4..12]);
@@ -1195,6 +2207,9 @@ fn scan_open_file_with_records_in(
         let payload_len_u64 = read_u64(&header[20..28]);
         let payload_checksum = read_u64(&header[28..36]);
         let header_checksum = read_u32(&header[36..40]);
+        // Use the low 32 bits of the legacy FNV-1a checksum for this header. The
+        // module's local checksum32 name resolves to CRC32C for binary frames.
+        // Substituting it here would reject intact legacy databases.
         if version != 1 || crate::hash::checksum32(&header[0..36]) != header_checksum {
             push_record_boundary_issue(
                 &mut report,
@@ -1207,8 +2222,14 @@ fn scan_open_file_with_records_in(
             break;
         }
 
+        // Check the declared size against the file before reserving memory. A torn
+        // final write should be reported as a tail even on a reader too small to
+        // allocate the advertised payload.
         let payload_start = offset + LEGACY_RECORD_HEADER_LEN as u64;
         let remaining = file.metadata()?.len().saturating_sub(payload_start);
+        // The remaining length starts after this header. An exactly fitting payload
+        // is complete even if it is the final item in the file. Whether it becomes
+        // visible depends on decoding a commit.
         if payload_len_u64 > remaining {
             report.findings.push(issue(
                 "warning",
@@ -1222,6 +2243,10 @@ fn scan_open_file_with_records_in(
             ));
             break;
         }
+        // The length belongs to a 64-bit file format. Even when all those bytes
+        // exist on disk, the older buffering decoder can only address a value that
+        // fits usize. Keep an unaddressable length distinct from a truncated final
+        // record.
         let payload_len = usize::try_from(payload_len_u64).map_err(|_| {
             Error::new(
                 ErrorCode::FileFormatError,
@@ -1229,6 +2254,9 @@ fn scan_open_file_with_records_in(
             )
         })?;
 
+        // The old codec needs the full JSON input buffer while it produces a
+        // catalog summary. Charge that allocation separately from record_work,
+        // which can remain with pending records until their commit is found.
         let mut input_work = context.reservation();
         let mut payload = Vec::new();
         input_work
@@ -1237,11 +2265,18 @@ fn scan_open_file_with_records_in(
                 payload_len,
                 crate::json::JsonInputKind::StoredJson,
             )
+            // Attribute an admission error to the outer frame. Even if no payload
+            // could be parsed, the validated header supplies a type and byte offset
+            // that identify the input for a larger-budget reader.
             .map_err(|err| {
                 err.with_detail("record_type", record_type_name(record_type))
                     .with_detail("record_offset", offset)
             })?;
         payload.resize(payload_len, 0);
+        // A prior length check cannot substitute for completing this read. Short
+        // data encountered on the actual read still produces a tail finding. Other
+        // I/O errors contain no evidence about whether the frame is complete and
+        // propagate to the caller.
         if let Err(err) = file.read_exact(&mut payload) {
             if err.kind() == std::io::ErrorKind::UnexpectedEof {
                 report.findings.push(issue(
@@ -1258,6 +2293,10 @@ fn scan_open_file_with_records_in(
             }
             return Err(Error::from(err));
         }
+        // The 64-bit checksum here covers the raw body only. Even JSON with the
+        // same logical values but different whitespace has different bytes.
+        // Re-serializing the decoded object would change what a legacy file is
+        // checked against.
         if checksum64(&payload) != payload_checksum {
             push_record_boundary_issue(
                 &mut report,
@@ -1270,6 +2309,9 @@ fn scan_open_file_with_records_in(
             break;
         }
 
+        // Establish byte integrity before interpreting the legacy body as text.
+        // Valid UTF-8 is only the first step. The following decoder also checks the
+        // JSON structure appropriate to the header's record type.
         let text = match std::str::from_utf8(&payload) {
             Ok(text) => text,
             Err(_) => {
@@ -1284,7 +2326,15 @@ fn scan_open_file_with_records_in(
                 break;
             }
         };
+        // At this point the frame checksum has passed. A JSON or workspace limit
+        // says what this reader could process, not that these on-disk bytes are
+        // corrupt. Preserve the resource error so a caller can distinguish those
+        // cases.
         let (record, record_work) =
+            // Summary decoding still parses the complete legacy JSON before
+            // dropping chunk text or embedding coordinates. Keep the encoded body
+            // alive through that parse. The catalog can fetch the full payload from
+            // its saved range later.
             match payload::decode_legacy_summary_in(record_type, text, context) {
                 Ok(record) => record,
                 Err(err)
@@ -1310,12 +2360,24 @@ fn scan_open_file_with_records_in(
                     break;
                 }
             };
+        // These counters describe frames the decoder has examined. The last valid
+        // commit and the byte boundary advance later. A complete data frame
+        // followed by EOF therefore contributes to the scan count without appearing
+        // in the recovered catalog.
         report.records_scanned += 1;
+        // Legacy batches are grouped by ID and can be encountered in an order
+        // independent of their maxima. Preserve the greatest numbers observed for
+        // diagnostics. A writer preparing a binary replacement takes its starting
+        // counters from the last successful commit.
         report.max_batch_id = report.max_batch_id.max(batch_id);
         report.max_sequence_no = report.max_sequence_no.max(sequence_no);
 
         match record {
             RecordPayload::Commit(commit) => {
+                // Select only the pending records under the ID in this frame's
+                // header. Use an empty candidate if no such batch exists. The
+                // common range check rejects it, even if a malformed commit claims
+                // zero records.
                 let mut batch = pending.remove(&batch_id).unwrap_or_else(|| {
                     (
                         Vec::new(),
@@ -1325,10 +2387,18 @@ fn scan_open_file_with_records_in(
                         ),
                     )
                 });
+                // Legacy commits summarize their own data records with an XOR of
+                // payload checksums. Check the sequence range as well as the count
+                // before moving critical_end_offset or handing the first record to
+                // the visitor.
                 let actual_checksum = batch
                     .0
                     .iter()
                     .fold(0xcbf29ce484222325u64, |acc, rec| acc ^ rec.payload_checksum);
+                // XOR alone cannot detect a permutation of the data frames. Check
+                // their order within the batch, match the two batch IDs, and
+                // require the commit sequence to immediately follow its last data
+                // frame.
                 let sequence_matches =
                     committed_batch_sequence_matches(&batch.0, &commit, batch_id);
                 if batch.0.len() == commit.record_count
@@ -1337,15 +2407,27 @@ fn scan_open_file_with_records_in(
                     && commit.batch_id == batch_id
                     && Some(sequence_no) == commit.last_sequence_no.checked_add(1)
                 {
+                    // The accepted boundary includes the commit's own header and
+                    // payload. For example, a batch with data sequences 12 and 13
+                    // becomes visible when the frame numbered 14 commits it.
                     report.last_valid_commit = commit.batch_id;
                     report.last_valid_commit_sequence_no = sequence_no;
                     report.critical_end_offset =
                         offset + LEGACY_RECORD_HEADER_LEN as u64 + payload_len as u64;
                     report.commits += 1;
+                    // Deliver this batch in its recorded order while its shared
+                    // reservation is available for the visitor to take ownership of
+                    // long-lived fields. A visitor error aborts the scan rather
+                    // than returning a report that implies all records were
+                    // applied.
                     for record in batch.0 {
                         visit(record, &mut batch.1)?;
                     }
                 } else {
+                    // Point to the first data frame of the rejected batch when one
+                    // is known. If the commit had no pending data, its own offset
+                    // is the only definite location. Stop scanning here so a later
+                    // commit cannot hide the broken boundary.
                     let diagnostic_offset = batch
                         .0
                         .first()
@@ -1365,6 +2447,9 @@ fn scan_open_file_with_records_in(
                 }
             }
             payload => {
+                // Save the immutable file range next to the decoded summary. Later
+                // payload access can verify the bytes at that range even if the
+                // catalog retained only IDs and metadata during replay.
                 let record_ref = RecordRef {
                     offset,
                     record_type: record_type_name(record_type),
@@ -1376,6 +2461,10 @@ fn scan_open_file_with_records_in(
                         checksum: payload_checksum,
                     },
                 };
+                // The reservation for a pending batch covers allocations from all
+                // its decoded records. Merge each record's charge before storing
+                // the value so it remains accounted for after the iteration's raw
+                // input buffer goes away.
                 let batch = pending.entry(batch_id).or_insert_with(|| {
                     (
                         Vec::new(),
@@ -1395,6 +2484,12 @@ fn scan_open_file_with_records_in(
         }
     }
 
+    // A batch may have complete, checksummed data frames but no matching commit. Its
+    // records stay out of the visitor and the append boundary remains at the last
+    // accepted commit.
+    // Report the lowest remaining batch ID as a diagnostic hint. Several unfinished
+    // IDs can remain, so the value identifies neither their number nor a physical
+    // truncate offset.
     if !pending.is_empty() {
         report.findings.push(issue(
             "warning",
@@ -1411,25 +2506,42 @@ fn scan_open_file_with_records_in(
     Ok(report)
 }
 
+// Recover only the contiguous sequence of committed batches. Individual data records
+// can pass their own checks and still belong to an interrupted batch. Defer the visitor until
+// the commit verifies their sequence range and batch checksum.
 fn scan_binary_file(
     file: &mut File,
     index_options: IndexReadOptions,
     context: &crate::json::JsonOperationContext,
     visit: &mut dyn FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
 ) -> Result<ScanReport> {
+    // read_header has already checked the binary header and positioned the cursor
+    // at the first main-log frame. Use the observed file length as the outer bound
+    // on frame ranges. Recovery follows framing forward and stops at its first
+    // terminal boundary.
     let file_len = file.metadata()?.len();
     let mut report = ScanReport {
         critical_end_offset: HEADER_LEN as u64,
         ..ScanReport::default()
     };
+    // Keep a pending batch, a CRC for its data frames, and a second CRC for the
+    // compacted data prefix. At an ordinary commit only the batch CRC restarts. A
+    // compact marker later in the file can thus verify data written before several
+    // earlier commits.
     let mut pending = recovery::PendingBatch::new(context);
     let mut batch_crc = Crc32c::default();
     let mut data_crc = Crc32c::default();
+    // Observe allocated IDs while scanning so a compact marker cannot silently
+    // lower a previously seen watermark. This map is validation scratch. New
+    // catalog contents still reach the visitor only through a valid commit.
     let mut id_high_watermarks = BTreeMap::new();
     let mut expected_sequence = 1u64;
     let mut expected_batch = 1u64;
     loop {
         let offset = file.stream_position()?;
+        // The scan length is captured once for the binary stream. EOF exactly at
+        // that length ends framing. The pending-batch check below still needs to
+        // run, even when there is no partial header to diagnose.
         if offset == file_len {
             break;
         }
@@ -1438,6 +2550,10 @@ fn scan_binary_file(
             if err.kind() != std::io::ErrorKind::UnexpectedEof {
                 return Err(err.into());
             }
+            // A short header cannot advance the committed prefix. With a batch in
+            // progress, or enough magic to identify another main-log frame,
+            // attribute the tail to the critical stream. Only a tail after a commit
+            // with neither indication is classified as index data here.
             let stream =
                 if pending.is_empty() && report.last_valid_commit > 0 && &header[..4] != b"CFRL" {
                     "index"
@@ -1456,10 +2572,20 @@ fn scan_binary_file(
             ));
             break;
         }
+        // An index checkpoint follows a complete main log. Its magic is meaningful
+        // only at the accepted boundary with no batch open. Treating an in-batch
+        // byte pattern as a suffix could hide the rest of a main-log write.
+        // The header-only main stream also has a well-defined boundary. An index at
+        // that position is passed the initial zero batch and commit sequence, so
+        // its own coverage fields must agree with the empty main log.
         if pending.is_empty()
             && offset == report.critical_end_offset
             && &header[..8] == INDEX_CHECKPOINT_MAGIC
         {
+            // The bytes already read have the length of a main-log header. The
+            // checkpoint parser needs the complete outer index header and its own
+            // framing, so rewind to the recognized boundary and give it the
+            // accepted commit identity for comparison.
             file.seek(SeekFrom::Start(offset))?;
             let parsed = read_index_checkpoint_suffix_in(
                 file,
@@ -1471,6 +2597,11 @@ fn scan_binary_file(
                 (index_options, context),
             )?;
             match parsed {
+                // All mandatory per-record, referenced-segment and completion
+                // checks have passed. The aggregate payload CRC can still disagree,
+                // in which case the parser returns a warning alongside its report.
+                // Keep that warning and any lazy segment source together so the
+                // caller can decide how to use this checkpoint.
                 Ok(parsed) => {
                     for diagnostic in parsed.diagnostics {
                         let batch_id = report.last_valid_commit;
@@ -1481,6 +2612,10 @@ fn scan_binary_file(
                             Some(batch_id),
                         );
                     }
+                    // Keep structural coverage and a lazy segment source as
+                    // separate results. Summary-mode callers can see which commit a
+                    // suffix names without retaining a source for later vector or
+                    // text reads.
                     report.index_suffix = Some(parsed.report);
                     #[cfg(test)]
                     {
@@ -1489,6 +2624,34 @@ fn scan_binary_file(
                     report.lazy_vector_checkpoint = parsed.lazy_vectors;
                 }
                 Err(diagnostic) => {
+                    // The magic alone cannot identify the damaged region as disposable.
+                    // Other fields in the prefix independently bind an index to this commit.
+                    if diagnostic.code == "unsupported_index_checkpoint"
+                        && read_u16(&header[10..12]) as usize != INDEX_CHECKPOINT_HEADER_LEN
+                        && read_u64(&header[20..28]) != offset
+                        && read_u64(&header[28..36]) != report.critical_end_offset
+                    {
+                        // Here the unsupported format and all three inconsistent
+                        // identifying fields leave room for a damaged main-log
+                        // frame at exactly this offset. Mark the stream unknown and
+                        // block ordinary use of the main data. Guessing an index
+                        // here could authorize removal of business records.
+                        report.findings.push(issue(
+                            "error",
+                            "ambiguous_record_boundary",
+                            "cannot distinguish a damaged main-data frame from an index suffix",
+                            "unknown",
+                            "blocks_main",
+                            Some(offset),
+                            None,
+                            None,
+                        ));
+                        break;
+                    }
+                    // Other recognized checkpoint failures describe the derived
+                    // suffix. Keep the diagnostic attached to the last committed
+                    // batch and let recovery finish with that prefix. Rebuilding an
+                    // index can then proceed independently of replaying main data.
                     let batch_id = report.last_valid_commit;
                     push_index_suffix_diagnostic_issue(
                         &mut report,
@@ -1498,8 +2661,15 @@ fn scan_binary_file(
                     );
                 }
             }
+            // The checkpoint format describes a terminal suffix. Even on success
+            // the data-frame loop ends here. Its record headers, payload and extent
+            // table belong to the checkpoint reader.
             break;
         }
+        // A full header that matches neither signature provides no reliable frame
+        // length to skip. Classify it using its position relative to the verified
+        // prefix and stop. Searching for another magic string inside arbitrary
+        // payload bytes could fabricate a record boundary.
         if &header[..4] != b"CFRL" {
             push_record_boundary_issue(
                 &mut report,
@@ -1516,6 +2686,10 @@ fn scan_binary_file(
         let sequence_no = read_u64(&header[24..32]);
         let payload_len = read_u64(&header[34..42]);
         let payload_checksum = read_u32(&header[42..46]);
+        // The type and identifiers just decoded can label a finding, but cannot yet
+        // establish ordering or the range to read. A failed header CRC on a
+        // recognized main-log frame blocks recovery at this point, even if there
+        // was an earlier valid commit.
         if checksum32(&header[..46]) != read_u32(&header[46..50]) {
             report.findings.push(issue(
                 "error",
@@ -1529,11 +2703,22 @@ fn scan_binary_file(
             ));
             break;
         }
+        // The binary header stores both total frame bytes and payload bytes.
+        // Checked addition makes an overflowing declared length fail the same
+        // structural comparison as two inconsistent lengths.
         let length = payload_len.checked_add(RECORD_HEADER_LEN as u64);
+        // A compacted file can start above one. Take the starting counters from its
+        // first physical record, then require each following frame to continue the
+        // sequence and each commit to advance the batch. Zero is reserved even for
+        // the first frame.
         if offset == HEADER_LEN as u64 {
             expected_batch = batch_id;
             expected_sequence = sequence_no;
         }
+        // Cross-check the redundant record and header lengths, the supported record
+        // type, and the two positive counters before using the payload length. For
+        // example, a correctly checksummed frame with a skipped sequence still
+        // breaks continuity and cannot extend the recoverable stream.
         if read_u16(&header[6..8]) != 1
             || read_u16(&header[32..34]) != RECORD_HEADER_LEN as u16
             || length != Some(read_u64(&header[8..16]))
@@ -1555,6 +2740,10 @@ fn scan_binary_file(
             ));
             break;
         }
+        // Convert the header offset to an absolute payload position with checked
+        // arithmetic. Compare the advertised byte count with the remaining input
+        // before allocating a decoding buffer. An interrupted write with a complete
+        // header can thus be classified even on a memory-constrained reader.
         let payload_offset = offset
             .checked_add(RECORD_HEADER_LEN as u64)
             .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "record offset overflow"))?;
@@ -1571,12 +2760,23 @@ fn scan_binary_file(
             ));
             break;
         }
+        // A frame has its own payload checksum. The batch checksum spans data
+        // frames up to their commit, while the compact marker describes data
+        // across batches. Save the prefix before adding the marker's own frame.
         let compact_prefix_checksum = data_crc.finish();
         let data_record = record_type != COMMIT;
+        // Both running checksums use the serialized header followed by the
+        // serialized payload, in file order. Commit frames have their own payload
+        // checksum and are omitted here, so a commit can carry the checksum of the
+        // data preceding it.
         if data_record {
             batch_crc.update(&header);
             data_crc.update(&header);
         }
+        // Hold the native string allocations separately from decoded JSON. Defer
+        // any input-buffer admission error until the bytes have been checked. A
+        // corrupt complete frame should remain diagnosable when the preferred
+        // decoding resources are unavailable.
         let mut strings = context.workspace_reservation();
         let (mut input_work, mut input_error) = match PayloadInputReservation::new(
             context,
@@ -1587,9 +2787,17 @@ fn scan_binary_file(
             Ok(work) => (Some(work), None),
             Err(error) => (None, Some(error)),
         };
+        // A decoder may stop on a budget refusal before consuming the payload.
+        // Drain the frame to check its length and checksum. If releasing optional
+        // buffers permits a retry, rewind both the file and the checksum states
+        // so that each payload byte contributes exactly once.
         let initial_batch_crc = batch_crc;
         let initial_data_crc = data_crc;
         let (decoded, actual_checksum, bytes_read) = loop {
+            // Limit the underlying reader to exactly this payload. A buffered
+            // decoder may request more bytes than its next field needs. Confining
+            // read-ahead keeps the following record header out of this frame's
+            // checksum and leaves it available to the outer loop.
             let mut reader = CheckedPayloadReader {
                 source: BufReader::with_capacity(
                     input_work
@@ -1603,6 +2811,9 @@ fn scan_binary_file(
                 data_record,
                 bytes_read: 0,
             };
+            // Decode the catalog summary with the current operation's reservations.
+            // Large fields omitted from the summary still belong to the stored
+            // payload and must pass through the checksum reader.
             let decoded = match input_error.take() {
                 None => codec::decode_reader_with_kind_in(
                     record_type,
@@ -1615,6 +2826,10 @@ fn scan_binary_file(
                 ),
                 Some(error) => Err(error),
             };
+            // Consume all bytes left after decoding, including when admission
+            // failed before the first field. The scan can then distinguish a
+            // valid-length frame with a reader limit from short or damaged bytes
+            // independently of the decoder's stopping point.
             std::io::copy(&mut reader, &mut std::io::sink())?;
             let checksum = reader.payload_crc.finish();
             let bytes_read = reader.bytes_read;
@@ -1622,12 +2837,22 @@ fn scan_binary_file(
             let budget_error = decoded.as_ref().is_err_and(|error| {
                 crate::json::is_limit_error(error) || error.code() == ErrorCode::ResourceExhausted
             });
+            // Only reconsider a resource refusal on a complete payload whose
+            // checksum agrees. Discarding the pending cache preserves its first
+            // offset, count and sequence endpoints, which are sufficient to reread
+            // previous records after a valid commit. Dropping optional input
+            // buffering permits the current frame to be decoded directly.
             if budget_error && checksum == payload_checksum && bytes_read == payload_len {
                 let discarded = pending.discard_buffer();
                 let unbuffered = input_work
                     .as_mut()
                     .is_some_and(PayloadInputReservation::disable_optional_buffering);
                 if discarded || unbuffered {
+                    // Release string credit from the failed attempt before charging
+                    // its replacement. If there was no input guard because
+                    // admission itself failed, construct it again after reclaiming.
+                    // Without either optional resource to shed, another pass would
+                    // repeat the same failure.
                     strings.retain(0);
                     if input_work.is_none() {
                         (input_work, input_error) = match PayloadInputReservation::new(
@@ -1640,6 +2865,11 @@ fn scan_binary_file(
                             Err(error) => (None, Some(error)),
                         };
                     }
+                    // Rewind to the payload, leaving its header already counted.
+                    // Restore the two running CRCs to their states immediately
+                    // after that header. Adding both the old and the retried
+                    // payload would make a valid later commit fail the batch
+                    // checksum.
                     file.seek(SeekFrom::Start(payload_offset))?;
                     batch_crc = initial_batch_crc;
                     data_crc = initial_data_crc;
@@ -1648,7 +2878,13 @@ fn scan_binary_file(
             }
             break (decoded, checksum, bytes_read);
         };
+        // The input buffer is only needed to read this one frame. Drop its credit
+        // before handing a committed batch to the visitor, which may allocate
+        // catalog data or reread records using the same operation budget.
         drop(input_work);
+        // Classify a short read before inspecting decoded fields. For a complete
+        // frame, preserve underlying I/O errors and check the stored checksum before
+        // accepting a payload or reporting a semantic decode error.
         if bytes_read != payload_len {
             report.findings.push(issue(
                 "warning",
@@ -1667,6 +2903,10 @@ fn scan_binary_file(
                 return Err(decoded.err().expect("decode failed"));
             }
         }
+        // For example, damaged chunk text can cause the typed decoder to reject its
+        // content and also change the frame CRC. For a complete read, the mismatch
+        // identifies byte corruption even when the semantic decoder already
+        // returned an error.
         if actual_checksum != payload_checksum {
             report.findings.push(issue(
                 "error",
@@ -1680,6 +2920,10 @@ fn scan_binary_file(
             ));
             break;
         }
+        // Byte length and integrity have now been established. A remaining budget
+        // failure names the specific record and offset so a caller can distinguish
+        // reader limits from media damage. A semantic decoding failure on these
+        // same complete bytes blocks main-data recovery.
         let (record, json_work) = match decoded {
             Ok(record) => record,
             Err(err)
@@ -1704,7 +2948,14 @@ fn scan_binary_file(
                 break;
             }
         };
+        // The compact marker checks the rewritten data prefix, excluding its own
+        // frame. The source's last commit must also precede the first sequence in
+        // this output batch, even if the marker is its only data record.
         if let RecordPayload::CompactMarker(marker) = &record {
+            // Compare against the saved prefix value taken before this marker's
+            // header. A marker in a later output batch includes earlier batches'
+            // data in that value and excludes the commit frames that separated
+            // them.
             if marker.compacted_main_checksum != compact_prefix_checksum {
                 report.findings.push(issue(
                     "error",
@@ -1721,6 +2972,11 @@ fn scan_binary_file(
             if marker.source_last_commit_sequence_no
                 >= pending.first_sequence().unwrap_or(sequence_no)
             {
+                // For a batch containing only the marker, the marker's own sequence
+                // is the earliest output sequence. For a longer batch, compare
+                // against the first data frame already pending. This prevents an
+                // output batch from claiming to rewrite a source commit that
+                // overlaps it.
                 report.findings.push(issue(
                     "error",
                     "file_format_error",
@@ -1734,6 +2990,10 @@ fn scan_binary_file(
                 break;
             }
         }
+        // Process ordinary IDs and marker watermarks in log order. If the marker
+        // would lower any high watermark already seen in this prefix, stop before
+        // it can reach the catalog. Otherwise a compacted database could reuse an
+        // ID from its own history.
         if let Err(err) = recover_id_high_watermarks(&record, &mut id_high_watermarks) {
             report.findings.push(issue(
                 "error",
@@ -1747,10 +3007,21 @@ fn scan_binary_file(
             ));
             break;
         }
+        // A record counted as scanned can still belong to an open or invalid batch.
+        // For example, a complete final data frame advances the observed sequence
+        // here while last_valid_commit and critical_end_offset continue to identify
+        // the previous commit.
         report.records_scanned += 1;
         report.max_sequence_no = sequence_no;
         report.max_batch_id = batch_id;
+        // The commit describes the pending range. Only after its count, endpoints
+        // and batch CRC agree may the visitor see those records. In particular,
+        // exhausting the optional buffer changes how pending.visit obtains them, not
+        // which records it visits.
         if let RecordPayload::Commit(commit) = record {
+            // Reconcile the decoded commit ID with the enclosing frame and the
+            // expected batch. A correctly checksummed commit claiming zero data
+            // frames still fails because the pending range must be nonempty.
             if commit.batch_id != batch_id
                 || commit.batch_checksum != batch_crc.finish() as u64
                 || !pending.matches(&commit)
@@ -1768,17 +3039,32 @@ fn scan_binary_file(
                 ));
                 break;
             }
+            // Release the decoded commit and its allocations before delivery. If
+            // pending data had to be evicted, delivery rereads its frames and may
+            // need this same workspace. The replay routine restores the cursor to
+            // the end of the commit before returning.
             drop(commit);
             drop(json_work);
             drop(strings);
             pending.visit(file, batch_id, offset, context, visit)?;
+            // Only now has each committed record been offered to the visitor
+            // successfully. Its reservations may have moved into the catalog. A
+            // callback failure returns an operation error before exposing a new
+            // committed tip to the caller.
             report.commits += 1;
             report.last_valid_commit = batch_id;
             report.last_valid_commit_sequence_no = sequence_no;
             report.critical_end_offset = file.stream_position()?;
+            // Reset just the per-batch checksum and advance the expected batch ID.
+            // The cross-batch checksum and observed ID watermarks continue into the
+            // next batch so later compact markers can validate their full prefix.
             batch_crc = Crc32c::default();
             expected_batch = next_counter(batch_id)?;
         } else {
+            // Remember the data frame's physical range and the work reservations
+            // attached to its decoded summary. PendingBatch can keep the values or
+            // fall back to their byte range. Both paths wait for the same commit
+            // validation before invoking the visitor.
             pending.push(
                 json_work,
                 strings,
@@ -1799,8 +3085,18 @@ fn scan_binary_file(
                 },
             )?;
         }
+        // Every accepted frame consumes one sequence number, including the commit
+        // frame. It changes the expected batch only when it terminates that batch.
+        // For two data frames followed by a commit, the next batch starts three
+        // sequence numbers after the first data frame.
         expected_sequence = next_counter(sequence_no)?;
     }
+    // EOF can fall cleanly between frames while the final batch is still open.
+    // Report its presence for repair without advancing the commit counters past the
+    // last verified batch.
+    // This check also runs after an earlier finding breaks the loop. An unfinished
+    // batch can therefore accompany a blocking finding. Consumers choosing a repair
+    // action have to inspect the complete findings list.
     if !pending.is_empty() {
         report.findings.push(issue(
             "warning",
@@ -1816,10 +3112,18 @@ fn scan_binary_file(
     Ok(report)
 }
 
+// An index can follow the primary records in the same byte stream. A byte offset
+// alone cannot distinguish damage to the first main-data batch from garbage in the
+// index. Classifying a suffix requires a preceding commit that recovery actually
+// verified.
 fn is_after_visible_critical_prefix(report: &ScanReport, offset: u64) -> bool {
     report.last_valid_commit > 0 && offset >= report.critical_end_offset
 }
 
+// The scanner calls this when it can identify the record boundary but cannot
+// process the frame. A recognizable primary record after a good commit may be part
+// of the next batch. Only an unknown record type past that boundary is treated here
+// as damage to the optional index.
 fn push_record_boundary_issue(
     report: &mut ScanReport,
     offset: u64,
@@ -1828,6 +3132,9 @@ fn push_record_boundary_issue(
     record_type: Option<&str>,
     batch_id: Option<u64>,
 ) {
+    // An unrecognizable type after the visible end may be debris from an optional
+    // suffix, and no verified commit claims it. Keep the offset and any batch ID
+    // that could be read so a check can point to the damaged bytes.
     if is_after_visible_critical_prefix(report, offset) && record_type == Some("Unknown") {
         push_index_suffix_issue(
             report,
@@ -1839,6 +3146,9 @@ fn push_record_boundary_issue(
         );
         return;
     }
+    // A recognized main-data record keeps its original error, even if its offset is
+    // after a good commit. An invalid body or boundary on such a record is evidence
+    // about primary data and must remain visible to a main-data check.
     report.findings.push(issue(
         "error",
         code,
@@ -1851,6 +3161,9 @@ fn push_record_boundary_issue(
     ));
 }
 
+// The main-data prefix has its own commit and checksum. Report damage confined to
+// the following index as rebuildable so a caller can still inspect or open that
+// prefix. Nothing in this path rewrites the file.
 fn push_index_suffix_issue(
     report: &mut ScanReport,
     offset: u64,
@@ -1869,10 +3182,15 @@ fn push_index_suffix_issue(
         record_type,
         batch_id,
     );
+    // The index can be rebuilt from the primary stream. Recording a finding leaves
+    // the bad suffix in place. It does not imply its contents can be salvaged.
     finding.repair_available = true;
     report.findings.push(finding);
 }
 
+// Preserve the extent identity when the directory was readable far enough to supply
+// one. An offset tells an operator where validation broke, while the extent can
+// identify which index record that validation was checking.
 fn push_index_suffix_diagnostic_issue(
     report: &mut ScanReport,
     diagnostic: &IndexSuffixDiagnostic,
@@ -1894,20 +3212,32 @@ fn push_index_suffix_diagnostic_issue(
     report.findings.push(finding);
 }
 
+// The commit advertises the inclusive range of its data records. Matching the
+// endpoints alone misses a duplicate or a gap in the middle. Every member must
+// carry the batch ID and the next sequence number of its predecessor before any
+// member can be replayed.
 fn committed_batch_sequence_matches(
     batch: &[CommittedRecord],
     commit: &CommitPayload,
     batch_id: u64,
 ) -> bool {
+    // An empty slice has neither endpoint. It cannot match a commit, even when its
+    // declared endpoint fields happen to be equal.
     if batch.is_empty() {
         return false;
     }
+    // For example, a run numbered 10, 12, 12 has the same first and last sequence
+    // and count as 10, 11, 12. Requiring both the common batch ID and an
+    // uninterrupted sequence prevents replaying such a substitution as one complete
+    // run.
     batch
         .iter()
         .all(|record| record.record_ref.batch_id == batch_id)
         && batch.first().map(|record| record.record_ref.sequence_no)
             == Some(commit.first_sequence_no)
         && batch.last().map(|record| record.record_ref.sequence_no) == Some(commit.last_sequence_no)
+        // Compare adjacent values with checked arithmetic. A wrap from the maximum
+        // sequence number to zero does not make two on-disk records consecutive.
         && batch.windows(2).all(|records| {
             Some(records[1].record_ref.sequence_no)
                 == records[0].record_ref.sequence_no.checked_add(1)
@@ -1938,6 +3268,10 @@ where
     )
 }
 
+// Rewriting reads retained payloads from an existing committed view. Pass the
+// reservation into the new writer with the payload. Releasing it during the
+// iterator conversion would make those strings and JSON nodes appear free while
+// they are still being encoded.
 pub(crate) fn rewrite_database_retained_in<I, W>(
     storage: &mut Storage,
     records: I,
@@ -1951,6 +3285,9 @@ where
     I: IntoIterator<Item = Result<(RecordPayload, W)>>,
     W: Into<RecordReservation>,
 {
+    // These are stored values with an admitted lifetime, so the encoder can borrow
+    // their accounting context during each pass. A fresh caller batch uses a
+    // separately prepared encoding plan.
     storage.rewrite_records_with_hook(
         records.into_iter().map(|record| {
             record.map(|(payload, work)| WriteRecord {
@@ -1962,6 +3299,10 @@ where
         plan,
         durability,
         context,
+        // The caller supplies a one-shot reclaim hook because existing lookup
+        // structures may still own memory needed by the rewrite. The visitor gets
+        // the reservation of the newly written record and may retain part of it
+        // with the rebuilt catalog.
         reclaim,
         |_, _| Ok(()),
         visit,
@@ -1982,23 +3323,52 @@ where
     storage.rewrite_with_iter_with_hook(records, plan, durability, |_, _| Ok(()), visit)
 }
 
+// Creating the file and installing a usable header are one operation from the
+// caller's perspective. Exclusive creation protects an existing database, and
+// header failure should normally leave the name available for a later attempt.
 fn create_storage_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
+    // Creation must fail if this name already belongs to a database. Truncating an
+    // existing file here would destroy the only copy before the new header or any
+    // subsequent batch had been written.
     options.create_new(true).read(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        // Apply the private-file mode as part of open. Changing permissions after
+        // opening could briefly expose a newly created database under the process
+        // creation defaults.
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    write_header(&mut file)?;
-    file.sync_data()?;
-    Ok(file)
+    // The name already exists at this point. Sync the header before returning the
+    // handle so a successful create does not hand the caller a database with an
+    // unwritten format identifier.
+    let written = (|| {
+        write_header(&mut file)?;
+        file.sync_data()?;
+        Ok(file)
+    })();
+    // Keep the original write or sync error as the cause. If removing the
+    // incomplete file also failed, include that error so a caller knows why
+    // creating the same path again may report that it exists.
+    written.map_err(|mut err: Error| {
+        if let Err(failure) = std::fs::remove_file(path) {
+            err = err.with_detail("cleanup_error", failure);
+        }
+        err
+    })
 }
 
+// After a replacement, syncing the contents of the new file and syncing its
+// directory entry are separate operations. This helper handles the parent entry on
+// Unix when the supplied path names a nonempty parent.
 fn sync_parent_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
+        // A bare relative filename has an empty parent in Path. This implementation
+        // opens a directory only when the caller supplied a parent component. A
+        // successful return for a bare name does not imply a directory sync.
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -2007,6 +3377,9 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
             dir.sync_all()?;
         }
     }
+    // Directory syncing in this path is Unix-specific. The caller may already have
+    // synced the replacement file before calling this function. That operation
+    // concerns the contents, while this step concerns its name.
     #[cfg(not(unix))]
     {
         let _ = path;
@@ -2014,14 +3387,25 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// Batch and record sequence numbers are used to establish order on reopening.
+// Recycling zero after overflow could make a new commit indistinguishable from an
+// older range.
 fn next_counter(value: u64) -> Result<u64> {
     value
         .checked_add(1)
         .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "storage counter exhausted"))
 }
 
+// Buffering the payload is optional. Which reservation owns a read buffer depends
+// on the kind of work it competes with. The parser and the general workspace share
+// limits with different portions of the reader.
 enum PayloadInputReservation {
+    // JSON-bearing record kinds take input capacity from the same operation that
+    // admits their decoded JSON. Holding an optional input buffer must not force a
+    // valid value out of that budget.
     Json(crate::json::JsonReservation),
+    // Other record kinds can use spare general workspace for read-ahead. A zero
+    // grant still leaves the underlying reader usable.
     Workspace(crate::json::WorkspaceReservation),
 }
 
@@ -2032,9 +3416,16 @@ impl PayloadInputReservation {
         payload_len: u64,
         kind: crate::json::JsonInputKind,
     ) -> Result<Self> {
+        // Bound read-ahead by both the on-disk payload length and the preferred
+        // buffer size. Keeping the file length as u64 until after the bound avoids
+        // narrowing an unchecked size from the header.
         let capacity = payload_len.min(64 * 1024) as usize;
         if matches!(record_type, COLLECTION_CREATE | DOCUMENT_PUT | CHUNK_PUT) {
             let mut work = context.reservation();
+            // A denial for this optional read buffer can leave the decoder on the
+            // unbuffered path. Propagate unrelated errors because an invalid
+            // accounting operation cannot be repaired by reading fewer bytes at a
+            // time.
             if let Err(error) = work.grow(capacity, kind) {
                 if !crate::json::is_memory_budget_error(&error) {
                     return Err(error);
@@ -2052,6 +3443,8 @@ impl PayloadInputReservation {
         }
     }
 
+    // A capacity of zero selects direct reads. The caller may ask for the capacity
+    // again after relinquishing optional buffering and retrying the same record.
     fn capacity(&self) -> usize {
         match self {
             Self::Json(work) => work.reserved_bytes(),
@@ -2059,6 +3452,9 @@ impl PayloadInputReservation {
         }
     }
 
+    // Return whether any charge was actually released. A second attempt is useful
+    // only when it can proceed with a smaller buffer. Repeating the same failing
+    // decode with a zero reservation would make no progress.
     fn disable_optional_buffering(&mut self) -> bool {
         match self {
             Self::Json(work) if work.reserved_bytes() > 0 => {
@@ -2069,23 +3465,45 @@ impl PayloadInputReservation {
                 work.retain(0);
                 true
             }
+            // No capacity was returned in this case. This tells the retry loop that
+            // removing read-ahead cannot free any more memory for required decoded
+            // fields.
             _ => false,
         }
     }
 }
 
+// One pass through the payload feeds three checks with different lifetimes. Each
+// read updates the checksum local to the record. Data records also contribute to
+// the open batch and to the stream used to validate compaction markers. The commit
+// record closes the batch and must not include itself in that batch's checksum.
 struct CheckedPayloadReader<'a, R> {
+    // The bounded payload source at its current position. Its caller supplies the
+    // frame boundary so decoding one record cannot read into the following header.
     source: R,
+    // Checksum of the bytes supplied for this payload alone, compared with the
+    // checksum in its record header.
     payload_crc: Crc32c,
+    // Accumulator for data frames since the previous commit. The caller contributes
+    // each header and this reader contributes its payload.
     batch_crc: &'a mut Crc32c,
+    // Accumulator for the primary data-record stream used to validate a compacted
+    // database. It crosses batch boundaries.
     data_crc: &'a mut Crc32c,
+    // False when decoding the commit itself. Its payload is checked locally but
+    // excluded from both data-frame accumulators.
     data_record: bool,
+    // Number of payload bytes returned by the source. A decoder that leaves
+    // trailing bytes has not verified the whole record.
     bytes_read: u64,
 }
 
 impl<R: Read> Read for CheckedPayloadReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let count = self.source.read(buffer)?;
+        // Hash the prefix the source actually returned. A short read is valid for a
+        // Read implementation, and hashing the unused part of the buffer would make
+        // validation depend on read sizes.
         let bytes = &buffer[..count];
         self.payload_crc.update(bytes);
         if self.data_record {
@@ -2097,10 +3515,16 @@ impl<R: Read> Read for CheckedPayloadReader<'_, R> {
     }
 }
 
+// Recover the allocation history as primary records are decoded. Live object counts
+// cannot supply the next ID after deletion or compaction. For example, a marker can
+// preserve a higher document ID than any document left in the rewritten file.
 fn recover_id_high_watermarks(
     record: &RecordPayload,
     watermarks: &mut BTreeMap<&'static str, u64>,
 ) -> Result<()> {
+    // Only the ID that this record creates, retires or names as a deletion target
+    // advances a namespace. Foreign keys in a chunk or embedding describe
+    // relationships and are not new allocations made by that record.
     let id = match record {
         RecordPayload::CollectionCreate(collection) => Some(collection.collection_id.as_str()),
         RecordPayload::CollectionDrop { collection_id, .. } => Some(collection_id.as_str()),
@@ -2109,8 +3533,14 @@ fn recover_id_high_watermarks(
         RecordPayload::EmbeddingPut(embedding) => Some(embedding.embedding_id.as_str()),
         RecordPayload::Tombstone(tombstone) => Some(tombstone.target_id.as_str()),
         RecordPayload::CompactMarker(marker) => {
+            // Check every recognized namespace before replacing any watermark. A
+            // malformed marker that moves one namespace backward cannot make the
+            // other namespaces from that same marker authoritative.
             for prefix in ["col_", "doc_", "chk_", "emb_"] {
                 let value = marker.id_high_watermarks.get(prefix).copied().unwrap_or(0);
+                // The absence of a namespace in an older marker means zero here.
+                // This is safe only if the scan has not already found a larger ID
+                // for that namespace in the replacement file.
                 if value < watermarks.get(prefix).copied().unwrap_or(0) {
                     return Err(Error::new(
                         ErrorCode::FileFormatError,
@@ -2118,6 +3548,9 @@ fn recover_id_high_watermarks(
                     ));
                 }
             }
+            // Missing entries have the same zero value used by the comparison
+            // above. Copy the four allocation namespaces supported by the catalog,
+            // rather than adopting arbitrary names from stored metadata.
             for prefix in ["col_", "doc_", "chk_", "emb_"] {
                 watermarks.insert(
                     prefix,
@@ -2128,8 +3561,15 @@ fn recover_id_high_watermarks(
         }
         RecordPayload::Commit(_) => None,
     };
+    // A tombstone can carry the largest ID seen for its namespace. Taking the
+    // maximum for every occurrence prevents a later update to an older object from
+    // reducing that allocation boundary.
     if let Some(id) = id {
         for prefix in ["col_", "doc_", "chk_", "emb_"] {
+            // Unrecognized namespaces do not participate in these counters. Once a
+            // recognized prefix matches, a malformed number is a format error.
+            // Ignoring it might let a later allocation reuse an ID in that
+            // namespace.
             if let Some(number) = id.strip_prefix(prefix) {
                 let value = number.parse::<u64>().map_err(|_| {
                     Error::new(ErrorCode::FileFormatError, "invalid object allocation ID")
@@ -2143,14 +3583,33 @@ fn recover_id_high_watermarks(
     Ok(())
 }
 
+// One logical primary record can be backed by staged bytes, by an admitted caller
+// batch, or by stored data being rewritten. Keep the catalog payload alongside the
+// encoding choice so the post-write locator and the on-disk bytes describe the same
+// record.
 struct WriteRecord<'a> {
+    // Logical value retained for the catalog or record visitor when requested.
+    // Prepared writes may carry only the fields needed there.
     payload: RecordPayload,
+    // Stable staging handle and payload locator, when preparation already
+    // established the encoded length and checksum. This offset is in the staging
+    // file, not the destination database.
     prepared: Option<(&'a File, PayloadRef)>,
+    // Encoding policy and any storage reservation that must live at least as long
+    // as the payload.
     encoding: RecordEncoding,
 }
 
+// Choose the encoding context explicitly. A newly admitted batch may have
+// per-record plans indexed by its ordinal. Records read during a rewrite instead
+// carry the workspace for their already stored values.
 enum RecordEncoding {
+    // Use the batch-wide plan passed to encode. A missing plan is an error because
+    // the caller already chose this representation.
     Batch,
+    // Use the context and reservation that arrived with the materialized record.
+    // Re-encoding it must keep that storage charged through both the digest and
+    // write passes.
     Stored(crate::json::JsonOperationContext, RecordReservation),
     #[cfg(test)]
     Reference,
@@ -2165,6 +3624,9 @@ impl RecordEncoding {
         ordinal: usize,
     ) -> Result<()> {
         match self {
+            // The ordinal selects the plan for this record. Silently substituting
+            // another plan would decouple admission from the bytes that are about
+            // to be emitted.
             Self::Batch => plan
                 .ok_or_else(|| {
                     Error::new(
@@ -2173,6 +3635,9 @@ impl RecordEncoding {
                     )
                 })?
                 .encode(ordinal, record, output),
+            // Stored JSON remains under the reservation delivered by the reader.
+            // Let the stored-value encoder reuse it while formatting the record
+            // into the current sink.
             Self::Stored(context, work) => {
                 codec::encode_stored_into(record, output, context, &mut work.json)
             }
@@ -2183,6 +3648,8 @@ impl RecordEncoding {
 }
 
 impl WriteRecord<'_> {
+    // No staging locator is implied by a prepared encoding plan. This path still
+    // runs the encoder over the logical payload.
     fn planned(payload: RecordPayload) -> Self {
         Self {
             payload,
@@ -2231,27 +3698,78 @@ where
     )
 }
 
+// A batch is a run of data frames followed by one commit frame. Appending a data
+// frame can allocate a sequence number, grow the file and produce a locator, but
+// leaves the run uncommitted. finish() writes the certificate for the whole run.
+// Recovery uses its advertised sequence range, record count and checksum to decide
+// whether those data frames are visible.
+//
+// Both ordinary appends and the compaction writer use this machinery. The latter
+// owns a temporary file and carries a second checksum across its batches. Its batch
+// may finish short of the admission limit when the next record would cross a byte
+// or memory target.
 struct BatchWriter<'a> {
+    // Destination positioned at the start of the next frame. The writer has
+    // exclusive mutable use of the handle while this batch is assembled.
     file: &'a mut File,
+    // Next unassigned record sequence number in the caller's stream. Each data
+    // frame takes one and the closing commit takes another.
     next_sequence_no: &'a mut u64,
+    // ID stamped on every frame of this batch, including its commit. It is assigned
+    // once when the writer is created.
     batch_id: u64,
+    // Absolute file offset where this batch begins. It is also the truncation point
+    // when copying a staged payload fails before the commit exists.
     batch_start: u64,
+    // Sequence number of the first data frame. Save it before consuming the shared
+    // counter so finish can describe the entire inclusive range.
     first_sequence_no: u64,
+    // Maximum number of data records admitted to this writer. append_all requires
+    // the exact count. A rewrite can finish a smaller nonempty batch.
     record_limit: usize,
+    // Whether the caller needs to recover the logical records and their new
+    // locations from the append summary. Writing and checksumming do not depend on
+    // retention.
     retain_records: bool,
+    // Data frames whose entire header and payload have been written. A partial
+    // frame and the closing commit never count toward this value.
     written: usize,
+    // Sum of data-frame lengths, including their headers and excluding the commit.
+    // Rewrites use it to choose a boundary between whole records.
     encoded_bytes: u64,
+    // CRC32C of the ordered data headers and payloads in this batch. The commit
+    // stores this value and has a separate checksum for its own payload.
     batch_crc: Crc32c,
+    // For a rewrite, the running checksum of data frames across batches in the
+    // replacement file. It supplies the compact marker's checksum of the preceding
+    // data.
     compact_crc: Option<&'a mut Crc32c>,
+    // Optional owner of temporary disk charges for the rewrite destination. Charge
+    // each complete frame before attempting to extend the file.
     temporary_disk: Option<&'a mut crate::temporary::TempFileGuard>,
+    // Logical data records paired with their output locators, in write order.
+    // Returned only after finish completes the requested durability step.
     committed_records: Vec<CommittedRecord>,
+    // Digest sink and optional encoded bytes reused between data records. Its
+    // allocation can be surrendered when it competes with parsing the next payload.
     encoding: EncodingScratch,
+    // Reusable transfer buffer for staged payloads. Its size does not grow with the
+    // size of the record being copied.
     prepared_buffer: Vec<u8>,
+    // Reserved text space for the actual commit time. Acquiring the space before
+    // the first write avoids a fresh timestamp allocation at the commit boundary.
     commit_timestamp: crate::json::ReservedString,
+    // Ordinal-indexed encoding plan for fresh input. Rewrites encode stored
+    // payloads in their own context and prepared writes can copy their staged
+    // bytes.
     raw_encoding: Option<codec::BatchEncoding>,
 }
 
 impl<'a> BatchWriter<'a> {
+    // Admit the bookkeeping that can be checked up front before advancing the
+    // caller's batch counter. The record limit must leave an additional sequence
+    // number for the commit, even though the commit is excluded from the
+    // data-record count.
     fn new(
         file: &'a mut File,
         next_batch_id: &mut u64,
@@ -2267,11 +3785,18 @@ impl<'a> BatchWriter<'a> {
                 "cannot append an empty batch",
             ));
         }
+        // Check space for the next batch ID as well as the data and commit sequence
+        // numbers. This check also leaves room to advance the shared cursor past
+        // the commit. Once frames are being emitted the increments below can use
+        // the result without another overflow decision.
         let next_batch = next_counter(*next_batch_id)?;
         let sequence_count = u64::try_from(record_limit)
             .ok()
             .and_then(|count| count.checked_add(1))
             .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "batch record count overflow"))?;
+        // For two data frames starting at 10, the closing frame takes 12 and the
+        // next writer starts at 13. The capacity check proves that the cursor can
+        // advance after the commit as well as assign a number to the commit itself.
         next_sequence_no
             .checked_add(sequence_count)
             .ok_or_else(|| {
@@ -2280,6 +3805,9 @@ impl<'a> BatchWriter<'a> {
                     "storage sequence counter exhausted",
                 )
             })?;
+        // An upstream preparation may already own the timestamp buffer. Reuse its
+        // reservation if present. The timestamp value is filled at finish, so it
+        // records when the commit is constructed, not when its memory was admitted.
         let commit_timestamp = match commit_timestamp {
             Some(timestamp) => timestamp,
             None => crate::json::ReservedString::with_capacity(
@@ -2288,6 +3816,10 @@ impl<'a> BatchWriter<'a> {
                 "batch_prepare",
             )?,
         };
+        // A retained batch keeps one locator and payload per data record. The
+        // caller planned the slots for record_limit elements. Reject an oversized
+        // allocation before starting the batch rather than making the final summary
+        // own unaccounted spare slots.
         let mut committed_records = Vec::new();
         if retain_records {
             committed_records
@@ -2300,8 +3832,14 @@ impl<'a> BatchWriter<'a> {
                 .into());
             }
         }
+        // Save the physical end and the logical counters separately. An ordinary
+        // append may need to remove a prior index suffix and reset batch_start to
+        // the critical stream boundary before it writes its first frame.
         let batch_start = file.seek(SeekFrom::End(0))?;
         let batch_id = *next_batch_id;
+        // The caller's batch counter advances before any frame is committed. Its
+        // earlier visible boundary remains authoritative until finish succeeds or
+        // reopening establishes a new one.
         *next_batch_id = next_batch;
         let first_sequence_no = *next_sequence_no;
         Ok(Self {
@@ -2325,11 +3863,18 @@ impl<'a> BatchWriter<'a> {
         })
     }
 
+    // An advertised batch length is part of the append contract. A short iterator
+    // must not earn a commit for a prefix of the requested input, and an extra item
+    // cannot silently start the next batch. Check both ends while bytes are still
+    // uncommitted.
     fn append_all<'b>(
         mut self,
         records: impl IntoIterator<Item = Result<WriteRecord<'b>>>,
         durability: Durability,
     ) -> Result<AppendSummary> {
+        // The iterator may fail after yielding several records. Returning its error
+        // drops this writer without emitting a commit, so recovery cannot publish
+        // the prefix merely because all its individual frames look valid.
         for record in records {
             if self.written == self.record_limit {
                 return Err(Error::new(
@@ -2339,6 +3884,9 @@ impl<'a> BatchWriter<'a> {
             }
             self.append(record?)?;
         }
+        // An extra element is detected before it is appended. A short iterator can
+        // only be detected at the end. Both paths must fail before finish can
+        // certify the run.
         if self.written != self.record_limit {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
@@ -2348,6 +3896,10 @@ impl<'a> BatchWriter<'a> {
         self.finish(durability)
     }
 
+    // Append exactly one primary data frame. The length and checksum must be known
+    // before the header reaches disk. Staged, buffered and streamed encodings
+    // differ in how they obtain the payload bytes but must give recovery the same
+    // header, byte sequence and batch checksum.
     fn append(&mut self, record: WriteRecord<'_>) -> Result<()> {
         if self.written == self.record_limit {
             return Err(Error::new(
@@ -2355,6 +3907,10 @@ impl<'a> BatchWriter<'a> {
                 "batch record count mismatch",
             ));
         }
+        // Keep the chosen encoding together with the logical payload until its
+        // header, payload bytes and any retained catalog reference have all been
+        // built. A rewrite can encode the same record twice against this
+        // reservation.
         let WriteRecord {
             payload,
             prepared,
@@ -2362,9 +3918,17 @@ impl<'a> BatchWriter<'a> {
         } = record;
         // On every early return, free the payload before returning its reservation.
         let mut record = payload;
+        // Reserve the logical position before emitting the frame. A later write
+        // error can therefore leave the in-memory cursor ahead of the last
+        // committed byte. The outer writer deals with that uncertainty by reopening
+        // and scanning before another append.
         let offset = self.file.stream_position()?;
         let sequence_no = *self.next_sequence_no;
         *self.next_sequence_no += 1;
+        // A compact marker describes the data written before the marker. Take the
+        // checksum here, before adding the marker's own header or payload. A
+        // rewrite can span several committed batches, so its checksum must survive
+        // individual BatchWriter instances.
         if let RecordPayload::CompactMarker(marker) = &mut record {
             marker.compacted_main_checksum = self
                 .compact_crc
@@ -2373,7 +3937,15 @@ impl<'a> BatchWriter<'a> {
                 .unwrap_or_else(|| self.batch_crc.finish());
         }
         let mut stream_work = self.encoding.work.context().workspace_reservation();
+        // The frame header needs the payload length and digest before any bytes of
+        // the frame are written. A staged record supplies both from preparation;
+        // other records run through the encoder first and may keep all, or none, of
+        // the resulting bytes.
         let (payload_len, payload_checksum) = if let Some((_, source)) = &prepared {
+            // Prepared records supply an exact source span. Reuse a bounded buffer
+            // for all their copies, even if a single variable-length payload is
+            // much larger. The exact-capacity check keeps the allocated buffer
+            // within the staging plan.
             if self.prepared_buffer.is_empty() {
                 self.prepared_buffer
                     .try_reserve_exact(prepared::PREPARED_COPY_BYTES)
@@ -2387,6 +3959,9 @@ impl<'a> BatchWriter<'a> {
                 self.prepared_buffer
                     .resize(prepared::PREPARED_COPY_BYTES, 0);
             }
+            // The locator type can also represent wider checksums used by older
+            // encodings. The binary record header has a u32 CRC field. A staged
+            // value that does not fit cannot be represented by truncating it.
             (
                 source.len,
                 u32::try_from(source.checksum).map_err(|_| {
@@ -2397,6 +3972,10 @@ impl<'a> BatchWriter<'a> {
                 })?,
             )
         } else {
+            // This first pass can run entirely in memory. The digest advances even
+            // if EncodingScratch cannot retain the bytes. In that case the second
+            // pass will feed the same encoding plan and ordinal directly to the
+            // file.
             self.encoding.reset();
             stream_work.grow_to(0, 8192, "batch_prepare")?;
             let encoded = encoding.encode(
@@ -2405,6 +3984,10 @@ impl<'a> BatchWriter<'a> {
                 self.raw_encoding.as_ref(),
                 self.written,
             );
+            // The file still contains none of this frame, so it is safe to restart
+            // the encoder after dropping optional space. Once the header has been
+            // written, failures take the append error path and cannot use this
+            // retry.
             if encoded.as_ref().is_err_and(crate::json::is_limit_error)
                 && (self.encoding.work.reserved_bytes() > 0 || stream_work.reserved_bytes() > 0)
             {
@@ -2429,21 +4012,33 @@ impl<'a> BatchWriter<'a> {
             payload_len,
             payload_checksum,
         )?;
+        // Do all checked length accounting and obtain temporary disk credit before
+        // the first destination write. The required span includes the header as
+        // well as the payload, including when the payload is empty.
         let encoded_bytes = self
             .encoded_bytes
             .checked_add(read_u64(&header[8..16]))
             .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "batch byte count overflow"))?;
+        // A temporary-file grant covers the exact length written into the record
+        // header. If it cannot grow, this record has not yet extended the file.
         if let Some(temporary) = &mut self.temporary_disk {
             temporary.reserve_disk(read_u64(&header[8..16]))?;
         }
         #[cfg(test)]
         tests::write_at_crash_boundary(self.file, &header, "critical_header_partial")?;
         #[cfg(not(test))]
+        // The batch checksum uses the exact wire header followed by its payload.
+        // Buffered, streamed and staged-copy paths must all contribute those same
+        // bytes in order or the next recovery scan will reject the commit.
         self.file.write_all(&header)?;
         self.batch_crc.update(&header);
         if let Some(crc) = &mut self.compact_crc {
             crc.update(&header);
         }
+        // A staged locator addresses a different file. Copy that span and validate
+        // its checksum while forwarding bytes to the destination checksums. A good
+        // header in the staging file alone would not establish that the bytes
+        // copied here are intact.
         if let Some((source, payload)) = prepared {
             let copied = {
                 let mut output = PayloadWriter {
@@ -2455,13 +4050,23 @@ impl<'a> BatchWriter<'a> {
                 };
                 prepared::copy_payload(source, &payload, &mut output, &mut self.prepared_buffer)
             };
+            // Copying from the staging file can discover a short read or CRC
+            // mismatch after bytes have reached the database. Remove the whole
+            // current batch, including previously copied records in it, and restore
+            // the cursor before returning.
             if let Err(error) = copied {
                 // No commit has been emitted, so only this batch's suffix can be removed.
+                // If truncation or repositioning fails, return that I/O failure
+                // first. The original copy error is returned only after both
+                // cleanup operations succeed.
                 self.file.set_len(self.batch_start)?;
                 self.file.seek(SeekFrom::Start(self.batch_start))?;
                 return Err(error);
             }
         } else if payload_len == self.encoding.buffer.len() as u64 {
+            // Length equality means the digest sink retained the entire payload. A
+            // partially retained prefix must never be written as a full record,
+            // even when it happens to fit the requested I/O buffer.
             #[cfg(test)]
             tests::write_at_crash_boundary(
                 self.file,
@@ -2475,6 +4080,10 @@ impl<'a> BatchWriter<'a> {
                 crc.update(&self.encoding.buffer);
             }
         } else {
+            // The digest pass fixed the header already on disk. Stream the same
+            // logical value through the same plan without changing its ordinal or
+            // ownership. Only the bytes the destination accepts may enter the
+            // running checksums.
             let writer = PayloadWriter {
                 file: self.file,
                 batch_crc: &mut self.batch_crc,
@@ -2483,12 +4092,19 @@ impl<'a> BatchWriter<'a> {
                 crash_after: payload_len / 2,
             };
             let mut output = BufWriter::with_capacity(stream_work.reserved_bytes(), writer);
+            // A BufWriter may allocate more space than its requested minimum. If it
+            // exceeds the actual grant, discard it before it receives data and use
+            // the same underlying writer without buffering.
             if output.capacity() > stream_work.reserved_bytes() {
                 let (writer, buffer) = output.into_parts();
                 drop(buffer);
                 stream_work.retain(0);
                 output = BufWriter::with_capacity(0, writer);
             }
+            // Take the encoder result and the explicit flush together. Consuming
+            // the writer with into_parts below detaches its buffer without flushing
+            // it again. Retrying during destruction could change how much of the
+            // failed record is on disk.
             let written = encoding
                 .encode(
                     &record,
@@ -2503,8 +4119,14 @@ impl<'a> BatchWriter<'a> {
         }
         #[cfg(test)]
         tests::crash_boundary("critical_record_written")?;
+        // Save locators only after the full frame has been written. They are
+        // provisional until the batch commit succeeds; a decoded summary with an
+        // offset is not evidence of a committed record.
         if self.retain_records {
             let record_type = record_type_name(record_type_id(&record));
+            // A scanner starts at the record offset to validate its header. A point
+            // lookup starts after that header and uses the length and checksum in
+            // PayloadRef. Both offsets address this database file.
             self.committed_records.push(CommittedRecord {
                 payload: record,
                 record_ref: RecordRef {
@@ -2521,11 +4143,18 @@ impl<'a> BatchWriter<'a> {
                 payload_checksum: u64::from(payload_checksum),
             });
         }
+        // Advance the completed-frame counters last. A header alone, a partial
+        // payload, or a failed flush of the record buffer must not enter the count
+        // or byte total used in the commit.
         self.written += 1;
         self.encoded_bytes = encoded_bytes;
         Ok(())
     }
 
+    // Seal the open batch in the primary stream. The commit carries a checksum of
+    // the data frames, a range ending at the final data frame, and a sequence
+    // number of its own in the outer header. A missing or incomplete commit leaves
+    // the entire batch outside the visible prefix.
     fn finish(mut self, durability: Durability) -> Result<AppendSummary> {
         if self.written == 0 {
             return Err(Error::new(
@@ -2533,12 +4162,21 @@ impl<'a> BatchWriter<'a> {
                 "cannot append an empty batch",
             ));
         }
+        // Finish writing the data frames before constructing their commit. A crash
+        // here can leave valid-looking data at the end of the file. Recovery still
+        // needs the commit before exposing any of it.
         self.file.flush()?;
         #[cfg(test)]
         tests::crash_boundary("batch_before_commit")?;
+        // The timestamp buffer was reserved before taking the batch ID. Fill it
+        // only once the last data frame has been flushed. The string and its
+        // reservation travel together in the returned summary.
         self.commit_timestamp
             .append(|out| time::write_unix_millis(out, time::unix_millis_now()))?;
         let (committed_at, commit_work) = self.commit_timestamp.into_parts();
+        // The counter now points one past the last data frame. Store the inclusive
+        // endpoint in the payload. The next sequence number is reserved for the
+        // outer commit record and cannot also identify a data record.
         let commit = CommitPayload {
             batch_id: self.batch_id,
             first_sequence_no: self.first_sequence_no,
@@ -2549,6 +4187,10 @@ impl<'a> BatchWriter<'a> {
         };
         // Binary v1: four u64 fields, one u32 checksum, and one u64 timestamp.
         let mut payload = [0u8; codec::COMMIT_PAYLOAD_BYTES];
+        // The fixed-size encoding is part of the on-disk format. Writing past the
+        // slice fails through Write, and leaving bytes in the slice means the
+        // encoder wrote too few. Neither result should produce a padded or
+        // truncated commit.
         let mut remaining = payload.as_mut_slice();
         codec::encode_commit_into(&commit, &mut remaining, self.encoding.work.context())?;
         if !remaining.is_empty() {
@@ -2557,6 +4199,9 @@ impl<'a> BatchWriter<'a> {
                 "invalid commit payload length",
             ));
         }
+        // The provisional data-file charge excludes the yet-unwritten commit.
+        // Reserve its header and payload on the temporary guard as a separate frame
+        // so compaction cannot cross the disk limit while closing a batch.
         if let Some(temporary) = &mut self.temporary_disk {
             let bytes = (payload.len() as u64)
                 .checked_add(RECORD_HEADER_LEN as u64)
@@ -2565,6 +4210,9 @@ impl<'a> BatchWriter<'a> {
                 })?;
             temporary.reserve_disk(bytes)?;
         }
+        // The commit is a normal frame with an independent header and payload CRC.
+        // Its payload describes the completed data run, which is why this write
+        // bypasses the accumulator that produced the batch checksum.
         write_record(
             self.file,
             COMMIT,
@@ -2574,16 +4222,26 @@ impl<'a> BatchWriter<'a> {
         )?;
         #[cfg(test)]
         tests::crash_boundary("commit_written")?;
+        // A complete commit may already be readable even if a later flush or sync
+        // reports an error. The caller can settle the durable state only by
+        // reopening. A failed finish does not justify reissuing the same logical
+        // batch.
         let commit_sequence_no = *self.next_sequence_no;
         *self.next_sequence_no += 1;
         self.file.flush()?;
         #[cfg(test)]
         tests::crash_boundary("commit_flushed")?;
+        // Commit durability waits for the data sync after the commit has been
+        // flushed. Other policies can return after the flush. The returned record
+        // locations are the same under either policy.
         if durability == Durability::Commit {
             self.file.sync_data()?;
             #[cfg(test)]
             tests::crash_boundary("commit_synced")?;
         }
+        // Return the commit sequence separately from the last data sequence in its
+        // payload. Checkpoint coverage uses the former, while matching a data
+        // locator against the batch uses the latter.
         Ok(AppendSummary {
             commit,
             commit_sequence_no,
@@ -2594,23 +4252,44 @@ impl<'a> BatchWriter<'a> {
 }
 
 #[derive(Default)]
+// A first-pass output sink for measuring a binary payload without allocating its
+// on-disk length. The digest covers the complete encoding even when none of its
+// bytes will be kept.
 struct PayloadDigest {
+    // Number of encoded payload bytes seen by the sink. The surrounding record
+    // header is outside this count.
     len: u64,
+    // Incremental checksum in payload byte order. It can be finalized to populate
+    // the header before the real write begins.
     crc: Crc32c,
 }
 
+// Cap the optional in-memory copy of a record. This controls whether encoding can
+// avoid a second pass. It does not limit the on-disk size of a record that can be
+// streamed.
 const MAX_ENCODE_BUFFER_BYTES: usize = 64 * 1024;
 
 // Small records encode once; larger records retain only their digest and stream
 // a second pass. Reuse this bounded allocation across every record in a batch.
 struct EncodingScratch {
+    // Size and CRC of all bytes emitted during the measuring pass, independent of
+    // whether the buffer still contains them.
     digest: PayloadDigest,
+    // Possible full wire payload for the current record. After a write cannot be
+    // retained, an empty buffer marks the record for streaming.
     buffer: Vec<u8>,
+    // Charge for the backing allocation, including unused capacity that can be
+    // reused by a later record in the same batch.
     work: crate::json::WorkspaceReservation,
+    // Whether this sink may retain bytes. A memory-limit retry disables buffering
+    // so the encoder itself can use the released workspace.
     buffering: bool,
 }
 
 impl EncodingScratch {
+    // Start with no storage grant. Even where a batch reuses this sink for many
+    // records, a payload need not consume optional buffer space until keeping its
+    // bytes can save a second encoding pass.
     fn new(context: &crate::json::JsonOperationContext) -> Self {
         Self {
             digest: PayloadDigest::default(),
@@ -2620,17 +4299,26 @@ impl EncodingScratch {
         }
     }
 
+    // Disabling buffering restarts measurement from byte zero. The previous digest
+    // may include a prefix emitted by a failed encoder and cannot be continued by
+    // an encoder that restarts at the beginning.
     fn disable_buffering(&mut self) {
         self.release_buffer();
         self.digest = PayloadDigest::default();
         self.buffering = false;
     }
 
+    // Free the Vec before returning its byte charge. Clearing the length here would
+    // leave the allocation resident while another consumer was permitted to spend
+    // the same credit.
     fn release_buffer(&mut self) {
         self.buffer = Vec::new();
         self.work.retain(0);
     }
 
+    // Start a new complete digest and forget the previous record's bytes. Keep its
+    // capacity and reservation together, which makes repeated small records cheap
+    // to encode.
     fn reset(&mut self) {
         self.digest = PayloadDigest::default();
         self.buffer.clear();
@@ -2639,18 +4327,32 @@ impl EncodingScratch {
 
 impl Write for EncodingScratch {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // Measure first. If the optional copy cannot grow, Write still reports that
+        // the input was accepted by the digest. No bytes have gone to the database
+        // through this sink.
         let written = self.digest.write(bytes)?;
         if self.buffering
             && self.digest.len <= MAX_ENCODE_BUFFER_BYTES as u64
+            // After a buffer was cleared mid-record, later chunks may be short
+            // enough to fit again. Append only if the old buffer is the complete
+            // prefix of this digest. Otherwise an apparent final buffer would
+            // contain the tail of a different-length record.
             && self.buffer.len() as u64 + bytes.len() as u64 == self.digest.len
         {
             let length = self.digest.len as usize;
             if length > self.buffer.capacity() {
+                // Round up the preferred capacity to amortize small writes, but ask
+                // for a zero minimum. Failing to fit the whole payload can cost
+                // another encoding pass without making a valid append fail
+                // admission.
                 let capacity = length.next_power_of_two().min(MAX_ENCODE_BUFFER_BYTES);
                 let granted = self
                     .work
                     .grow_to(0, capacity, "batch_prepare")
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
+                // Keep the previous allocation charged when abandoning the buffered
+                // prefix. A partial grant cannot make its previously allocated
+                // capacity disappear.
                 if granted < length {
                     self.work.retain(self.buffer.capacity());
                     self.buffer.clear();
@@ -2659,6 +4361,9 @@ impl Write for EncodingScratch {
                 self.buffer
                     .try_reserve_exact(granted - self.buffer.len())
                     .map_err(std::io::Error::other)?;
+                // The allocator may return more than requested. Such an allocation
+                // must be freed before refunding its charge. Retaining it here
+                // would violate the ledger even though the digest remains correct.
                 if self.buffer.capacity() > granted {
                     self.buffer = Vec::new();
                     self.work.retain(0);
@@ -2668,6 +4373,9 @@ impl Write for EncodingScratch {
             }
             self.buffer.extend_from_slice(bytes);
         } else {
+            // Once a chunk has fallen out of the retained prefix, a later small
+            // chunk cannot fill the hole. Leave the buffer empty and finish
+            // measuring this record for the streaming pass.
             self.buffer.clear();
         }
         Ok(written)
@@ -2678,6 +4386,9 @@ impl Write for EncodingScratch {
     }
 }
 
+// Count bytes with checked arithmetic before accepting them into the hash. The
+// count becomes a wire length, so wrapping it would give the scanner an incorrect
+// location for the following header.
 impl Write for PayloadDigest {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.len = self
@@ -2693,9 +4404,18 @@ impl Write for PayloadDigest {
     }
 }
 
+// Streaming write adapter shared by re-encoding and by copying a prepared payload.
+// Its position in the output pipeline makes the checksums follow the destination's
+// short writes, including retries performed by write_all above it.
 struct PayloadWriter<'a> {
+    // Current destination handle. A buffering layer above this writer can delay
+    // when bytes first reach the file.
     file: &'a mut File,
+    // CRC of the data frames in the open batch, already updated with this record's
+    // header by the time payload writes arrive.
     batch_crc: &'a mut Crc32c,
+    // Optional CRC that spans the rewrite's data frames, carried across commits to
+    // validate the compact marker.
     compact_crc: Option<&'a mut Crc32c>,
     #[cfg(test)]
     crash_after: u64,
@@ -2713,6 +4433,9 @@ impl Write for PayloadWriter<'_> {
                 .len()
                 .min(usize::try_from(self.crash_after).unwrap_or(usize::MAX))]
         };
+        // Hash only the prefix accepted by this write call. Adding the entire
+        // requested slice would double-count the unwritten suffix when the caller
+        // retries a short write.
         let written = self.file.write(bytes)?;
         self.batch_crc.update(&bytes[..written]);
         if let Some(crc) = &mut self.compact_crc {
@@ -2730,31 +4453,62 @@ impl Write for PayloadWriter<'_> {
     }
 }
 
+// Only the database header belongs here. No empty commit or valid checkpoint is
+// implicit in creating a file. Both normal creation and replacement use this format
+// before appending their first batch.
 fn write_header(file: &mut File) -> Result<()> {
     file.write_all(&file_header(time::unix_millis_now()))?;
     Ok(())
 }
 
+// Lay out the critical part of the binary header independently of its advisory
+// hints. The critical checksum protects the format selectors, stream origin and
+// creation time. Readers can start at that origin and recover commits without
+// trusting any hint.
+//
+// All multibyte fields are little-endian. The opening version words distinguish the
+// binary layout from the older file with the same magic. Unassigned bytes start at
+// zero so new files have a reproducible header for a given creation time.
 fn file_header(created_at: u64) -> [u8; HEADER_LEN] {
     let mut header = [0; HEADER_LEN];
+    // Binary file header, with half-open byte ranges relative to file offset 0:
+    //   [0,12)   magic and two version words
+    //   [12,22)  byte order, checksum algorithm and feature bits
+    //   [22,40)  first frame offset, creation time and critical header length
+    //   [40,44)  CRC32C over [0,40)
+    //   [44,54)  hint version and hint bytes
+    //   [54,58)  CRC32C over [44,54)
+    // The primary stream begins after both checksum words.
     header[..8].copy_from_slice(MAGIC);
     header[10..12].copy_from_slice(&1u16.to_le_bytes());
     header[12] = 1;
     header[13] = 1;
+    // The first record follows the complete header, including the hint area. The
+    // critical header length stored below refers only to the fields and checksum
+    // needed to establish the format.
     header[22..30].copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
     header[30..38].copy_from_slice(&created_at.to_le_bytes());
     header[38..40].copy_from_slice(&44u16.to_le_bytes());
     let checksum = checksum32(&header[..40]);
     header[40..44].copy_from_slice(&checksum.to_le_bytes());
+    // The hint area has its own version and checksum. Keep it outside the critical
+    // checksum so incomplete hint updates do not invalidate the primary log.
     header[44..46].copy_from_slice(&1u16.to_le_bytes());
     let hint_checksum = checksum32(&header[44..54]);
     header[54..58].copy_from_slice(&hint_checksum.to_le_bytes());
     header
 }
 
+// Both codecs share the magic. Read only enough to choose a layout, then rewind so
+// its complete header, including that prefix, can be validated with the proper
+// checksum algorithm. An unknown version must not be treated as a fresh or empty
+// database.
 fn read_header(file: &mut File) -> Result<FileCodec> {
     let mut prefix = [0u8; 12];
     file.read_exact(&mut prefix)?;
+    // Leave the file at the start before dispatching. Each branch reads its own
+    // complete fixed-size header and leaves the handle ready for that layout's
+    // first frame.
     file.seek(SeekFrom::Start(0))?;
     if &prefix[0..8] != MAGIC {
         return Err(Error::new(
@@ -2762,15 +4516,24 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
             "invalid CofferDB magic bytes",
         ));
     }
+    // This version pair selects the binary header. A matching first magic or
+    // version word alone is insufficient because the legacy header places later
+    // fields at different offsets.
     if read_u16(&prefix[8..10]) == 0 && read_u16(&prefix[10..12]) == 1 {
         let mut header = [0; HEADER_LEN];
         file.read_exact(&mut header)?;
+        // Check the critical bytes before interpreting their flags and offsets. For
+        // a damaged current header this keeps a checksum failure distinct from an
+        // intact but unsupported format.
         if checksum32(&header[..40]) != read_u32(&header[40..44]) {
             return Err(Error::new(
                 ErrorCode::ChecksumMismatch,
                 "file header checksum mismatch",
             ));
         }
+        // The byte-order marker and feature bitmap select how subsequent frames can
+        // be interpreted. A valid checksum shows that these fields passed the
+        // integrity check; the reader must still understand their values.
         if header[12] != 1 || read_u64(&header[14..22]) != 0 {
             return Err(Error::new(
                 ErrorCode::UnsupportedFeatureFlag,
@@ -2783,15 +4546,24 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
                 "unsupported checksum algorithm",
             ));
         }
+        // The critical length locates the checksum and the stream offset locates
+        // the first frame. Changing either would require corresponding reader
+        // support even if all bytes had a valid checksum.
         if read_u16(&header[38..40]) != 44 || read_u64(&header[22..30]) != HEADER_LEN as u64 {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
                 "invalid critical header length or stream offset",
             ));
         }
+        // The hint area starts after the critical checksum and is absent from this
+        // decision. A torn hint cannot change which codec or stream position is
+        // safe to use.
         // Hints are advisory; recovery scans the critical stream even if they are corrupt.
         return Ok(FileCodec::Binary);
     }
+    // The legacy layout has a different header size, feature field and checksum
+    // width. Reuse the original file handle from offset zero so the legacy decoder
+    // sees its own header intact.
     let mut header = [0u8; LEGACY_HEADER_LEN];
     file.read_exact(&mut header).map_err(Error::from)?;
     if &header[0..8] != MAGIC {
@@ -2813,6 +4585,9 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
             "unsupported endianness marker",
         ));
     }
+    // Accept only the legacy extension and checksum identifiers that this reader
+    // implements. A parsed major version does not make a later extension safe to
+    // interpret as the historical layout.
     if read_u16(&header[10..12]) != 0 || header[13] != 0 {
         return Err(Error::new(
             ErrorCode::UnsupportedVersion,
@@ -2825,6 +4600,9 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
             "unknown file feature flag",
         ));
     }
+    // Validate the legacy length and covered bytes by the legacy rules. Passing the
+    // binary CRC or decoding from the binary stream offset would accept or reject a
+    // different sequence of bytes.
     let header_len = read_u32(&header[14..18]) as usize;
     if header_len != LEGACY_HEADER_LEN {
         return Err(Error::new(
@@ -2832,6 +4610,9 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
             format!("invalid header length {header_len}"),
         ));
     }
+    // The legacy checksum occupies the last eight bytes and covers the preceding
+    // 34. Both this value and a binary CRC32C fit in the in-memory checksum type.
+    // The file layout determines which algorithm must check it.
     if read_u64(&header[34..42]) != checksum64(&header[0..34]) {
         return Err(Error::new(
             ErrorCode::ChecksumMismatch,
@@ -2841,6 +4622,9 @@ fn read_header(file: &mut File) -> Result<FileCodec> {
     Ok(FileCodec::Legacy)
 }
 
+// Emit a complete primary record whose payload already exists in memory. Build the
+// checksummed header before the first write. Its caller controls the surrounding
+// batch and any flush or sync after the commit frame.
 fn write_record(
     file: &mut File,
     record_type: u16,
@@ -2860,6 +4644,8 @@ fn write_record(
     Ok(())
 }
 
+// Use the same record layout as the streaming encoder. Only the source of the
+// length and checksum differs when all of the input bytes are already in a slice.
 fn record_header(
     record_type: u16,
     batch_id: u64,
@@ -2875,6 +4661,9 @@ fn record_header(
     )
 }
 
+// Serialize the record envelope without requiring the payload to be retained.
+// record_len is the distance from this header to the next frame. payload_len bounds
+// decoding after this header. The reader checks both before following either value.
 fn record_header_from_digest(
     record_type: u16,
     batch_id: u64,
@@ -2882,19 +4671,38 @@ fn record_header_from_digest(
     payload_len: u64,
     payload_checksum: u32,
 ) -> Result<[u8; RECORD_HEADER_LEN]> {
+    // Both lengths are u64 on disk. For a zero-byte payload the distance to the
+    // next record is still one complete header. Reject overflow of the
+    // header-inclusive length even when the payload length itself fits.
     let record_len = payload_len
         .checked_add(RECORD_HEADER_LEN as u64)
         .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "record length overflow"))?;
+    // Binary primary frame, with half-open offsets from the frame start:
+    //   [0,8)    magic, record type and frame version
+    //   [8,32)   full frame length, batch ID and sequence number
+    //   [32,42)  fixed header length and payload length
+    //   [42,46)  CRC32C over the payload following the header
+    //   [46,50)  CRC32C over the preceding 46 header bytes
+    // The next frame starts at frame start + full frame length.
     let mut header = [0; RECORD_HEADER_LEN];
+    // CFRL identifies a primary frame. Its version and fixed header length select
+    // this envelope. The batch ID groups data frames with their commit. The
+    // sequence number orders every frame, including the commit, within the stream.
     header[..4].copy_from_slice(b"CFRL");
     header[4..6].copy_from_slice(&record_type.to_le_bytes());
     header[6..8].copy_from_slice(&1u16.to_le_bytes());
     header[8..16].copy_from_slice(&record_len.to_le_bytes());
     header[16..24].copy_from_slice(&batch_id.to_le_bytes());
     header[24..32].copy_from_slice(&sequence_no.to_le_bytes());
+    // The header length tells the reader where payload bytes start within this
+    // record. Together with record_len it independently constrains the declared
+    // payload length, before any allocation based on that length.
     header[32..34].copy_from_slice(&(RECORD_HEADER_LEN as u16).to_le_bytes());
     header[34..42].copy_from_slice(&payload_len.to_le_bytes());
     header[42..46].copy_from_slice(&payload_checksum.to_le_bytes());
+    // The header checksum covers the payload checksum field as well as the type,
+    // batch and sequence numbers. It is thus possible to reject a damaged length or
+    // record identity before allocating or reading the claimed payload.
     let header_checksum = checksum32(&header[..46]);
     header[46..50].copy_from_slice(&header_checksum.to_le_bytes());
     Ok(header)
@@ -3255,6 +5063,14 @@ fn encode_vector_index_segment_payload(segment: &VectorIndexSegmentPayload) -> R
     Ok(payload)
 }
 
+// The commit-metadata payload describes the segment records in this checkpoint. Its
+// directory slice omits its own leading metadata entry. The outer checkpoint header
+// checks the CRC of the complete directory, including that entry.
+//
+// The referenced checksum binds the covered main-data commit and checkpoint
+// generation to the ordered segment descriptors and record bytes. Excluding the
+// metadata record from those references avoids making its own checksum depend on
+// itself.
 fn build_index_commit_metadata_payload(
     checkpoint: &IndexCheckpointMetadata,
     segment_record_count: u64,
@@ -3267,8 +5083,14 @@ fn build_index_commit_metadata_payload(
     payload[..2].copy_from_slice(&1u16.to_le_bytes());
     payload[2..10].copy_from_slice(&checkpoint.covered_last_batch_id.to_le_bytes());
     payload[10..18].copy_from_slice(&checkpoint.covered_last_commit_sequence_no.to_le_bytes());
+    // There is one referenced extent for each segment record. Record count and
+    // reference count occupy separate wire fields even when their values agree for
+    // every checkpoint produced here.
     payload[18..26].copy_from_slice(&segment_record_count.to_le_bytes());
     payload[26..30].copy_from_slice(&index_checksum.to_le_bytes());
+    // The second count belongs to the directory references and is followed by their
+    // range and CRC. The reader compares that count with the segment records it
+    // actually visited independently of the count in the first half.
     payload[30..38].copy_from_slice(&segment_record_count.to_le_bytes());
     payload[38..46].copy_from_slice(&index_extent_table_offset.to_le_bytes());
     payload[46..54].copy_from_slice(&index_extent_table_length.to_le_bytes());
@@ -3276,7 +5098,13 @@ fn build_index_commit_metadata_payload(
     payload
 }
 
+// The metadata record itself is additional to the text and vector segments. Keep
+// the segment total in the on-disk integer type and check the sum before using it
+// to size a table or reserve record IDs.
 fn checked_segment_record_count(checkpoint: &IndexCheckpointMetadata) -> Result<u64> {
+    // Text and vector counts originate in host-sized collection metadata. Convert
+    // each before adding. A sum first taken in the host integer type could wrap
+    // before the wire length is checked.
     let text_segments = u64::try_from(checkpoint.text_segment_count).map_err(|_| {
         Error::new(
             ErrorCode::FileFormatError,
@@ -3289,6 +5117,9 @@ fn checked_segment_record_count(checkpoint: &IndexCheckpointMetadata) -> Result<
             "vector index segment count exceeds u32",
         )
     })?;
+    // Zero is a valid segment total. The writer still emits commit metadata for
+    // that checkpoint and reports it as metadata only. Neither that metadata frame
+    // nor the directory contributes a segment.
     text_segments.checked_add(vector_segments).ok_or_else(|| {
         Error::new(
             ErrorCode::FileFormatError,
@@ -3297,6 +5128,9 @@ fn checked_segment_record_count(checkpoint: &IndexCheckpointMetadata) -> Result<
     })
 }
 
+// Layout arithmetic is performed in the u64 coordinate system used for file
+// positions. An address-space or allocation check can follow when a caller really
+// needs a usize. Neither check replaces detecting an overflow in the wire range.
 fn checked_writer_add(left: u64, right: u64, message: &'static str) -> Result<u64> {
     left.checked_add(right)
         .ok_or_else(|| Error::new(ErrorCode::FileFormatError, message))
@@ -3334,8 +5168,15 @@ fn push_index_optional_string(bytes: &mut Vec<u8>, value: Option<&str>) -> Resul
     Ok(())
 }
 
+// Index segments store the numeric component rather than each printable catalog
+// identifier. This helper accepts the suffix after the last underscore, or the
+// whole input for a bare number. The surrounding field identifies the object kind;
+// this conversion does not check the prefix.
 pub(crate) fn catalog_id_number(value: &str) -> Result<u64> {
     let suffix = value
+        // The inverse conversion supplies a prefix from the field being decoded.
+        // Preserving that field context is what lets indices carry the numeric
+        // suffix alone.
         .rsplit_once('_')
         .map(|(_, suffix)| suffix)
         .unwrap_or(value);
@@ -3352,19 +5193,34 @@ fn catalog_id_string(prefix: &str, value: u64) -> String {
     format!("{prefix}{value:016}")
 }
 
+// Segment rows store the numeric part of each catalog ID. Reconstruct the catalog
+// spelling in the caller's buffer so repeated lookups can borrow it. Sixteen digits
+// is a minimum width. Larger u64 values need up to twenty digits after the
+// four-byte prefix.
 pub(crate) fn catalog_id_text<'a>(
     bytes: &'a mut [u8; 24],
     prefix: &[u8; 4],
     value: u64,
 ) -> &'a str {
+    // The four-byte prefix selects the namespace. The decimal suffix has a minimum
+    // width of sixteen, but a u64 can need twenty digits. The entire borrowed
+    // spelling must fit even at the largest ID.
     bytes[..4].copy_from_slice(prefix);
     let mut output = &mut bytes[4..];
     write!(output, "{value:016}").expect("decimal u64 fits in twenty bytes");
+    // Use the unwritten tail of the slice to find the actual byte length. Returning
+    // the whole scratch buffer would put trailing zero bytes into lookups for
+    // shorter IDs. The returned str borrows this buffer until the next conversion.
     let len = 24 - output.len();
     std::str::from_utf8(&bytes[..len]).expect("catalog ID prefixes are ASCII")
 }
 
+// These tags are part of the vector segment format. Their meanings must survive
+// reordering the Rust enum. An unknown tag is left for the decoder to diagnose
+// along with the segment that contains it.
 fn distance_metric_segment_id(metric: DistanceMetric) -> u8 {
+    // These tags are part of the segment format. Encoding by enum declaration order
+    // would silently change old checkpoints if a Rust variant were reordered.
     match metric {
         DistanceMetric::Cosine => 1,
         DistanceMetric::DotProduct => 2,
@@ -3377,21 +5233,44 @@ fn distance_metric_from_segment_id(value: u8) -> Option<DistanceMetric> {
         1 => Some(DistanceMetric::Cosine),
         2 => Some(DistanceMetric::DotProduct),
         3 => Some(DistanceMetric::Euclidean),
+        // An unknown tag leaves the distance undefined even when all coordinates
+        // are finite. Returning None lets the decoder reject this segment before
+        // its vectors enter query ranking.
         _ => None,
     }
 }
 
+// One row in the checkpoint's on-disk extent table. Each row locates a complete
+// framed record. The writer reserves one row for commit metadata and one per
+// segment. Keep the explicit packed encoding in sync with parse_extent_entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct IndexExtentEntry {
+    // Record ID within this checkpoint. ID 1 identifies commit metadata. The other
+    // IDs are resolved through its reference list.
     index_record_id: u64,
+    // Wire tag repeated in the record header. It selects the metadata, text or
+    // vector decoder.
     record_type: u16,
+    // Numeric collection ID for a segment, or zero in the writer's metadata entry.
+    // A lazy lookup uses this together with the segment type.
     stream_id: u64,
+    // Byte offset of the record header from the start of the checkpoint header.
+    // Physical reads add the checkpoint's file offset.
     suffix_relative_offset: u64,
+    // Encoded byte count from the first header byte through the last payload byte,
+    // including any segment checksum.
     length: u64,
+    // Generation copied from the enclosing checkpoint. The writer uses its file
+    // offset as the generation. Readers compare the recorded generations before
+    // following an extent.
     checkpoint_generation: u64,
+    // CRC32C over the entire framed record. The record header carries a separate
+    // CRC for its payload.
     extent_record_checksum: u32,
 }
 
+// Kept with its workspace reservation when the lazy segment source takes ownership.
+// Queries can then find the file ranges without keeping decoded rows.
 type IndexDirectory = crate::json::ReservedVec<IndexExtentEntry>;
 
 #[cfg(test)]
@@ -3404,11 +5283,20 @@ fn encode_extent_table(entries: &[IndexExtentEntry]) -> Vec<u8> {
     table
 }
 
+// Serialize fields individually. Rust may insert padding between the type and the
+// following u64, whereas the extent table packs all fields back to back. The exact
+// row bytes also enter the commit checksum.
 fn encode_extent_entry(entry: &IndexExtentEntry) -> [u8; INDEX_EXTENT_ENTRY_LEN] {
+    // Encode each field explicitly. The Rust struct can have padding for alignment
+    // and host-endian integers, neither of which belongs in the CRC over the
+    // on-disk directory.
     let mut bytes = [0u8; INDEX_EXTENT_ENTRY_LEN];
     bytes[0..8].copy_from_slice(&entry.index_record_id.to_le_bytes());
     bytes[8..10].copy_from_slice(&entry.record_type.to_le_bytes());
     bytes[10..18].copy_from_slice(&entry.stream_id.to_le_bytes());
+    // Directory offsets are relative to the start of the checkpoint. Moving the
+    // same bytes to a different absolute file position changes where records are
+    // read, but does not change the offset bytes in a single directory entry.
     bytes[18..26].copy_from_slice(&entry.suffix_relative_offset.to_le_bytes());
     bytes[26..34].copy_from_slice(&entry.length.to_le_bytes());
     bytes[34..42].copy_from_slice(&entry.checkpoint_generation.to_le_bytes());
@@ -3416,25 +5304,44 @@ fn encode_extent_entry(entry: &IndexExtentEntry) -> [u8; INDEX_EXTENT_ENTRY_LEN]
     bytes
 }
 
+// A finding about file contents that the scanner can attach to its check report.
+// Distinguishing this from a read or scratch-allocation error lets the caller
+// decide whether it has enough evidence to discard a derived suffix.
 #[derive(Debug)]
 struct IndexSuffixDiagnostic {
+    // Machine-readable finding code used when the enclosing scan classifies the
+    // suffix.
     code: &'static str,
+    // Description of the failed check copied to the reported issue.
     message: String,
+    // Absolute file position. Errors spanning a whole structure can point to its
+    // start.
     offset: u64,
+    // An index-record label when the check can associate the damage with a specific
+    // extent.
     extent_id: Option<String>,
 }
 
+// Successful inspection can still yield a warning about the aggregate CRC. Keep
+// that warning with the usable result so the scanner can report both.
 struct ParsedIndexSuffix {
+    // Physical layout and visible counts from the accepted checkpoint.
     report: IndexSuffixReport,
     #[cfg(test)]
     checkpoint: Option<IndexCheckpointPayload>,
+    // Present in lazy mode. The retained source locates both vector and text
+    // segments for later reads.
     lazy_vectors: Option<LazyVectorCheckpoint>,
+    // Nonfatal findings collected after required checks passed.
     diagnostics: Vec<IndexSuffixDiagnostic>,
 }
 
 #[derive(Clone, Copy)]
 struct IndexReadOptions {
+    // Configured checkpoint load limit in bytes. The scan also obtains scratch
+    // space from its operation context.
     budget_bytes: u64,
+    // Selects the representation returned after checking the checkpoint.
     mode: IndexReadMode,
 }
 
@@ -3442,9 +5349,13 @@ struct IndexReadOptions {
 enum IndexReadMode {
     #[cfg(test)]
     Full,
+    // Validate the segments and return counts for inspection. No lookup directory
+    // survives the scan.
     Summary,
     #[cfg(test)]
     LazyVectors,
+    // Validate against the same commit and retain a searchable directory for
+    // queries. Its size depends on the number of segments.
     LazyIndexes,
 }
 
@@ -3482,6 +5393,10 @@ fn read_index_checkpoint_suffix<R: Read + Seek>(
     )
 }
 
+// Keep a diagnosis about the suffix separate from an error that prevents
+// inspection. A short checkpoint header, for example, can be reported to the
+// caller; an unrelated read error must propagate. The caller uses evidence
+// binding the suffix to the preceding commit before classifying it as rebuildable.
 fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     reader: &mut R,
     offset: u64,
@@ -3491,6 +5406,10 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     expected_last_commit_sequence_no: u64,
     (options, context): (IndexReadOptions, &crate::json::JsonOperationContext),
 ) -> Result<std::result::Result<ParsedIndexSuffix, IndexSuffixDiagnostic>> {
+    // Work from the outside in. Establish which commit and file range the header
+    // describes, verify the table, then use the checked directory to reach the
+    // metadata and segments. No lookup source escapes until the completion marker
+    // and the referenced segment contents have passed.
     reader.seek(SeekFrom::Start(offset))?;
     let mut header = [0u8; INDEX_CHECKPOINT_HEADER_LEN];
     if let Err(err) = reader.read_exact(&mut header) {
@@ -3511,23 +5430,38 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // The header groups the commit being covered with the geometry of its index.
+    // Decode both groups before selecting a range. At this point even a plausible
+    // table pointer comes from unchecked file bytes.
     let version = read_u16(&header[8..10]);
     let header_len = read_u16(&header[10..12]) as usize;
+    // Generation, physical start and covered critical end are separate wire fields.
+    // The generation ties the records to this checkpoint. The latter two offsets
+    // are checked against positions independently observed by the main-log scanner.
     let checkpoint_generation = read_u64(&header[12..20]);
     let checkpoint_start_offset = read_u64(&header[20..28]);
     let covered_critical_end_offset = read_u64(&header[28..36]);
     let covered_last_batch_id = read_u64(&header[36..44]);
     let covered_last_commit_sequence_no = read_u64(&header[44..52]);
     let coverage_kind = header[52];
+    // Keep the coverage fingerprint for the database layer, which can compare it
+    // with the recovered catalog. The byte checks here establish the shape and
+    // integrity of the suffix.
     let coverage_hash = read_u32(&header[53..57]);
     let index_record_count = read_u64(&header[57..65]);
     let index_extent_count = read_u64(&header[65..73]);
+    // The table offset in this header and the record offsets stored in the table
+    // are relative to the checkpoint start. The reference inside commit metadata
+    // uses the table itself as its origin.
     let extent_table_offset = read_u64(&header[73..81]);
     let extent_table_len = read_u64(&header[81..89]);
     let extent_table_checksum = read_u32(&header[89..93]);
     let payload_len = read_u64(&header[93..101]);
     let payload_checksum = read_u32(&header[101..105]);
 
+    // All the byte ranges below use this version's fixed header size. Accepting a
+    // different length and continuing with the current offsets could make a valid
+    // future header look like part of a record.
     if version != INDEX_CHECKPOINT_VERSION || header_len != INDEX_CHECKPOINT_HEADER_LEN {
         return Ok(Err(index_suffix_diagnostic(
             "unsupported_index_checkpoint",
@@ -3535,6 +5469,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // A structurally valid suffix can be stale. Bind its physical start and
+    // the covered end, batch and commit sequence to the main log just scanned
+    // before following any of its offsets.
     if checkpoint_start_offset != offset
         || covered_critical_end_offset != expected_critical_end_offset
         || covered_last_batch_id != expected_last_batch_id
@@ -3546,6 +5483,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // The segment decoders and the collection-count checks below assume a full
+    // visible snapshot. A different coverage kind needs its own membership rules
+    // before this reader can use it.
     if coverage_kind != INDEX_COVERAGE_FULL_VISIBLE_SNAPSHOT {
         return Ok(Err(index_suffix_diagnostic(
             "unsupported_index_checkpoint",
@@ -3553,6 +5493,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // The count includes commit metadata. A snapshot with no segment rows still has
+    // one record and one extent. Requiring one extent per record here also fixes
+    // the expected size of the table.
     if index_record_count == 0 || index_extent_count != index_record_count {
         return Ok(Err(index_suffix_diagnostic(
             "unsupported_index_checkpoint",
@@ -3560,6 +5503,10 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // Prove the physical layout before seeking through offsets supplied by the file.
+    // The payload, fixed-width table and trailer must account for the whole suffix.
+    // A short suffix can be an interrupted write; extra bytes fall outside the
+    // checkpoint it claims to describe.
     let expected_extent_table_offset = match checked_index_add(
         INDEX_CHECKPOINT_HEADER_LEN as u64,
         payload_len,
@@ -3570,6 +5517,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         Ok(value) => value,
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
+    // The table is adjacent to the payload. Merely proving that both fit in the
+    // file would allow a gap or an overlap, changing which bytes are hashed as
+    // record data.
     if extent_table_offset != expected_extent_table_offset {
         return Ok(Err(index_suffix_diagnostic(
             "index_extent_table_mismatch",
@@ -3596,6 +5546,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         Ok(value) => value,
         Err(diagnostic) => return Ok(Err(diagnostic)),
     };
+    // Use the caller's observed file length for the outer boundary. A start offset
+    // beyond that length has no suffix at all. Treat it as a bad coordinate before
+    // testing for a partially written checkpoint.
     let suffix_len = match file_len.checked_sub(offset) {
         Some(value) => value,
         None => {
@@ -3613,6 +5566,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // Point to the first extra byte when the declared footprint is shorter than the
+    // actual suffix. Putting a new trailer at the end cannot reconcile unrelated
+    // bytes with the header's claimed length.
     if expected_len < suffix_len {
         return Ok(Err(index_suffix_diagnostic(
             "index_suffix_trailing_bytes",
@@ -3620,6 +5576,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             checked_diagnostic_offset(offset, expected_len),
         )));
     }
+    // Check the row count from the header against the table length independently of
+    // the physical end-of-file check. Otherwise a byte range could fit in the file
+    // while ending in a partial directory row.
     let expected_extent_table_len =
         match index_extent_count.checked_mul(INDEX_EXTENT_ENTRY_LEN as u64) {
             Some(value) => value,
@@ -3631,6 +5590,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
                 )));
             }
         };
+    // The payload format limit applies even when the query can read large segments
+    // lazily. The separate runtime load budget below controls whether an otherwise
+    // supported checkpoint can be inspected in the requested mode.
     if extent_table_len != expected_extent_table_len
         || payload_len > MAX_INDEX_CHECKPOINT_PAYLOAD_LEN
     {
@@ -3641,12 +5603,19 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         )));
     }
 
+    // Summary scans apply the configured load limit to the declared payload and
+    // table. LazyIndexes keeps a directory and reads segments from the file, so
+    // imposing that same size limit would reject a large, streamable index. Its
+    // actual scratch allocations still require admission.
     let retained_payload_len = match options.mode {
         IndexReadMode::LazyIndexes => 0,
         #[cfg(test)]
         IndexReadMode::LazyVectors => 0,
         _ => payload_len,
     };
+    // A scan deferred here has only examined the header and geometry. Its
+    // diagnostic identifies a configured load limit. It offers no conclusion about
+    // the contents of the segment bytes that were skipped.
     if options.mode != IndexReadMode::LazyIndexes
         && retained_payload_len
             .checked_add(extent_table_len)
@@ -3658,15 +5627,24 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         )));
     }
+    // The writer publishes the completion trailer last. Check it before the
+    // expensive payload pass. Subsequent seeks change the cursor, so the final
+    // trailer check also addresses it by its absolute file position.
     if let Err(diagnostic) = check_index_checkpoint_trailer(reader, file_len)? {
         return Ok(Err(diagnostic));
     }
+    // All framed records are consecutive in the writer's payload. This pass
+    // therefore needs no extent seeks, and leaves the cursor at the table even when
+    // the aggregate CRC disagrees.
     reader.seek(SeekFrom::Start(offset + INDEX_CHECKPOINT_HEADER_LEN as u64))?;
     let mut aggregate_checksum = Crc32c::default();
     checksum_index_bytes(reader, payload_len, &mut aggregate_checksum)?;
     // The aggregate payload checksum is advisory; extent and segment checks below
     // decide whether the checkpoint can be used.
     let _checkpoint_payload_checksum_mismatch = aggregate_checksum.finish() != payload_checksum;
+    // Keep the exact table bytes available. The metadata digest covers the encoded
+    // extent rows in their original order, while lookups below need their decoded
+    // fields.
     let table_len = match usize::try_from(extent_table_len) {
         Ok(value) => value,
         Err(_) => {
@@ -3692,6 +5670,10 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
                         checked_diagnostic_offset(offset, extent_table_offset),
                     )));
                 }
+                // Even with a valid table checksum there is no table in memory to
+                // drive the remaining passes. Check the completion marker, then
+                // return the admission failure. No uninspected record is counted in
+                // a partial summary.
                 if let Err(diagnostic) = check_index_checkpoint_trailer(reader, file_len)? {
                     return Ok(Err(diagnostic));
                 }
@@ -3699,6 +5681,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             }
             Err(error) => return Err(error),
         };
+    // After the payload checksum pass the cursor is at the first extent row. A
+    // single reservation covers the table. Bound each read independently of how
+    // many rows the checkpoint contains.
     for part in extent_table.as_mut_slice().chunks_mut(64 * 1024) {
         reader.read_exact(part)?;
     }
@@ -3727,8 +5712,14 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             )));
         }
     }
+    // Index records are named by ID in commit metadata. Build a unique directory
+    // from the checked extents first so a duplicate ID cannot redirect a later
+    // reference to whichever record happened to be inserted last.
     let mut records_work = context.workspace_reservation();
     let mut records = BTreeMap::<u64, ParsedIndexRecord>::new();
+    // Follow each physical row once to read its framed header and digest the body.
+    // Save only its coordinates and integrity evidence in the ID map. The checked
+    // bytes of the table remain in their original order for the metadata pass.
     for entry in extent_table.chunks_exact(INDEX_EXTENT_ENTRY_LEN) {
         let extent = parse_extent_entry(entry);
         let index_record = match parse_index_record_from_extent(
@@ -3739,6 +5730,10 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             offset,
         ) {
             Ok(record) => record,
+            // Only a validation failure supplies a diagnosis about this suffix.
+            // Returning an I/O or budget failure through the outer Result lets the
+            // caller distinguish an interrupted inspection from grounds for
+            // rebuilding the index.
             Err(IndexReadError::Invalid(diagnostic)) => return Ok(Err(diagnostic)),
             Err(IndexReadError::Io(error)) => return Err(error.into()),
             Err(IndexReadError::Resource(error)) => return Err(error),
@@ -3751,6 +5746,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             )));
         }
         let needed = crate::json::btree_workspace::<u64, ParsedIndexRecord>(records.len() + 1);
+        // Reserve for the enlarged map before publishing the new entry. A budget
+        // failure limits what this scan can say about yet-unread records. It can
+        // still report verified damage in the records already examined.
         if let Err(error) = records_work.grow_to(needed, needed, "operation_scratch") {
             // CRC status is already known for every parsed record, even though
             // normal validation defers the segment-specific diagnostic.
@@ -3768,9 +5766,15 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         }
         records.insert(index_record.index_record_id, index_record);
     }
+    // The commit metadata is itself framed as a record. Require the single
+    // distinguished entry before interpreting its references; the table also
+    // contains the segment records it describes.
     let mut metadata_records = records
         .values()
         .filter(|record| record.record_type == INDEX_COMMIT_METADATA);
+    // Record ID 1 is reserved for metadata. Checking a second metadata entry
+    // catches a frame with a different ID but the same type, even though the ID map
+    // itself is already unique.
     let index_record = match (metadata_records.next(), metadata_records.next()) {
         (Some(record), None) if record.index_record_id == 1 => record,
         _ => {
@@ -3781,6 +5785,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             )));
         }
     };
+    // Metadata records have a fixed payload size. The outer checked reader still
+    // consumes and checks the full framed payload even when the metadata parser
+    // rejects its length.
     let metadata = match with_checked_index_payload(reader, index_record, context, |source| {
         let mut payload = [0u8; INDEX_COMMIT_METADATA_LEN];
         let len = (index_record.payload.len as usize).min(payload.len());
@@ -3805,17 +5812,27 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         Err(IndexReadError::Io(error)) => return Err(error.into()),
         Err(IndexReadError::Resource(error)) => return Err(error),
     };
+    // Verify the metadata's choice of segments. Individual records can each
+    // have a valid checksum and still form the wrong checkpoint. This digest
+    // includes the referenced directory entries and their record bytes in order.
     let mut referenced_checksum = index_commit_hasher(
         covered_last_batch_id,
         covered_last_commit_sequence_no,
         checkpoint_generation,
     );
+    // Iterate in on-disk reference order. Each row is followed in the digest by the
+    // complete record it names. Hashing just the ID or just the segment body would
+    // omit the directory's physical binding.
     for entry in extent_table[metadata.extent_range.clone()].chunks_exact(INDEX_EXTENT_ENTRY_LEN) {
         let record = &records[&parse_extent_entry(entry).index_record_id];
         referenced_checksum.update(entry);
         reader.seek(SeekFrom::Start(record.offset))?;
         checksum_index_bytes(reader, record.length, &mut referenced_checksum)?;
     }
+    // The referenced digest is mandatory even when only counts were requested. It
+    // associates the covered commit and generation with the selected extent rows
+    // and complete frames. An otherwise readable set of individual records may
+    // belong to a different snapshot.
     if referenced_checksum.finish() != metadata.index_checksum {
         return Ok(Err(index_suffix_diagnostic(
             "index_commit_checksum_mismatch",
@@ -3828,6 +5845,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     {
         return Ok(Err(diagnostic));
     }
+    // Directory checks establish which bytes belong to the checkpoint. Decode those
+    // bytes as segments too: a valid digest cannot establish that a posting refers
+    // to a listed chunk or that a segment belongs to the declared collection.
     let segment_summary = match validate_index_segments(
         reader,
         &records,
@@ -3843,11 +5863,20 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         Err(IndexReadError::Resource(error)) => return Err(error),
     };
 
+    // The per-record map is scratch. Release it before building the directory a lazy
+    // reader keeps, so the operation need not pay for both representations during
+    // that handoff.
     drop(records);
     drop(records_work);
+    // A lazy source will recheck the frame at lookup time. Reading the trailer
+    // again here establishes completion for this scan only. It does not pin the
+    // suffix bytes against a later replacement.
     if let Err(diagnostic) = check_index_checkpoint_trailer(reader, file_len)? {
         return Ok(Err(diagnostic));
     }
+    // Report an isolated aggregate mismatch alongside the accepted checkpoint. A
+    // failure in an extent, record or referenced segment has already returned
+    // through its own diagnostic path.
     let mut diagnostics = Vec::new();
     if _checkpoint_payload_checksum_mismatch {
         diagnostics.push(index_suffix_diagnostic(
@@ -3856,6 +5885,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             checked_diagnostic_offset(offset, INDEX_CHECKPOINT_HEADER_LEN as u64),
         ));
     }
+    // The count in commit metadata excludes its own record. Zero references
+    // describes a valid metadata-only checkpoint, so it has its own status and
+    // build mode.
     let status = if metadata.index_record_count == 0 {
         "metadata_record_only"
     } else {
@@ -3868,6 +5900,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     };
     #[cfg(test)]
     let mut checkpoint = None;
+    // For a metadata-only snapshot the retained segment directory, when requested,
+    // is empty. Its validation report still carries the covered commit and coverage
+    // hash for comparison with the catalog.
     let lazy_vectors = match options.mode {
         #[cfg(test)]
         IndexReadMode::Full => {
@@ -3889,6 +5924,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             });
             None
         }
+        // Summary callers need only the validation report. Lazy readers retain the
+        // extents for both text and vectors so a later query can find a segment
+        // without keeping its decoded contents resident.
         IndexReadMode::Summary => None,
         _ => {
             let entries = extent_table
@@ -3900,11 +5938,17 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
                         INDEX_TEXT_SEGMENT | INDEX_VECTOR_SEGMENT
                     )
                 });
+            // Allocate only for searchable segments. The encoded metadata slot
+            // participated in verification, but later collection lookups have no
+            // reason to retain it.
             let mut directory = IndexDirectory::with_capacity(
                 entries.clone().count(),
                 context,
                 "operation_scratch",
             )?;
+            // Copy the verified rows only after digest checks that depend on their
+            // wire order. IndexSegmentSource then orders the owned directory by
+            // segment type and collection for binary search.
             for extent in entries {
                 directory.push(extent);
             }
@@ -3921,6 +5965,9 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             })
         }
     };
+    // Report all physical records and extents, including metadata. Segment and
+    // live-item totals come from the decoder, which counts only actual text and
+    // vector entries.
     Ok(Ok(ParsedIndexSuffix {
         report: IndexSuffixReport {
             status: status.into(),
@@ -3948,10 +5995,17 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     }))
 }
 
+// The trailer protects its marker and encoded length with a CRC of their own. The
+// caller has already established that this fixed-size tail fits at the end of the
+// file.
 fn check_index_checkpoint_trailer(
     reader: &mut (impl Read + Seek),
     file_len: u64,
 ) -> Result<std::result::Result<(), IndexSuffixDiagnostic>> {
+    // The caller has established that the file can hold the fixed trailer. Read it
+    // from physical EOF, independently of the offsets claimed by segments. A
+    // truncated write can leave plausible earlier records without a completion
+    // marker.
     let trailer_offset = file_len - INDEX_CHECKPOINT_TRAILER_LEN as u64;
     let mut trailer = [0u8; INDEX_CHECKPOINT_TRAILER_LEN];
     reader.seek(SeekFrom::Start(trailer_offset))?;
@@ -3960,6 +6014,10 @@ fn check_index_checkpoint_trailer(
         || read_u16(&trailer[4..6]) as usize != INDEX_CHECKPOINT_TRAILER_LEN
         || read_u32(&trailer[6..10]) != checksum32(&trailer[0..6])
     {
+        // The inner result describes invalid checkpoint bytes and includes the
+        // location for a rebuild diagnostic. A seek or read failure propagates
+        // through the outer result because the reader may never have obtained those
+        // bytes.
         return Ok(Err(index_suffix_diagnostic(
             "index_checkpoint_incomplete",
             "ignored index checkpoint with invalid complete marker or trailer checksum",
@@ -3969,8 +6027,13 @@ fn check_index_checkpoint_trailer(
     Ok(Ok(()))
 }
 
+// Decode a single fixed-width slice from a table whose size was checked up front.
+// Both the initial validation and future record lookup use the same field offsets.
 fn parse_extent_entry(bytes: &[u8]) -> IndexExtentEntry {
     debug_assert_eq!(bytes.len(), INDEX_EXTENT_ENTRY_LEN);
+    // The caller has supplied one complete entry. Decoding its fixed-width fields
+    // is separate from checking that its type, generation and span are allowed. A
+    // successfully decoded entry is still only a claim about a record.
     IndexExtentEntry {
         index_record_id: read_u64(&bytes[0..8]),
         record_type: read_u16(&bytes[8..10]),
@@ -4010,26 +6073,48 @@ fn checked_index_add(
         .ok_or_else(|| index_suffix_diagnostic(code, message, diagnostic_offset))
 }
 
+// An impossible sum has no corresponding file position. Report the known base in
+// that case so a malformed relative offset cannot wrap the diagnostic into an
+// unrelated region.
 fn checked_diagnostic_offset(base: u64, relative: u64) -> u64 {
     base.checked_add(relative).unwrap_or(base)
 }
 
+// Coordinates and integrity evidence retained between the framing pass and semantic
+// decoding. The parser can seek back to a record for the commit digest or to its
+// payload for the segment decoder.
 struct ParsedIndexRecord {
+    // Type checked against both the extent and its framed header.
     record_type: u16,
+    // Key in the checkpoint's record map, used to resolve metadata references.
     index_record_id: u64,
+    // Collection number taken from the extent and later checked against the decoded
+    // segment.
     stream_id: u64,
+    // Absolute position of the record header, used when hashing the referenced
+    // record.
     offset: u64,
+    // Full record length in bytes, measured from offset.
     length: u64,
+    // Absolute range and expected CRC of the payload for a subsequent decode.
     payload: PayloadRef,
+    // Whether the last four payload bytes contain the CRC of the preceding segment
+    // bytes. Consulted for text and vector records.
     segment_checksum_valid: bool,
 }
 
+// Append exactly the requested file range to the caller's running CRC. It may
+// already contain a commit prefix or an extent row. Finishing the checksum here
+// would lose that ordering across records.
 fn checksum_index_bytes(
     reader: &mut impl Read,
     mut len: u64,
     checksum: &mut Crc32c,
 ) -> std::io::Result<()> {
     let mut buffer = [0u8; 64 * 1024];
+    // Each chunk must be read in full. An EOF one byte short cannot yield a
+    // checksum for a shorter, apparently valid extent. The caller supplies the CRC
+    // so successive slices can contribute in their wire order.
     while len > 0 {
         let count = len.min(buffer.len() as u64) as usize;
         reader.read_exact(&mut buffer[..count])?;
@@ -4040,8 +6125,14 @@ fn checksum_index_bytes(
 }
 
 struct IndexChecksumReader<R> {
+    // Input limited by the caller to one payload. Its buffering may read ahead of
+    // the decoder.
     source: R,
+    // CRC of bytes delivered through this wrapper, including any bytes explicitly
+    // drained after decoding.
     checksum: Crc32c,
+    // Payload bytes delivered so far. The outer validation pass drains the
+    // difference from the declared length.
     bytes_read: u64,
 }
 
@@ -4054,6 +6145,10 @@ impl<R: Read> Read for IndexChecksumReader<R> {
     }
 }
 
+// Decode through a bounded reader and check the CRC of that same pass before
+// handing the result to the caller. The metadata and summary decoders here
+// construct local results. They can start over if optional read-ahead has to yield
+// its memory.
 fn with_checked_index_payload<R: Read + Seek, T>(
     reader: &mut R,
     record: &ParsedIndexRecord,
@@ -4076,6 +6171,9 @@ fn with_checked_index_payload<R: Read + Seek, T>(
     };
     loop {
         reader.seek(SeekFrom::Start(record.payload.offset))?;
+        // Limit the underlying reader before adding buffering. Read-ahead can then
+        // never consume another record, even if the decoder stops partway through
+        // this one.
         let mut source = IndexChecksumReader {
             source: BufReader::with_capacity(
                 input_work
@@ -4087,6 +6185,9 @@ fn with_checked_index_payload<R: Read + Seek, T>(
             bytes_read: 0,
         };
         let result = decode(&mut source);
+        // A failed physical read leaves the cursor and checksum incomplete. Return
+        // that error immediately. A format or budget error can still be checked
+        // against intact bytes by draining the rest.
         if matches!(&result, Err(IndexReadError::Io(_))) {
             return result;
         }
@@ -4097,6 +6198,9 @@ fn with_checked_index_payload<R: Read + Seek, T>(
             let count = (record.payload.len - source.bytes_read).min(buffer.len() as u64) as usize;
             source.read_exact(&mut buffer[..count])?;
         }
+        // A semantic error can stop early in a valid field, and a resource refusal
+        // can stop before a field starts. A changed payload must be diagnosed in
+        // either case before returning the decoder's result.
         if source.checksum.finish() as u64 != record.payload.checksum {
             return Err(index_extent_diagnostic(
                 "index_record_payload_checksum_mismatch",
@@ -4110,6 +6214,9 @@ fn with_checked_index_payload<R: Read + Seek, T>(
             &result,
             Err(IndexReadError::Resource(error)) if crate::json::is_memory_budget_error(error)
         );
+        // Free the reader before returning its buffer reservation. A memory refusal
+        // can trigger one fresh decode with no read-ahead. Each attempt seeks to
+        // the payload start and computes its own CRC.
         drop(source);
         if budget_error {
             if let Some(work) = input_work.as_mut().filter(|work| work.capacity() > 0) {
@@ -4122,6 +6229,9 @@ fn with_checked_index_payload<R: Read + Seek, T>(
     }
 }
 
+// The initial framing pass computed this comparison while the record was already in
+// hand. Apply it only to segment types. Commit metadata uses its last four bytes
+// for a different field.
 fn validate_record_segment_checksum(
     record: &ParsedIndexRecord,
     checkpoint_start_offset: u64,
@@ -4140,12 +6250,19 @@ fn validate_record_segment_checksum(
     Ok(())
 }
 
+// Translate from the extent table's suffix-relative coordinates to a file position
+// and a host-addressable length. Bound the record within the payload before
+// seeking, since a file position inside the table itself could otherwise look
+// readable.
 fn index_extent_range(
     checkpoint_payload_len: usize,
     extent: &IndexExtentEntry,
     checkpoint_generation: u64,
     checkpoint_start_offset: u64,
 ) -> std::result::Result<(u64, usize), IndexReadError> {
+    // The diagnostic can always point to the checkpoint start. Compute the absolute
+    // header address with checked arithmetic before using the file-supplied
+    // relative offset as a more precise location.
     let extent_offset = checked_index_add(
         checkpoint_start_offset,
         extent.suffix_relative_offset,
@@ -4153,6 +6270,9 @@ fn index_extent_range(
         "index_record_length_overflow",
         "ignored index checkpoint with overflowing absolute extent offset",
     )?;
+    // An entry into the outer header could still name an address inside the file.
+    // Check both the lower bound and the generating checkpoint here, before
+    // interpreting bytes at that address as a record.
     if extent.checkpoint_generation != checkpoint_generation
         || extent.suffix_relative_offset < INDEX_CHECKPOINT_HEADER_LEN as u64
     {
@@ -4163,7 +6283,12 @@ fn index_extent_range(
         )
         .into());
     }
+    // After ruling out offsets inside the header, measure the range from the
+    // beginning of the payload. This is the origin of checkpoint_payload_len.
     let start_u64 = extent.suffix_relative_offset - INDEX_CHECKPOINT_HEADER_LEN as u64;
+    // The file stores offsets and lengths as u64. This validator uses a host-sized
+    // payload bound. Convert the two operands separately so an unaddressable start
+    // or length cannot be narrowed into a small valid range.
     let start = usize::try_from(start_u64).map_err(|_| {
         index_suffix_diagnostic(
             "index_record_length_overflow",
@@ -4178,6 +6303,9 @@ fn index_extent_range(
             extent_offset,
         )
     })?;
+    // An end that wraps would pass an ordinary comparison against the payload
+    // length. Keep arithmetic overflow distinct from a representable range that
+    // extends into the directory.
     let Some(end) = start.checked_add(length) else {
         return Err(index_suffix_diagnostic(
             "index_record_length_overflow",
@@ -4186,6 +6314,10 @@ fn index_extent_range(
         )
         .into());
     };
+    // The range uses an exclusive end, so a final record may end exactly where the
+    // directory starts. At the other boundary, reserve room for a full framed
+    // header. Segment-specific minimum body sizes are checked after the type is
+    // known.
     if end > checkpoint_payload_len || length < INDEX_RECORD_HEADER_LEN {
         return Err(index_suffix_diagnostic(
             "index_extent_table_mismatch",
@@ -4194,6 +6326,9 @@ fn index_extent_range(
         )
         .into());
     }
+    // The payload-relative end can fit in usize while the corresponding absolute
+    // file position overflows u64. Any later seek or checksum range needs both sums
+    // to be representable.
     checked_index_add(
         extent_offset,
         extent.length,
@@ -4204,6 +6339,9 @@ fn index_extent_range(
     Ok((extent_offset, length))
 }
 
+// Check one framed record in a bounded streaming pass. The extent supplies the byte
+// count for the read. Only after checking its CRC do we trust the record's own
+// description of those same bytes.
 fn parse_index_record_from_extent<R: Read + Seek>(
     reader: &mut R,
     checkpoint_payload_len: usize,
@@ -4224,6 +6362,9 @@ fn parse_index_record_from_extent<R: Read + Seek>(
     record_crc.update(&record);
     let actual_payload_len = length - INDEX_RECORD_HEADER_LEN;
     let mut payload_crc = Crc32c::default();
+    // Reserve the last four bytes for a separate comparison. The segment CRC covers
+    // the body before that word. Both the payload CRC and the whole-record CRC
+    // include the word itself.
     let mut remaining = actual_payload_len.saturating_sub(4);
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
@@ -4234,6 +6375,9 @@ fn parse_index_record_from_extent<R: Read + Seek>(
         remaining -= count;
     }
     let segment_crc = payload_crc.finish();
+    // Read even a short tail into the outer checksums. A payload too small for a
+    // segment footer then has a defined CRC and fails the segment check when its
+    // type is examined.
     let mut tail = [0u8; 4];
     let tail = &mut tail[..actual_payload_len.min(4)];
     reader.read_exact(tail)?;
@@ -4249,6 +6393,9 @@ fn parse_index_record_from_extent<R: Read + Seek>(
         )
         .into());
     }
+    // The extent CRC covered the header too. Still compare header fields with the
+    // directory and verify the header's own checksum before using its payload
+    // range.
     let mut parsed = parse_index_record_header(
         &record,
         extent,
@@ -4265,10 +6412,16 @@ fn parse_index_record_from_extent<R: Read + Seek>(
         )
         .into());
     }
+    // Keep the inner checksum result for type-specific validation. Passing the
+    // outer payload CRC is required for every record, but only text and vector
+    // segments have an inner checksum footer.
     parsed.segment_checksum_valid = segment_checksum_valid;
     Ok(parsed)
 }
 
+// An extent and a record each describe their ID, type, generation and size. Accept
+// the frame only when they agree and the header length plus payload length accounts
+// for the whole extent.
 fn parse_index_record_header(
     record: &[u8; INDEX_RECORD_HEADER_LEN],
     extent: &IndexExtentEntry,
@@ -4276,6 +6429,9 @@ fn parse_index_record_header(
     extent_offset: u64,
     length: usize,
 ) -> std::result::Result<ParsedIndexRecord, IndexReadError> {
+    // The remembered extent can remain in bounds after its bytes have been
+    // replaced. Verify that its first bytes still identify the expected framing
+    // before treating the other fields as lengths or IDs.
     if &record[0..4] != INDEX_RECORD_MAGIC {
         return Err(index_suffix_diagnostic(
             "index_record_magic_mismatch",
@@ -4287,6 +6443,9 @@ fn parse_index_record_header(
     let record_type = read_u16(&record[4..6]);
     let version = read_u16(&record[6..8]);
     let header_len = read_u16(&record[8..10]) as usize;
+    // The length in this header counts the header itself. Keep it independent of
+    // the extent's length and the payload's length. Agreement of all three is
+    // needed to locate the next byte safely.
     let record_len = usize::try_from(read_u64(&record[10..18])).map_err(|_| {
         index_suffix_diagnostic(
             "index_record_length_overflow",
@@ -4294,6 +6453,9 @@ fn parse_index_record_header(
             extent_offset,
         )
     })?;
+    // Opening another generation can put a correctly encoded header at this
+    // address. Generation, record ID and type together bind the bytes to the
+    // directory entry used for this read.
     let generation = read_u64(&record[18..26]);
     let index_record_id = read_u64(&record[26..34]);
     let payload_len = usize::try_from(read_u64(&record[34..42])).map_err(|_| {
@@ -4303,8 +6465,13 @@ fn parse_index_record_header(
             extent_offset,
         )
     })?;
+    // The header CRC covers the payload CRC and the framing fields that locate it.
+    // Its own trailing word is outside the protected prefix.
     let payload_checksum = read_u32(&record[42..46]);
     let header_checksum = read_u32(&record[46..50]);
+    // Use the supported header width to compute the total. A file-supplied header
+    // length cannot move the payload start past unknown extension data in this
+    // version.
     let expected_record_len = INDEX_RECORD_HEADER_LEN
         .checked_add(payload_len)
         .ok_or_else(|| {
@@ -4314,6 +6481,9 @@ fn parse_index_record_header(
                 extent_offset,
             )
         })?;
+    // A header CRC alone would accept a different, well-formed record copied into
+    // the same slot. Require the extent and header to describe the same frame as
+    // well as checking the header's own integrity.
     if version != 1
         || header_len != INDEX_RECORD_HEADER_LEN
         || record_len != length
@@ -4330,28 +6500,45 @@ fn parse_index_record_header(
         )
         .into());
     }
+    // The stream ID exists in the extent. The segment decoder later supplies the
+    // collection number to check it against. Until then it is a directory label.
     Ok(ParsedIndexRecord {
         record_type,
         index_record_id,
         stream_id: extent.stream_id,
         offset: extent_offset,
         length: extent.length,
+        // The absolute payload start is safe to form here. index_extent_range
+        // checked the entire absolute extent, and the size checks above put this
+        // header and payload inside it.
         payload: PayloadRef {
             offset: extent_offset + INDEX_RECORD_HEADER_LEN as u64,
             len: payload_len as u64,
             checksum: payload_checksum as u64,
         },
+        // A valid header does not yet vouch for the segment footer. The caller
+        // replaces this value only after comparing the CRC of the actual body bytes
+        // with their trailing word.
         segment_checksum_valid: false,
     })
 }
 
 struct ParsedIndexCommitMetadata {
+    // Number of referenced segments. The metadata record itself occupies one
+    // additional directory slot.
     index_record_count: usize,
+    // Expected CRC of the commit prefix followed by each referenced extent and its
+    // complete record, in order.
     index_checksum: u32,
+    // Byte offsets within the extent table for just the referenced entries. Reusing
+    // this slice preserves their encoded order without allocating an ID list.
     extent_range: std::ops::Range<usize>,
 }
 
 impl ParsedIndexCommitMetadata {
+    // IDs are the first field in each packed extent row. The parser checked the
+    // range and row count once so later passes can stream these IDs directly from
+    // the retained table.
     fn referenced_record_ids<'a>(&self, table: &'a [u8]) -> impl Iterator<Item = u64> + 'a {
         table[self.extent_range.clone()]
             .chunks_exact(INDEX_EXTENT_ENTRY_LEN)
@@ -4359,6 +6546,9 @@ impl ParsedIndexCommitMetadata {
     }
 }
 
+// Every physical record must be accounted for by the metadata record or one of its
+// references. Compare IDs as well as counts. An extra record could otherwise mask
+// an omitted reference.
 fn validate_index_checkpoint_directory(
     records: &BTreeMap<u64, ParsedIndexRecord>,
     checkpoint_record_count: usize,
@@ -4366,6 +6556,8 @@ fn validate_index_checkpoint_directory(
     extent_table: &[u8],
     checkpoint_start_offset: u64,
 ) -> std::result::Result<(), IndexSuffixDiagnostic> {
+    // The one extra physical row accounts for metadata itself. In particular, a
+    // metadata-only checkpoint still satisfies the same directory relationship.
     if records.len() != checkpoint_record_count
         || checkpoint_record_count != metadata.index_record_count.saturating_add(1)
     {
@@ -4375,6 +6567,9 @@ fn validate_index_checkpoint_directory(
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ));
     }
+    // BTreeMap visits IDs in ascending order. The metadata parser requires the same
+    // strict order, so equality checks missing, duplicate or unreferenced IDs
+    // without a second membership set.
     if !records
         .keys()
         .copied()
@@ -4392,11 +6587,18 @@ fn validate_index_checkpoint_directory(
 
 #[derive(Default)]
 struct ParsedIndexSegmentSummary {
+    // Number of distinct collection IDs after cross-checking text and vector
+    // membership.
     collection_count: usize,
+    // Distinct document IDs appearing in the text segments' chunk rows.
     live_document_count: usize,
+    // Sum of the chunk row counts from the accepted text segments.
     live_chunk_count: usize,
+    // Sum of vector entry counts across accepted vector segments.
     live_embedding_count: usize,
+    // Number of text segments accepted from the metadata references.
     text_segment_count: usize,
+    // Number of vector segments accepted from the same reference list.
     vector_segment_count: usize,
     #[cfg(test)]
     text_segments: Vec<TextIndexSegmentPayload>,
@@ -4414,11 +6616,20 @@ fn validate_index_segments<R: Read + Seek>(
     context: &crate::json::JsonOperationContext,
 ) -> std::result::Result<ParsedIndexSegmentSummary, IndexReadError> {
     let mut summary = ParsedIndexSegmentSummary::default();
+    // The collection and document sets survive individual decodes and share this
+    // reservation. Their storage is released on return. Production summary and lazy
+    // scans carry only the resulting counts out of this function.
     let mut directory_work = context.workspace_reservation();
+    // Track text and vector membership separately. Each collection contributes one
+    // segment of each kind; equal counts alone would also accept a vector segment
+    // for the wrong collection.
     let mut text_collections = BTreeSet::new();
     let mut vector_collections = BTreeSet::new();
     let mut document_ids = BTreeSet::new();
 
+    // Visit only the records selected by the commit. Their numeric IDs are separate
+    // from their stream IDs. A directory lookup resolves the former, and the
+    // segment header will establish the latter.
     for index_record_id in referenced_index_record_ids {
         let Some(record) = records.get(&index_record_id) else {
             return Err(index_suffix_diagnostic(
@@ -4430,6 +6641,10 @@ fn validate_index_segments<R: Read + Seek>(
         };
         match record.record_type {
             INDEX_TEXT_SEGMENT => {
+                // Verify the inner segment CRC before taking its four-byte footer
+                // off the length passed to the format decoder. The enclosing
+                // payload CRC includes those four bytes and can be valid even when
+                // the segment footer itself disagrees.
                 validate_record_segment_checksum(record, checkpoint_start_offset)?;
                 let segment = with_checked_index_payload(reader, record, context, |source| {
                     decode_text_index_segment_with(
@@ -4440,6 +6655,10 @@ fn validate_index_segments<R: Read + Seek>(
                         ),
                         expected_commit_sequence_no,
                         checkpoint_start_offset,
+                        // In production both summary and lazy-open scans take this
+                        // path through the text body. Keeping the file directory
+                        // for later queries does not relax the posting and order
+                        // checks at open time.
                         match mode {
                             #[cfg(test)]
                             IndexReadMode::Full | IndexReadMode::LazyVectors => {
@@ -4450,6 +6669,9 @@ fn validate_index_segments<R: Read + Seek>(
                         context,
                     )
                 })?;
+                // Queries locate a segment by type and stream ID. Check the
+                // embedded collection against that lookup key before it can enter
+                // the retained directory.
                 if record.stream_id != segment.collection_number {
                     return Err(index_suffix_diagnostic(
                         "index_extent_table_mismatch",
@@ -4458,6 +6680,9 @@ fn validate_index_segments<R: Read + Seek>(
                     )
                     .into());
                 }
+                // One text segment supplies the length table and dictionary for a
+                // collection. A second segment claiming that stream would double
+                // its counts and make a later lookup ambiguous.
                 if text_collections.contains(&segment.collection_number) {
                     return Err(index_suffix_diagnostic(
                         "index_segment_cardinality_mismatch",
@@ -4466,6 +6691,8 @@ fn validate_index_segments<R: Read + Seek>(
                     )
                     .into());
                 }
+                // Reserve for the new set size before insertion. Repeated document
+                // IDs below reuse a slot and need no additional directory charge.
                 reserve_index_validation_directory(
                     &mut directory_work,
                     text_collections.len() + 1,
@@ -4475,7 +6702,14 @@ fn validate_index_segments<R: Read + Seek>(
                 text_collections.insert(segment.collection_number);
                 summary.text_segment_count += 1;
                 summary.live_chunk_count += segment.chunk_count;
+                // Several chunks can belong to the same document. The live document
+                // total counts distinct document IDs across the referenced text
+                // segments.
                 for &id in segment.document_ids.as_slice() {
+                    // A local text segment has already deduplicated document
+                    // numbers within itself. The checkpoint-wide set handles any
+                    // repeats across segments and requests new B-tree capacity only
+                    // for previously unseen IDs.
                     if !document_ids.contains(&id) {
                         reserve_index_validation_directory(
                             &mut directory_work,
@@ -4492,6 +6726,9 @@ fn validate_index_segments<R: Read + Seek>(
                 }
             }
             INDEX_VECTOR_SEGMENT => {
+                // Summary decoding still scans all vector coordinates for valid f32
+                // values. Only the row count and collection number are needed for
+                // this pass.
                 validate_record_segment_checksum(record, checkpoint_start_offset)?;
                 let segment = with_checked_index_payload(reader, record, context, |source| {
                     decode_vector_index_segment_in(
@@ -4531,6 +6768,9 @@ fn validate_index_segments<R: Read + Seek>(
                     vector_collections.len() + 1,
                     document_ids.len(),
                 )?;
+                // Register the collection even when it has zero vector rows. An
+                // empty vector segment satisfies one side of the per-collection
+                // directory contract without adding to the embedding total.
                 vector_collections.insert(segment.collection_number);
                 summary.vector_segment_count += 1;
                 summary.live_embedding_count += segment.vector_count;
@@ -4539,6 +6779,9 @@ fn validate_index_segments<R: Read + Seek>(
                     summary.vector_segments.push(segment.payload.unwrap());
                 }
             }
+            // An unknown referenced record cannot be skipped in a full snapshot.
+            // Its contribution to the reported counts and the required segment
+            // pairs would be unknown.
             _ => {
                 return Err(index_suffix_diagnostic(
                     "unsupported_index_record",
@@ -4549,6 +6792,9 @@ fn validate_index_segments<R: Read + Seek>(
         }
     }
 
+    // Check the two sets after visiting every reference. A text-only collection and
+    // a different vector-only collection would balance the totals but fail this
+    // comparison. Two empty sets also accommodate a metadata-only checkpoint.
     if text_collections != vector_collections {
         return Err(index_suffix_diagnostic(
             "index_segment_cardinality_mismatch",
@@ -4556,11 +6802,17 @@ fn validate_index_segments<R: Read + Seek>(
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ).into());
     }
+    // These are the cardinalities represented by this checkpoint. The reader has no
+    // catalog here. The database can compare the resulting report with its own
+    // visible records.
     summary.collection_count = text_collections.len();
     summary.live_document_count = document_ids.len();
     Ok(summary)
 }
 
+// The membership sets survive individual segment decodes. Charge their combined
+// estimated B-tree storage to a single reservation and compute the sum in u128 so
+// an overflow cannot admit a partial estimate.
 fn reserve_index_validation_directory(
     work: &mut crate::json::WorkspaceReservation,
     text_collections: usize,
@@ -4578,8 +6830,13 @@ fn reserve_index_validation_directory(
 }
 
 struct ParsedTextIndexSegment {
+    // Collection ID embedded in the text header, used to verify the extent's stream
+    // ID.
     collection_number: u64,
+    // Number of chunk rows in this segment, including rows with zero tokens.
     chunk_count: usize,
+    // Sorted, deduplicated document numbers from those chunks. The reservation
+    // follows this vector until the caller merges it into the checkpoint-wide set.
     document_ids: crate::json::ReservedVec<u64>,
     #[cfg(test)]
     payload: TextIndexSegmentPayload,
@@ -4639,39 +6896,70 @@ fn decode_text_index_segment_in<R: Read>(
     )
 }
 
+// Text visit order follows the segment layout. A header and all chunk lengths
+// precede the dictionary. Each term is followed immediately by its postings.
+// Callbacks see borrowed data while the enclosing frame is still being validated.
 pub(crate) enum TextSegmentEntry<'a> {
+    // Announces the size of the collection's chunk table before any individual
+    // rows.
     Header {
+        // Declared number of chunk rows in the segment.
         chunks: usize,
     },
+    // One row from the chunk table, in ascending numeric ID order.
     Chunk {
+        // Catalog chunk number used by the following posting lists.
         id: u64,
+        // BM25 length in tokens, with an empty chunk counted as one for scoring.
         length: usize,
     },
+    // Starts a posting list. Its text remains available during the following
+    // posting callbacks.
     Term {
+        // UTF-8 key borrowed from the decoder for this callback.
         text: &'a str,
+        // Count of distinct chunk IDs in the term's posting list.
         document_frequency: usize,
     },
+    // One occurrence count for a chunk in the current term's posting list.
     Posting {
+        // Borrow of the key from the enclosing term, shared across its postings.
         term: &'a str,
+        // Numeric chunk ID looked up in the segment's previously decoded chunk
+        // table.
         chunk: u64,
+        // Positive number of occurrences of the term in this chunk.
         frequency: usize,
     },
 }
 
+// A fresh borrow is supplied for each event. A consumer that needs a key after the
+// callback must keep its own copy.
 pub(crate) type TextSegmentVisitor<'a> =
     dyn for<'entry> FnMut(TextSegmentEntry<'entry>) -> Result<()> + 'a;
 
 enum TextDecodeMode<'a> {
+    // Read and validate every entry while keeping only the identifiers required to
+    // check the segment and compute its summary.
     Summary,
     #[cfg(test)]
     Retain,
+    // Deliver entries as they are decoded. A later malformed posting or failed
+    // frame check can still invalidate earlier events.
     Visit {
+        // First callback error. Recording it here stops delivery while letting the
+        // decoder finish validation.
         error: &'a mut Option<Error>,
+        // Consumer of header, chunk, term and posting events, invoked in wire
+        // order.
         visit: &'a mut TextSegmentVisitor<'a>,
     },
 }
 
 impl TextDecodeMode<'_> {
+    // A callback can already have changed a candidate list. Stop issuing events on
+    // its first error, but keep scanning the same frame so an invalid segment can
+    // be discarded as a whole.
     fn emit(&mut self, entry: TextSegmentEntry<'_>) {
         if let Self::Visit { error, visit } = self {
             if error.is_none() {
@@ -4681,6 +6969,9 @@ impl TextDecodeMode<'_> {
     }
 }
 
+// A text segment has a chunk table followed by a term dictionary and its posting
+// lists. Read in that order so every posting can be checked against its chunk, and
+// a visitor can obtain BM25 lengths before it sees any term frequencies.
 fn decode_text_index_segment_with<R: Read>(
     reader: &mut IndexPayloadReader<R>,
     expected_commit_sequence_no: u64,
@@ -4690,6 +6981,9 @@ fn decode_text_index_segment_with<R: Read>(
 ) -> std::result::Result<ParsedTextIndexSegment, IndexReadError> {
     #[cfg(test)]
     let retain_entries = matches!(mode, TextDecodeMode::Retain);
+    // A segment can have internally consistent bytes and still describe another
+    // scoring rule or commit. Check the schema, commit and BM25 kind before its
+    // counts can reach the caller.
     let schema_version = reader.read_u16("text segment schema version")?;
     let collection_id = reader.read_u64("text segment collection id")?;
     let covered_commit_sequence_no = reader.read_u64("text segment covered commit")?;
@@ -4705,6 +6999,9 @@ fn decode_text_index_segment_with<R: Read>(
         )
         .into());
     }
+    // Term keys and posting frequencies were built with this tokenizer. Their token
+    // boundaries cannot be recovered from the segment to translate them for a
+    // different tokenizer.
     if reader.read_u16("tokenizer id")? != DEFAULT_EN_TOKENIZER_ID {
         return Err(index_suffix_diagnostic(
             "index_tokenizer_mismatch",
@@ -4713,6 +7010,8 @@ fn decode_text_index_segment_with<R: Read>(
         )
         .into());
     }
+    // The writer encodes the scoring parameters as f32. Compare at that same
+    // precision before accepting the stored BM25 statistics.
     let k1 = reader.read_f32("bm25 k1")?;
     let b = reader.read_f32("bm25 b")?;
     if k1 != crate::index::text::BM25_K1 as f32 || b != crate::index::text::BM25_B as f32 {
@@ -4723,14 +7022,22 @@ fn decode_text_index_segment_with<R: Read>(
         )
         .into());
     }
+    // Each fixed-width chunk row has three u64 fields. Bound its count by the room
+    // left in the segment before using it to size either ID vector.
     let chunk_count = reader.read_count("text segment chunk count", 24)?;
     mode.emit(TextSegmentEntry::Header {
         chunks: chunk_count,
     });
+    // Later postings carry numeric chunk IDs, not positions in this stream. Even a
+    // summary scan needs the ordered IDs to verify membership; it can still discard
+    // the larger decoded chunk and posting objects.
     let mut previous_chunk_id = None;
     let mut chunk_ids =
         crate::json::ReservedVec::with_capacity(chunk_count, context, "operation_scratch")
             .map_err(IndexReadError::Resource)?;
+    // Document IDs serve a different purpose from chunk IDs. Keep one per chunk
+    // while reading. Deduplicate them after the segment proves complete, then hand
+    // the resulting set to the cross-segment count.
     let mut document_ids =
         crate::json::ReservedVec::with_capacity(chunk_count, context, "operation_scratch")
             .map_err(IndexReadError::Resource)?;
@@ -4756,6 +7063,9 @@ fn decode_text_index_segment_with<R: Read>(
         previous_chunk_id = Some(chunk_id);
         chunk_ids.push(chunk_id);
         document_ids.push(document_id);
+        // The wire value is a literal token count and may be zero. The scoring
+        // callback uses a minimum length of one, matching BM25 length normalization
+        // for an empty chunk.
         mode.emit(TextSegmentEntry::Chunk {
             id: chunk_id,
             length: token_count.max(1),
@@ -4770,6 +7080,9 @@ fn decode_text_index_segment_with<R: Read>(
             });
         }
     }
+    // Even an empty term with no postings needs a length prefix, a document
+    // frequency and a posting count. This lower bound limits dictionary iteration
+    // before any variable-length key is read.
     let term_count = reader.read_count("text segment term count", 20)?;
     #[cfg(test)]
     let mut terms: Vec<TextIndexTermEntry> = if retain_entries {
@@ -4781,6 +7094,9 @@ fn decode_text_index_segment_with<R: Read>(
     let mut term_order = (!retain_entries).then(|| TextTermOrder::new(context));
     #[cfg(not(test))]
     let mut term_order = TextTermOrder::new(context);
+    // Keep adjacent terms in wire order for comparison. The current UTF-8 key is
+    // borrowed by every posting callback for this term, so read the next dictionary
+    // entry only after this list ends.
     for _ in 0..term_count {
         #[cfg(test)]
         let term = if let Some(order) = &mut term_order {
@@ -4798,6 +7114,9 @@ fn decode_text_index_segment_with<R: Read>(
         };
         #[cfg(not(test))]
         term_order.read_next(reader)?;
+        // The stored document frequency feeds BM25. Validate it against the number
+        // of entries here and require strict chunk order below, so duplicate
+        // postings cannot inflate a term's frequency.
         let document_frequency = reader.read_u64("text segment document frequency")?;
         let posting_count = reader.read_count("text segment posting count", 16)?;
         if document_frequency != posting_count as u64 {
@@ -4815,6 +7134,9 @@ fn decode_text_index_segment_with<R: Read>(
         };
         #[cfg(not(test))]
         let term_text = std::str::from_utf8(&term_order.previous).expect("validated text term");
+        // BM25 treats a chunk as the searchable document. Several chunks belonging
+        // to one catalog document can therefore contribute separately to this
+        // frequency. The live document count is derived from document IDs instead.
         mode.emit(TextSegmentEntry::Term {
             text: term_text,
             document_frequency: posting_count,
@@ -4826,6 +7148,9 @@ fn decode_text_index_segment_with<R: Read>(
         } else {
             Vec::new()
         };
+        // Ordering restarts for each term. Different terms may refer to the same
+        // chunk. Within one list each chunk must occur once, exist in the chunk
+        // table and carry a positive frequency.
         for _ in 0..posting_count {
             let posting_chunk_id = reader.read_u64("text segment posting chunk id")?;
             let term_frequency = reader.read_u64("text segment term frequency")?;
@@ -4864,6 +7189,9 @@ fn decode_text_index_segment_with<R: Read>(
             terms.push(TextIndexTermEntry { term, postings });
         }
     }
+    // The structured fields must consume the entire segment body. Only then return
+    // its document numbers. Chunk order follows chunk ID, so removing duplicate
+    // document IDs requires a separate sort.
     reader.finish_before_checksum("text segment")?;
     let (mut document_ids, document_work) = document_ids.into_parts();
     document_ids.sort_unstable();
@@ -4896,9 +7224,17 @@ fn text_term_order_error(checkpoint_start_offset: u64) -> IndexReadError {
     .into()
 }
 
+// Compare adjacent dictionary keys while holding only one heap buffer. The buffer
+// ends each successful read as the complete new key, including any bytes that
+// followed the first difference.
 struct TextTermOrder {
+    // Bytes of the last accepted key on entry. During a read, the consumed prefix
+    // belongs to the new key.
     previous: Vec<u8>,
+    // Distinguishes the first key from a preceding empty key. An empty buffer alone
+    // cannot make that distinction.
     seen: bool,
+    // Charge for the heap buffer, including the peak at a reallocation.
     work: crate::json::WorkspaceReservation,
 }
 
@@ -4920,6 +7256,9 @@ impl TextTermOrder {
         if len > reader.remaining {
             return Err(reader.invalid(field).into());
         }
+        // Growing the previous key can require an allocation before the old storage
+        // is freed. Admit that peak first. If allocation fails, keep only the
+        // charge for the buffer that survived.
         if len > self.previous.capacity() {
             let old_capacity = self.previous.capacity();
             let peak = old_capacity as u128 + len as u128;
@@ -4930,6 +7269,9 @@ impl TextTermOrder {
                 self.work.retain(old_capacity);
                 return Err(std::io::Error::other(error).into());
             }
+            // The reservation after growth covers exactly len bytes. Discard a
+            // buffer whose capacity exceeds that amount so retained capacity and
+            // accounting cannot diverge.
             if self.previous.capacity() != len {
                 self.previous = Vec::new();
                 self.work.retain(0);
@@ -4940,6 +7282,9 @@ impl TextTermOrder {
             }
             self.work.retain(len);
         }
+        // Save the previous length before resizing. If one key is a prefix of the
+        // other, that original length breaks the tie after all the common bytes
+        // compare equal.
         let old_len = self.previous.len();
         self.previous.resize(len, 0);
         let mut ordering = std::cmp::Ordering::Equal;
@@ -4951,12 +7296,18 @@ impl TextTermOrder {
             let count = (len - position).min(buffer.len());
             reader.read_into(&mut buffer[..count], field)?;
             let end = position + count;
+            // Only the first unequal byte decides the order. Subsequent blocks
+            // still have to be read and copied because the complete new key is
+            // needed for UTF-8 validation and for the next comparison.
             if self.seen && ordering == std::cmp::Ordering::Equal {
                 let common_end = end.min(old_len);
                 if position < common_end {
                     ordering =
                         self.previous[position..common_end].cmp(&buffer[..common_end - position]);
                 }
+                // If all preceding bytes match and the new key extends past the old
+                // end, the old key sorts first. A shorter new key takes the
+                // opposite direction in the final length comparison.
                 if ordering == std::cmp::Ordering::Equal && end > old_len {
                     ordering = std::cmp::Ordering::Less;
                 }
@@ -4964,6 +7315,9 @@ impl TextTermOrder {
             self.previous[position..end].copy_from_slice(&buffer[..count]);
             position = end;
         }
+        // Validate the assembled key so a multibyte character may cross a read
+        // boundary. Equal keys, including two empty keys, are duplicates. A shorter
+        // key cannot follow a longer one with the same prefix.
         std::str::from_utf8(&self.previous).map_err(|_| reader.invalid(field))?;
         if ordering == std::cmp::Ordering::Equal {
             ordering = old_len.cmp(&len);
@@ -4977,20 +7331,41 @@ impl TextTermOrder {
 }
 
 struct ParsedVectorIndexSegment {
+    // Collection number read from the vector header and checked against the
+    // directory by its caller.
     collection_number: u64,
+    // Count of fixed-width chunk and embedding rows in the segment.
     vector_count: usize,
+    // Owned vector rows and header settings returned only when the caller requested
+    // retention.
     payload: Option<VectorIndexSegmentPayload>,
 }
 
+// Visit a vector as numeric chunk ID, numeric embedding ID and coordinate slice.
+// The slice borrows row scratch that the decoder reuses on the next entry.
 type VectorVisitor<'a> = dyn FnMut(u64, u64, &[f32]) -> Result<()> + 'a;
 
 enum VectorDecodeMode<'a> {
+    // Read every coordinate and return header identity and counts without building
+    // vector rows.
     Summary,
+    // Build owned IDs, model and coordinate arrays for a retained segment. The
+    // cached reader supplies its cache reservation.
     Retain,
+    // Check the header against a particular collection, then expose each row while
+    // the file frame is being checked.
     Visit {
+        // Current catalog configuration. Model presence and bytes, dimension,
+        // metric, normalization flag and collection ID must agree before a callback
+        // receives coordinates.
         collection: &'a CollectionInfo,
+        // Reservation for the input buffer. Its operation context also admits a
+        // separate reusable row of f32 scratch.
         input: &'a crate::json::WorkspaceReservation,
+        // First failed callback or scratch admission. The caller can inspect it
+        // after determining whether the frame itself is usable.
         error: &'a mut Option<Error>,
+        // Consumer called with a borrowed slice of one validated row at a time.
         visit: &'a mut VectorVisitor<'a>,
     },
 }
@@ -5027,6 +7402,9 @@ fn decode_vector_index_segment<R: Read>(
     )
 }
 
+// The fixed header describes the shape and interpretation of every row. Summary and
+// callback reads traverse the same encoded values as a retained load, so a
+// malformed value is detected regardless of what the caller keeps.
 fn decode_vector_index_segment_in<R: Read>(
     reader: &mut IndexPayloadReader<R>,
     expected_commit_sequence_no: u64,
@@ -5039,6 +7417,9 @@ fn decode_vector_index_segment_in<R: Read>(
     let index_kind = reader.read_u16("vector segment index kind")?;
     let dim = reader.read_u32("vector segment dim")? as usize;
     let distance_metric_id = reader.read_u8("vector segment distance metric")?;
+    // Model identity is optional. Retained payloads need an owned name, summary
+    // scans only check its encoding, and query visits compare the presence tag and
+    // actual UTF-8 bytes with the catalog.
     let embedding_model = reader.read_optional_string(
         "vector segment embedding model",
         match &mode {
@@ -5049,7 +7430,12 @@ fn decode_vector_index_segment_in<R: Read>(
             }
         },
     )?;
+    // The flag describes how the collection represents its vectors. Here the flag
+    // must have a defined boolean encoding. Individual coordinates are checked for
+    // finiteness as each row is consumed.
     let vectors_normalized = reader.read_u8("vector segment normalized flag")?;
+    // Reject an unrecognized metric tag. Choosing a default could make the same
+    // coordinates produce a different ranking.
     let Some(distance_metric) = distance_metric_from_segment_id(distance_metric_id) else {
         return Err(index_suffix_diagnostic(
             "index_segment_header_mismatch",
@@ -5058,6 +7444,9 @@ fn decode_vector_index_segment_in<R: Read>(
         )
         .into());
     };
+    // The commit check binds the contents of the segment to the visible sequence.
+    // The containing record's generation check alone only binds its framing to the
+    // checkpoint.
     if schema_version != INDEX_SEGMENT_SCHEMA_VERSION
         || covered_commit_sequence_no != expected_commit_sequence_no
         || index_kind != VECTOR_INDEX_KIND_EXACT_F32
@@ -5070,7 +7459,13 @@ fn decode_vector_index_segment_in<R: Read>(
         )
         .into());
     }
+    // A catalog-bound visit feeds these coordinates directly to the query. Check
+    // the materialized collection settings before delivering any rows, including
+    // when the segment happens to be empty.
     if let VectorDecodeMode::Visit { collection, .. } = &mode {
+        // Convert the stored numeric collection ID back to its catalog spelling for
+        // the comparison. This also handles IDs that grow beyond their minimum
+        // display width without allocating a separate string.
         let mut id = [0; 24];
         if collection.collection_id != catalog_id_text(&mut id, b"col_", collection_id)
             || collection.embedding_dim != dim
@@ -5082,10 +7477,15 @@ fn decode_vector_index_segment_in<R: Read>(
                 .into());
         }
     }
+    // Each row has two u64 IDs and dim little-endian f32 coordinates. Check the
+    // byte width before using it to bound the declared row count.
     let entry_len = dim
         .checked_mul(4)
         .and_then(|len| len.checked_add(16))
         .ok_or_else(|| reader.invalid("vector segment dimension"))?;
+    // Read the count against the available body bytes before allocating or starting
+    // the loop. A zero count still leaves a header to validate and must leave zero
+    // unconsumed body bytes at the end.
     let vector_count = reader.read_count("vector segment vector count", entry_len)?;
     let mut previous_chunk_id = None;
     let mut vectors = if matches!(&mode, VectorDecodeMode::Retain) {
@@ -5093,11 +7493,16 @@ fn decode_vector_index_segment_in<R: Read>(
     } else {
         Vec::new()
     };
+    // The callback path has one scratch vector for the entire segment. Its memory
+    // use follows the dimension of one row, even if a collection contains many more
+    // rows than would fit in a retained cache entry.
     let mut scratch_work = None;
     let mut scratch = Vec::new();
     for _ in 0..vector_count {
         let chunk_id = reader.read_u64("vector segment chunk id")?;
         let embedding_id = reader.read_u64("vector segment embedding id")?;
+        // Strict order is by chunk ID. The embedding ID is carried with the vector,
+        // but plays no part in the order check.
         if previous_chunk_id >= Some(chunk_id) {
             return Err(index_suffix_diagnostic(
                 "index_segment_non_canonical",
@@ -5108,6 +7513,9 @@ fn decode_vector_index_segment_in<R: Read>(
         }
         previous_chunk_id = Some(chunk_id);
         match &mut mode {
+            // A retained row owns both catalog spellings and its coordinates. Copy
+            // each ID out before the small formatting buffer is reused for the next
+            // spelling.
             VectorDecodeMode::Retain => {
                 let vector = reader.read_vector(dim)?;
                 let mut id = [0; 24];
@@ -5117,6 +7525,9 @@ fn decode_vector_index_segment_in<R: Read>(
                     vector,
                 });
             }
+            // Run the streaming value decoder even when no vector is requested by
+            // the caller. A summary that skipped the row bytes could label a
+            // segment containing a non-finite value as usable.
             VectorDecodeMode::Summary => reader.read_vector_values(dim, None)?,
             VectorDecodeMode::Visit {
                 input,
@@ -5124,6 +7535,10 @@ fn decode_vector_index_segment_in<R: Read>(
                 visit,
                 ..
             } => {
+                // Wait for the first row before admitting its scratch, so an empty
+                // segment needs none. Split the admitted vector from its
+                // reservation and keep both until the visit ends. Subsequent rows
+                // reuse the capacity.
                 if error.is_none() && scratch_work.is_none() {
                     match crate::json::ReservedVec::<f32>::with_capacity(
                         dim,
@@ -5135,6 +7550,10 @@ fn decode_vector_index_segment_in<R: Read>(
                             scratch_work = Some(work);
                             scratch = values;
                         }
+                        // A refused scratch allocation is a provisional consumer
+                        // failure. Save it without aborting the physical scan,
+                        // which may still discover damage requiring the caller to
+                        // abandon this source.
                         Err(failure) => **error = Some(failure),
                     }
                 }
@@ -5144,13 +7563,21 @@ fn decode_vector_index_segment_in<R: Read>(
                 if error.is_some() {
                     reader.read_vector_values(dim, None)?;
                 } else {
+                    // The callback borrows only the current row. Reuse its admitted
+                    // storage on the next iteration. An owned cached result takes
+                    // the separate Retain path above.
                     reader.read_vector_values(dim, Some(&mut scratch))?;
                     **error = visit(chunk_id, embedding_id, &scratch).err();
                 }
             }
         }
     }
+    // Extra bytes after the last row fail the same framing check in all modes.
+    // Build the owned payload only when the whole declared body has been consumed.
     reader.finish_before_checksum("vector segment")?;
+    // The caller still owns any deferred visitor error. Return the decoded identity
+    // and count first so the enclosing frame reader can validate its checksums and
+    // stream ID before deciding whether a query result is usable.
     Ok(ParsedVectorIndexSegment {
         collection_number: collection_id,
         vector_count,
@@ -5191,8 +7618,14 @@ fn validate_segment_checksum(
 
 #[derive(Debug)]
 enum IndexReadError {
+    // The bytes violate a known format or binding. The caller decides whether the
+    // surrounding suffix can be treated as rebuildable.
     Invalid(IndexSuffixDiagnostic),
+    // Reading, seeking or allocating through an I/O interface failed. The lazy
+    // source handles an unexpected EOF separately when the suffix may have changed.
     Io(std::io::Error),
+    // Operation or workspace failure. Preserve its structured error so callers can
+    // distinguish admission failure from damaged index data.
     Resource(Error),
 }
 
@@ -5208,15 +7641,29 @@ impl From<std::io::Error> for IndexReadError {
     }
 }
 
+// Control what to do with a length-prefixed optional UTF-8 field. Validation and
+// matching can run against bounded scratch, independent of the size of a stored
+// model name.
 enum IndexStringMode<'a> {
+    // Return an owned string when the presence flag is set.
     Retain,
+    // Check the presence tag, length and UTF-8 encoding without retaining the text.
     Validate,
+    // Require the same presence and UTF-8 bytes as the catalog value.
     Match(Option<&'a str>),
 }
 
+// Field reader for the body of a single segment. The caller excludes the trailing
+// CRC from the byte allowance so a bad nested length cannot borrow its checksum
+// bytes.
 struct IndexPayloadReader<R> {
+    // Sequential input positioned at the next field of the segment body.
     source: R,
+    // Number of body bytes still available to the typed decoder. A successful
+    // finish consumes all of them.
     remaining: usize,
+    // Absolute checkpoint start used to give format diagnostics a stable location
+    // even when the underlying stream has no seek position.
     checkpoint_start_offset: u64,
 }
 
@@ -5229,6 +7676,9 @@ impl<R: Read> IndexPayloadReader<R> {
         }
     }
 
+    // Distinguish a field longer than the declared body from a short physical read.
+    // The first is a format diagnostic before any read. The second comes from the
+    // underlying I/O source.
     fn read_into(
         &mut self,
         output: &mut [u8],
@@ -5240,6 +7690,9 @@ impl<R: Read> IndexPayloadReader<R> {
         for part in output.chunks_mut(64 * 1024) {
             self.source.read_exact(part)?;
         }
+        // Advance the logical range only after the complete output slice has been
+        // filled. If a read error follows a partial transfer the underlying cursor
+        // may have advanced, and the error path abandons this decode.
         self.remaining -= output.len();
         Ok(())
     }
@@ -5269,12 +7722,18 @@ impl<R: Read> IndexPayloadReader<R> {
         Ok(u64::from_le_bytes(self.fixed(field)?))
     }
 
+    // Read an on-disk u64 count only if it fits the host and the remaining body can
+    // hold that many minimum-width entries. Divide the byte allowance so checking a
+    // malicious count cannot overflow a multiplication.
     fn read_count(
         &mut self,
         field: &'static str,
         min_entry_len: usize,
     ) -> std::result::Result<usize, IndexReadError> {
         let count = usize::try_from(self.read_u64(field)?).map_err(|_| self.invalid(field))?;
+        // Divide the available bytes by a nonzero minimum entry size supplied by
+        // the decoder. A multiplication using an untrusted count could overflow and
+        // make a count that cannot fit look small.
         if count > self.remaining / min_entry_len {
             return Err(self.invalid(field).into());
         }
@@ -5291,11 +7750,17 @@ impl<R: Read> IndexPayloadReader<R> {
         Ok(vector)
     }
 
+    // An absent destination requests validation without retaining coordinates. The
+    // same block decoder checks every little-endian f32 in both modes, so skipping
+    // output cannot allow NaN or infinity through.
     fn read_vector_values(
         &mut self,
         dim: usize,
         mut values: Option<&mut Vec<f32>>,
     ) -> std::result::Result<(), IndexReadError> {
+        // Check the entire row width before reserving a vector or consuming any
+        // value. A truncated dimension cannot allocate beyond, or read across, the
+        // segment body's allowed range.
         if dim
             .checked_mul(4)
             .filter(|bytes| *bytes <= self.remaining)
@@ -5303,11 +7768,16 @@ impl<R: Read> IndexPayloadReader<R> {
         {
             return Err(self.invalid("vector segment value").into());
         }
+        // Only materialization owns a result vector. Validation traverses the same
+        // f32 bytes below, applying the same finiteness rule while retaining no
+        // coordinates.
         if let Some(vector) = &mut values {
             vector
                 .try_reserve_exact(dim)
                 .map_err(std::io::Error::other)?;
         }
+        // Read whole f32 values per block. Each split occurs on a four-byte
+        // boundary, and the final read stops at the declared dimension.
         let mut bytes = [0; 4096];
         let mut remaining = dim;
         while remaining > 0 {
@@ -5333,6 +7803,9 @@ impl<R: Read> IndexPayloadReader<R> {
         Ok(())
     }
 
+    // Retained mode needs an owned model name. Check the encoded length before
+    // reserving an allocation, and validate UTF-8 on the bytes that will become the
+    // string.
     fn read_string(&mut self, field: &'static str) -> std::result::Result<String, IndexReadError> {
         let len = self.read_u32(field)? as usize;
         if len > self.remaining {
@@ -5347,16 +7820,25 @@ impl<R: Read> IndexPayloadReader<R> {
         String::from_utf8(bytes).map_err(|_| self.invalid(field).into())
     }
 
+    // The presence flag distinguishes an absent model from a present empty name. In
+    // matching mode both the flag and the UTF-8 contents are significant. Only
+    // retention returns an owned string.
     fn read_optional_string(
         &mut self,
         field: &'static str,
         mode: IndexStringMode<'_>,
     ) -> std::result::Result<Option<String>, IndexReadError> {
+        // Presence and content are independent on the wire. A present string whose
+        // length is zero still differs from an absent model name when matching a
+        // checkpoint against collection metadata.
         match (self.read_u8(field)?, mode) {
             (0, IndexStringMode::Match(Some(_))) | (1, IndexStringMode::Match(None)) => {
                 Err(self.invalid(field).into())
             }
             (0, _) => Ok(None),
+            // Only the retain mode needs to allocate a String for a present value.
+            // Validation and matching can consume the same length-prefixed bytes
+            // and verify them against borrowed metadata.
             (1, IndexStringMode::Retain) => self.read_string(field).map(Some),
             (1, mode) => {
                 let expected = match mode {
@@ -5370,6 +7852,9 @@ impl<R: Read> IndexPayloadReader<R> {
         }
     }
 
+    // Stream a string through a fixed buffer when a name need not be kept. Position
+    // counts bytes already validated and, in matching mode, compared with the
+    // expected byte slice.
     fn check_string(
         &mut self,
         field: &'static str,
@@ -5383,11 +7868,17 @@ impl<R: Read> IndexPayloadReader<R> {
         let mut remaining = len;
         let mut carried = 0;
         let mut position = 0;
+        // Reserve room at the front of the next chunk for an unfinished UTF-8
+        // sequence. The output position counts validated bytes so an expected
+        // string is compared at the correct offset across a multi-byte boundary.
         while remaining > 0 {
             let count = remaining.min(bytes.len() - carried);
             self.read_into(&mut bytes[carried..carried + count], field)?;
             remaining -= count;
             let filled = carried + count;
+            // A UTF-8 error without a definite length can mean an incomplete
+            // character at a block boundary. Carry that suffix only when more input
+            // remains. The same condition at the declared end is malformed input.
             let valid = match std::str::from_utf8(&bytes[..filled]) {
                 Ok(_) => filled,
                 Err(error) if error.error_len().is_none() && remaining > 0 => error.valid_up_to(),
@@ -5398,6 +7889,9 @@ impl<R: Read> IndexPayloadReader<R> {
             }) {
                 return Err(self.invalid(field).into());
             }
+            // The matched prefix may end before the end of the buffer. Advance by
+            // valid bytes only, then move the unconsumed part of the next character
+            // down for the following read.
             position += valid;
             // Keep only an incomplete UTF-8 code point across chunk boundaries.
             bytes.copy_within(valid..filled, 0);
@@ -5406,6 +7900,9 @@ impl<R: Read> IndexPayloadReader<R> {
         Ok(())
     }
 
+    // This count excludes the checksum word. Reaching zero proves that the decoded
+    // fields fill the body exactly. Any leftover byte would give the same
+    // structured result a second encoding.
     fn finish_before_checksum(
         &self,
         field: &'static str,
@@ -5418,6 +7915,9 @@ impl<R: Read> IndexPayloadReader<R> {
     }
 
     fn invalid(&self, field: &'static str) -> IndexSuffixDiagnostic {
+        // Field-level failures use the start of the checkpoint payload for context.
+        // They do not claim that the field starts at that offset. More precise
+        // extent locations are reported by the directory and frame checks.
         index_suffix_diagnostic(
             "index_segment_non_canonical",
             format!("ignored index checkpoint with invalid {field} payload"),
@@ -5426,6 +7926,9 @@ impl<R: Read> IndexPayloadReader<R> {
     }
 }
 
+// Commit metadata names the segments by a byte range in the directory. It also
+// repeats the covered batch and sequence from the outer header. Validate these
+// independent claims before the caller follows an ID or uses the commit checksum.
 fn parse_index_commit_metadata_payload(
     payload: &[u8],
     expected_batch_id: u64,
@@ -5434,6 +7937,9 @@ fn parse_index_commit_metadata_payload(
     records: &BTreeMap<u64, ParsedIndexRecord>,
     checkpoint_start_offset: u64,
 ) -> std::result::Result<ParsedIndexCommitMetadata, IndexSuffixDiagnostic> {
+    // This version uses a fixed metadata record. An otherwise valid prefix with
+    // extra bytes has no defined interpretation, and a short prefix cannot safely
+    // provide the offset and length fields below.
     if payload.len() != INDEX_COMMIT_METADATA_LEN {
         return Err(index_suffix_diagnostic(
             "index_commit_metadata_invalid",
@@ -5443,15 +7949,23 @@ fn parse_index_commit_metadata_payload(
                 + INDEX_RECORD_HEADER_LEN as u64,
         ));
     }
+    // The metadata has its own schema version. Its counts cover just the records it
+    // names. They can both be zero in a metadata-only snapshot.
     let advisory_version = read_u16(&payload[0..2]);
     let batch_id = read_u64(&payload[2..10]);
     let commit_sequence_no = read_u64(&payload[10..18]);
+    // The segment count and extent count inside metadata describe the referenced
+    // subset. The outer header counts the whole directory, including the metadata
+    // row. Use the inner counts for sizing its referenced range.
     let index_record_count = read_u64(&payload[18..26]);
     let index_checksum = read_u32(&payload[26..30]);
     let index_extent_count = read_u64(&payload[30..38]);
     let index_extent_table_offset = read_u64(&payload[38..46]);
     let index_extent_table_length = read_u64(&payload[46..54]);
     let index_extent_table_checksum = read_u32(&payload[54..58]);
+    // Check the metadata's own version and coverage independently of the outer
+    // header. A parseable metadata record for a different batch or commit must not
+    // select the segments for this one.
     if advisory_version != 1
         || batch_id != expected_batch_id
         || commit_sequence_no != expected_commit_sequence_no
@@ -5465,6 +7979,10 @@ fn parse_index_commit_metadata_payload(
                 + INDEX_RECORD_HEADER_LEN as u64,
         ));
     }
+    // The outer header locates the extent table relative to the checkpoint. This
+    // inner offset is instead relative to the first byte of that table. Convert to
+    // a native slice range only after the identity and count fields have checked
+    // out.
     let extent_start = usize::try_from(index_extent_table_offset).map_err(|_| {
         index_suffix_diagnostic(
             "index_commit_metadata_invalid",
@@ -5479,6 +7997,8 @@ fn parse_index_commit_metadata_payload(
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         )
     })?;
+    // Convert the declared row count before computing a native slice size. A count
+    // that fits u64 need not be usable as an entry count on the reading host.
     let index_extent_count = usize::try_from(index_extent_count).map_err(|_| {
         index_suffix_diagnostic(
             "index_commit_metadata_invalid",
@@ -5486,6 +8006,9 @@ fn parse_index_commit_metadata_payload(
             checkpoint_start_offset,
         )
     })?;
+    // Prove that the range fits the table and holds exactly one packed entry per
+    // reference. The count and byte length arrive independently from disk. Checking
+    // only an in-bounds end would permit a shortened or overlong list.
     let expected_extent_len = index_extent_count
         .checked_mul(INDEX_EXTENT_ENTRY_LEN)
         .ok_or_else(|| {
@@ -5495,6 +8018,9 @@ fn parse_index_commit_metadata_payload(
                 checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
             )
         })?;
+    // A representable row count does not make the range end representable. Check
+    // the table-relative offset plus the claimed length separately before borrowing
+    // from the table.
     let Some(extent_end) = extent_start.checked_add(extent_len) else {
         return Err(index_suffix_diagnostic(
             "index_commit_metadata_invalid",
@@ -5509,7 +8035,13 @@ fn parse_index_commit_metadata_payload(
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ));
     }
+    // The metadata identifies a slice of the extent table. Its checksum covers the
+    // encoded entries in that slice, and the following order check prevents a
+    // duplicate record ID from standing in for another segment.
     let referenced_extent_bytes = &extent_table[extent_start..extent_end];
+    // The outer table CRC covers every row, including metadata itself. This
+    // checksum covers the particular subrange chosen by the metadata, so a changed
+    // reference range cannot rely solely on the outer CRC.
     if checksum32(referenced_extent_bytes) != index_extent_table_checksum {
         return Err(index_suffix_diagnostic(
             "index_commit_metadata_invalid",
@@ -5517,9 +8049,15 @@ fn parse_index_commit_metadata_payload(
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ));
     }
+    // Canonical order requires each referenced ID to increase. The comparison uses
+    // the previous ID directly and the directory pass matches actual records, so
+    // validation does not need to infer IDs by incrementing a counter.
     let mut previous_id = None;
     for entry_bytes in referenced_extent_bytes.chunks_exact(INDEX_EXTENT_ENTRY_LEN) {
         let extent = parse_extent_entry(entry_bytes);
+        // A self-reference would make the metadata's checksum depend on its own
+        // record bytes. References also have to ascend by record ID, which gives
+        // both writer and verifier a single order for the commit digest.
         if extent.record_type == INDEX_COMMIT_METADATA
             || previous_id >= Some(extent.index_record_id)
         {
@@ -5529,6 +8067,9 @@ fn parse_index_commit_metadata_payload(
                 checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
             ));
         }
+        // Resolve every reference against the previously checked physical record
+        // map before returning this byte range. The later digest pass can then
+        // address the corresponding record by ID.
         if !records.contains_key(&extent.index_record_id) {
             return Err(index_suffix_diagnostic(
                 "index_commit_metadata_invalid",
@@ -5538,6 +8079,9 @@ fn parse_index_commit_metadata_payload(
         }
         previous_id = Some(extent.index_record_id);
     }
+    // Keep the validated range instead of copying its IDs. Both the checksum walk
+    // and the directory comparison can reread the same original bytes, avoiding a
+    // second reference list whose order would also have to be maintained.
     Ok(ParsedIndexCommitMetadata {
         index_record_count: index_extent_count,
         index_checksum,
@@ -5557,6 +8101,10 @@ fn index_commit_checksum(
     checksum.finish()
 }
 
+// Start the writer and reader with the same little-endian metadata version, batch,
+// commit sequence and generation. The caller continues this CRC with the ordered
+// referenced entries and record bytes. Identical segment data under different
+// commit coordinates therefore has a different input to the checksum.
 fn index_commit_hasher(
     batch_id: u64,
     commit_sequence_no: u64,
@@ -5583,6 +8131,9 @@ fn index_suffix_diagnostic(
     }
 }
 
+// Attach the logical record ID as well as the physical byte offset. The check
+// report can then identify the offending extent even when its header or payload
+// failed to parse.
 fn index_extent_diagnostic(
     code: &'static str,
     message: impl Into<String>,
@@ -5597,6 +8148,9 @@ fn index_extent_diagnostic(
     }
 }
 
+// Convert a legacy JSON record into the same payload variants used for binary
+// replay. The frame supplies the type tag. The individual variants validate their
+// own fields before the replay code sees them.
 fn record_from_json(record_type: u16, value: &JsonValue) -> Result<RecordPayload> {
     let obj = value.as_object().ok_or_else(|| {
         Error::new(
@@ -5608,6 +8162,8 @@ fn record_from_json(record_type: u16, value: &JsonValue) -> Result<RecordPayload
         COLLECTION_CREATE => Ok(RecordPayload::CollectionCreate(CollectionInfo::from_json(
             value,
         )?)),
+        // Legacy drop replay uses the collection ID and drop time. Supply the empty
+        // name and absent reason expected by the common payload type.
         COLLECTION_DROP => Ok(RecordPayload::CollectionDrop {
             collection_id: required_string(obj, "collection_id")?,
             name: String::new(),
@@ -5618,6 +8174,9 @@ fn record_from_json(record_type: u16, value: &JsonValue) -> Result<RecordPayload
         CHUNK_PUT => Ok(RecordPayload::ChunkPut(Chunk::from_json(value)?)),
         EMBEDDING_PUT => Ok(RecordPayload::EmbeddingPut(Embedding::from_json(value)?)),
         TOMBSTONE => Ok(RecordPayload::Tombstone(Tombstone::from_json(value)?)),
+        // The batch checksum accepts a decimal string so its u64 bits can survive a
+        // JSON round trip. Counts and sequence fields here go through the legacy
+        // integer parser.
         COMMIT => Ok(RecordPayload::Commit(CommitPayload {
             batch_id: required_usize(obj, "batch_id")? as u64,
             first_sequence_no: required_usize(obj, "first_sequence_no")? as u64,
@@ -5626,6 +8185,9 @@ fn record_from_json(record_type: u16, value: &JsonValue) -> Result<RecordPayload
             batch_checksum: required_u64(obj, "batch_checksum")?,
             committed_at: required_string(obj, "committed_at")?,
         })),
+        // The legacy marker contributes its rewrite count, timestamp and optional
+        // ID watermarks. Generation, source commit sequence and compacted checksum
+        // have no value supplied by this decoding path.
         COMPACT_MARKER => Ok(RecordPayload::CompactMarker(CompactMarker {
             compact_generation: 0,
             source_last_commit_sequence_no: 0,
@@ -5641,6 +8203,9 @@ fn record_from_json(record_type: u16, value: &JsonValue) -> Result<RecordPayload
     }
 }
 
+// Keep the mapping explicit. These tags travel in the binary record frame, and
+// names used by retained record references must resolve to the same payload type on
+// a later read.
 fn record_type_id(record: &RecordPayload) -> u16 {
     match record {
         RecordPayload::CollectionCreate(_) => COLLECTION_CREATE,
@@ -5654,6 +8219,8 @@ fn record_type_id(record: &RecordPayload) -> u16 {
     }
 }
 
+// Diagnostics still need a printable label for an unrecognized tag. Reverse lookup
+// for reading a record is stricter because it must select a real payload decoder.
 fn record_type_name(record_type: u16) -> &'static str {
     match record_type {
         COLLECTION_CREATE => "CollectionCreate",
@@ -5685,6 +8252,9 @@ fn record_type_from_name(record_type: &str) -> Result<u16> {
     }
 }
 
+// Construct a finding at the point where its stream and visibility impact are
+// known. Repairability and the affected extent require additional evidence from the
+// particular checker, so they start unset.
 #[allow(clippy::too_many_arguments)]
 fn issue(
     severity: &str,
@@ -5711,6 +8281,9 @@ fn issue(
     }
 }
 
+// Decode slices from headers or entries whose widths the caller has already
+// checked. These helpers can then use fixed byte offsets and little-endian
+// arithmetic without depending on host alignment.
 fn read_u16(bytes: &[u8]) -> u16 {
     u16::from_le_bytes([bytes[0], bytes[1]])
 }
@@ -5725,8 +8298,15 @@ fn read_u64(bytes: &[u8]) -> u64 {
     ])
 }
 
+// Legacy checksum fields accept decimal text as well as integral JSON numbers.
+// Decimal text preserves every u64 digit. A numeric value has already been read as
+// binary64 before this conversion.
 fn required_u64(obj: &std::collections::BTreeMap<String, JsonValue>, key: &str) -> Result<u64> {
     match obj.get(key) {
+        // A decimal string parses directly into u64 and can carry all 64 bits.
+        // Historical numeric JSON enters as f64 and can already have lost integer
+        // precision before this conversion. Large exact values rely on the string
+        // form.
         Some(JsonValue::String(value)) => value.parse::<u64>().map_err(|_| {
             Error::new(
                 ErrorCode::FileFormatError,
@@ -5743,10 +8323,16 @@ fn required_u64(obj: &std::collections::BTreeMap<String, JsonValue>, key: &str) 
     }
 }
 
+// Older compact markers can omit the watermark object. An absent map contributes no
+// saved per-prefix counters to replay. A present but malformed map is a format
+// error since silently losing a watermark can permit reuse of an ID.
 fn optional_u64_map(
     obj: &std::collections::BTreeMap<String, JsonValue>,
     key: &str,
 ) -> Result<BTreeMap<String, u64>> {
+    // Absence is a compatibility case for a marker that did not store a watermark
+    // map. When the member exists, require its object shape and check each supplied
+    // value. Treating a malformed map as empty could discard allocation history.
     let Some(value) = obj.get(key) else {
         return Ok(BTreeMap::new());
     };
@@ -5757,6 +8343,9 @@ fn optional_u64_map(
         )
     })?;
     let mut parsed = BTreeMap::new();
+    // Watermark entries use numeric values in this legacy object. Check each
+    // independently and report the prefix in the field path, so a valid entry
+    // cannot mask a malformed one.
     for (entry_key, entry_value) in map {
         let value = entry_value.as_f64().ok_or_else(|| {
             Error::new(
@@ -5776,11 +8365,16 @@ fn optional_u64_map(
 }
 
 impl CheckIssue {
+    /// Build the structured JSON object for this scan result.
+    /// Unknown offsets, record types, extent IDs and batch IDs appear as JSON null.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
+    // Share the report shape between the host DTO and operation-budgeted output.
+    // Route strings and the enclosing object through the supplied builder so a
+    // budgeted response accounts for copying the finding.
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
             ("severity", builder.string(&self.severity)?),
@@ -5791,12 +8385,7 @@ impl CheckIssue {
                 "visibility_impact",
                 builder.string(&self.visibility_impact)?,
             ),
-            (
-                "offset",
-                self.offset
-                    .map(|value| JsonValue::Number(value as f64))
-                    .unwrap_or(JsonValue::Null),
-            ),
+            ("offset", builder.optional_u64(self.offset)?),
             (
                 "extent_id",
                 builder.optional_str(self.extent_id.as_deref())?,
@@ -5805,12 +8394,9 @@ impl CheckIssue {
                 "record_type",
                 builder.optional_str(self.record_type.as_deref())?,
             ),
-            (
-                "batch_id",
-                self.batch_id
-                    .map(|value| JsonValue::Number(value as f64))
-                    .unwrap_or(JsonValue::Null),
-            ),
+            ("batch_id", builder.optional_u64(self.batch_id)?),
+            // Both public spellings describe the same decision. A checker sets one
+            // flag and clients reading either key see that decision.
             ("repair_available", JsonValue::Bool(self.repair_available)),
             ("repairable", JsonValue::Bool(self.repair_available)),
             (
@@ -5822,6 +8408,11 @@ impl CheckIssue {
 }
 
 impl IndexSuffixReport {
+    /// Compute the checkpoint size in bytes, including framing and the extent directory, using
+    /// saturating arithmetic.
+    /// The size includes the stored records and their directory. It is a reporting
+    /// value. Readers separately check arithmetic before using on-disk lengths to
+    /// seek.
     pub fn total_size_bytes(&self) -> u64 {
         (INDEX_CHECKPOINT_HEADER_LEN as u64)
             .saturating_add(self.payload_len)
@@ -5831,6 +8422,9 @@ impl IndexSuffixReport {
             .saturating_add(INDEX_CHECKPOINT_TRAILER_LEN as u64)
     }
 
+    /// Build the structured JSON object for this scan result.
+    /// Byte offsets, IDs and counts use decimal strings when they exceed the safe
+    /// integer range of JSON numbers.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
@@ -5839,63 +8433,69 @@ impl IndexSuffixReport {
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
             ("status", builder.string(&self.status)?),
-            ("offset", JsonValue::Number(self.offset as f64)),
+            ("offset", builder.optional_u64(Some(self.offset))?),
             (
                 "checkpoint_generation",
-                JsonValue::Number(self.checkpoint_generation as f64),
+                builder.optional_u64(Some(self.checkpoint_generation))?,
             ),
             (
                 "covered_critical_end_offset",
-                JsonValue::Number(self.covered_critical_end_offset as f64),
+                builder.optional_u64(Some(self.covered_critical_end_offset))?,
             ),
             (
                 "covered_last_batch_id",
-                JsonValue::Number(self.covered_last_batch_id as f64),
+                builder.optional_u64(Some(self.covered_last_batch_id))?,
             ),
             (
                 "covered_last_commit_sequence_no",
-                JsonValue::Number(self.covered_last_commit_sequence_no as f64),
+                builder.optional_u64(Some(self.covered_last_commit_sequence_no))?,
             ),
+            // The coverage fingerprint is a u32 and fits exactly in a binary64
+            // number. The surrounding offsets, counts and lengths can exceed that
+            // precision and go through the builder's integer conversion.
             (
                 "coverage_hash",
                 JsonValue::Number(self.coverage_hash as f64),
             ),
             (
                 "collection_count",
-                JsonValue::Number(self.collection_count as f64),
+                builder.optional_u64(Some(self.collection_count as u64))?,
             ),
             (
                 "live_document_count",
-                JsonValue::Number(self.live_document_count as f64),
+                builder.optional_u64(Some(self.live_document_count as u64))?,
             ),
             (
                 "live_chunk_count",
-                JsonValue::Number(self.live_chunk_count as f64),
+                builder.optional_u64(Some(self.live_chunk_count as u64))?,
             ),
             (
                 "live_embedding_count",
-                JsonValue::Number(self.live_embedding_count as f64),
+                builder.optional_u64(Some(self.live_embedding_count as u64))?,
             ),
             (
                 "text_segment_count",
-                JsonValue::Number(self.text_segment_count as f64),
+                builder.optional_u64(Some(self.text_segment_count as u64))?,
             ),
             (
                 "vector_segment_count",
-                JsonValue::Number(self.vector_segment_count as f64),
+                builder.optional_u64(Some(self.vector_segment_count as u64))?,
             ),
             (
                 "index_record_count",
-                JsonValue::Number(self.index_record_count as f64),
+                builder.optional_u64(Some(self.index_record_count as u64))?,
             ),
             (
                 "index_extent_count",
-                JsonValue::Number(self.index_extent_count as f64),
+                builder.optional_u64(Some(self.index_extent_count as u64))?,
             ),
-            ("payload_len", JsonValue::Number(self.payload_len as f64)),
+            // payload_len counts the framed records. total_size_bytes adds the
+            // enclosing header, extent table and completion trailer so callers can
+            // report the complete footprint at offset.
+            ("payload_len", builder.optional_u64(Some(self.payload_len))?),
             (
                 "total_size_bytes",
-                JsonValue::Number(self.total_size_bytes() as f64),
+                builder.optional_u64(Some(self.total_size_bytes()))?,
             ),
             ("build_mode", builder.string(&self.build_mode)?),
         ])

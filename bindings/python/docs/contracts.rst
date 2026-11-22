@@ -93,6 +93,6 @@ candidate normalization and ranking.
 
 One complete content read obtains the chunk and its document from one view.
 Search and a subsequent get are separate calls, so no cross-call transaction
-is implied. Readers use their core fixed view. The SDK does not add a snapshot
-or transaction API, encryption, provider service, telemetry or secure-erasure
+is implied. Readers use their core fixed view. A writer can save a standalone physical snapshot. This adds no cross-call
+transaction, encryption, provider service, telemetry or secure-erasure
 guarantee.

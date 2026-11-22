@@ -4,6 +4,15 @@ Entries describe version contents. The
 [releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
+## 0.2.0
+
+- Use an open Python writer to create a standalone snapshot, rebuild indexes or compact the database between write batches. Each method returns a report describing the resulting file or index.
+- When maintenance changes a file but confirmation or delivery of the report fails, the exception carries the available recovery details.
+
+- Inspect, repair, rebuild indexes, compact and snapshot local databases with structured CLI results. Use `cofferdb.check(path)` from Python.
+- Trace filtered, missing and lower-ranked chunks in exact and BM25 search. Save results and target diagnostics in an offline HTML report.
+- Import directory text with an explicit input encoding and reproducible UTF-8 chunk offsets.
+
 ## 0.1.5
 
 - Add Linux ARM64 (AArch64) wheels for regular-GIL CPython 3.12, 3.13 and 3.14 on glibc 2.28 or later.

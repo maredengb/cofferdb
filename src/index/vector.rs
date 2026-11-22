@@ -10,12 +10,19 @@ use crate::model::DistanceMetric;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct VectorWork {
+    /// Vector entries inspected. A visited embedding can count here even when its
+    /// chunk fails the filter and its payload is never scored.
     pub scans: usize,
+    /// Total components passed to the distance or similarity calculation. Scoring
+    /// one vector adds its dimension.
     pub distance_ops: usize,
 }
 
 impl VectorWork {
     pub(crate) fn add(&mut self, other: Self) {
+        // Accumulate work from recall and later score completion even when they
+        // examine the same embedding. These totals measure executed operations and
+        // are independent of the number of distinct hits retained.
         self.scans += other.scans;
         self.distance_ops += other.distance_ops;
     }
@@ -23,8 +30,14 @@ impl VectorWork {
 
 #[derive(Clone, Debug)]
 pub struct VectorHit {
+    /// Owned internal chunk ID used to break score ties and to find this
+    /// embedding's lexical score during fusion.
     pub chunk_id: String,
+    /// Original metric output. For Euclidean this is a distance, with smaller
+    /// values denoting closer vectors.
     pub raw_score: f64,
+    /// Larger-is-better score used for the recall order and later fusion. A raw dot
+    /// product can remain outside the unit interval.
     pub normalized_score: f64,
 }
 
@@ -41,6 +54,9 @@ impl PartialOrd for VectorHit {
 }
 impl Ord for VectorHit {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Rank by the comparable score after metric normalization. The raw value
+        // can be a smaller-is-better Euclidean distance and remains on the hit for
+        // reporting.
         candidate_order(
             self.normalized_score,
             &self.chunk_id,
@@ -52,23 +68,39 @@ impl Ord for VectorHit {
 
 // The largest heap entry is the worst candidate; signed zero remains a tie.
 fn candidate_order(left: f64, left_id: &str, right: f64, right_id: &str) -> Ordering {
+    // Numeric equality handles positive and negative zero before the total order
+    // sees their sign bits. The same tie breaker is used in the borrowed admission
+    // check and the owned heap entry.
     let score = if left == right {
         Ordering::Equal
     } else {
         right.total_cmp(&left)
     };
+    // A bounded max-heap evicts its greatest member. Giving the lexicographically
+    // larger ID greater order breaks score ties consistently even if primary
+    // scanning and checkpoint traversal visit rows in different orders.
     score.then_with(|| left_id.cmp(right_id))
 }
 
 pub(crate) struct VectorCandidates {
+    // Maximum number of hits to retain, independent of how many visible embeddings
+    // the scan inspects.
     limit: usize,
+    // The root is the worst retained hit. Its owned ID storage can often be reused
+    // when a better candidate displaces it.
     heap: BinaryHeap<VectorHit>,
+    // Covers the heap slots by capacity and the ID buffers already installed in
+    // those slots.
     work: WorkspaceReservation,
 }
 
 #[derive(Debug)]
 pub(crate) struct VectorHits {
+    // Owned hits initially in best-first order. A caller performing score lookup
+    // may subsequently order them by ID.
     hits: Vec<VectorHit>,
+    // Kept with the vector so its backing slots and the surviving chunk ID
+    // allocations stay charged after the heap is consumed.
     work: WorkspaceReservation,
 }
 
@@ -82,10 +114,16 @@ impl std::ops::Deref for VectorHits {
 
 impl VectorHits {
     pub(crate) fn empty(context: &JsonOperationContext) -> Self {
+        // A zero-capacity candidate set still carries the operation context
+        // through the empty result. Callers can take the same filtering and
+        // diagnostic paths when a route produced no rows.
         VectorCandidates::new(0, context).finish()
     }
 
     pub(crate) fn sort_by_id(&mut self) {
+        // A caller needing both rank and binary lookup first reads or copies the
+        // rank-ordered prefix. Sorting in place deliberately discards that ranking
+        // order.
         self.hits
             .sort_unstable_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
     }
@@ -95,6 +133,9 @@ impl VectorHits {
     }
 
     pub(crate) fn retain(&mut self, mut include: impl FnMut(&VectorHit) -> bool) {
+        // Filtering drops each rejected ID buffer immediately. Vec::retain
+        // preserves the backing allocation, so all its slots remain charged even
+        // when few hits survive.
         let mut released = 0;
         self.hits.retain(|hit| {
             let retained = include(hit);
@@ -103,11 +144,20 @@ impl VectorHits {
             }
             retained
         });
+        // Return ID capacity only after retain has dropped the rejected hits. The
+        // survivor order is unchanged, and no result slots were returned to the
+        // allocator during this pass.
         self.work.retain(self.work.reserved_bytes() - released);
     }
 
     pub(crate) fn copy_prefix(&self, limit: usize) -> Result<Self> {
+        // Diagnosis can keep the complete branch rankings while trying a smaller
+        // recall window. Copy only the selected prefix, with a separate reservation
+        // while the original list remains live.
         let mut candidates = VectorCandidates::new(limit.min(self.len()), self.work.context());
+        // Copy the prefix in its present order before sorting hits by ID for
+        // lookup. Copying after that sort would give diagnosis an ID prefix
+        // unrelated to the original recall window.
         for hit in self.iter().take(limit) {
             candidates.push(&hit.chunk_id, hit.raw_score, hit.normalized_score)?;
         }
@@ -117,6 +167,9 @@ impl VectorHits {
 
 impl VectorCandidates {
     pub(crate) fn new(limit: usize, context: &JsonOperationContext) -> Self {
+        // The limit bounds how many candidates survive, even when an exact scan
+        // must visit every embedding. Delay allocating heap storage until the
+        // first eligible candidate actually arrives.
         Self {
             limit,
             heap: BinaryHeap::new(),
@@ -125,9 +178,16 @@ impl VectorCandidates {
     }
 
     pub(crate) fn push(&mut self, id: &str, raw_score: f64, normalized_score: f64) -> Result<()> {
+        // Compare the borrowed ID and score before allocating. Most late candidates
+        // can be rejected at a full heap without owning their strings, including a
+        // losing ID at an equal score.
         if self.limit == 0
             || (self.heap.len() == self.limit
                 && self.heap.peek().is_some_and(|worst| {
+                    // Use the normalized score for ordering across candidates from
+                    // this collection. The raw score is retained for reporting,
+                    // and its preferred direction differs between Euclidean
+                    // distance and similarity metrics.
                     candidate_order(
                         normalized_score,
                         id,
@@ -138,20 +198,42 @@ impl VectorCandidates {
         {
             return Ok(());
         }
+        // Replacing the worst entry leaves the number of slots unchanged. Its
+        // current string can hold a shorter winning ID even when the operation has
+        // no headroom for an additional allocation.
         if self.heap.len() == self.limit {
+            // The early check has established that this row outranks the root.
+            // Mutating through PeekMut allows the heap to restore its ordering
+            // when the replacement is complete.
             let mut worst = self.heap.peek_mut().unwrap();
             let before = self.work.reserved_bytes();
             let old_capacity = worst.chunk_id.capacity();
             if id.len() > old_capacity {
+                // Reallocation may briefly own both buffers. Charge the overlap
+                // before growing the string and return the old credit after success.
                 let bytes = before as u128 + id.len() as u128;
                 self.work.grow_to_wide(bytes, bytes, "operation_scratch")?;
+                // String growth is specified relative to the current length, even
+                // when the old capacity is larger. Ask for the difference that
+                // makes the entire new ID fit in one admitted buffer.
                 let additional = id.len() - worst.chunk_id.len();
                 if let Err(error) = worst.chunk_id.try_reserve_exact(additional) {
+                    // A failed reserve leaves the existing string in place. Return
+                    // the temporary growth allowance while preserving the original
+                    // candidate's buffer and every other retained row.
                     self.work.retain(before);
                     return Err(std::io::Error::other(error.to_string()).into());
                 }
+                // The reservation covers the requested buffer size. If the
+                // allocator delivered a larger capacity, discard that buffer before
+                // returning the error so the failed operation retains no uncharged
+                // ID allocation.
                 if worst.chunk_id.capacity() != id.len() {
                     drop(std::mem::take(&mut worst.chunk_id));
+                    // The overallocated buffer has already been dropped and the
+                    // old allocation is gone as well. Subtract the old ID capacity
+                    // from the original grant before propagating the allocation
+                    // error.
                     self.work.retain(before - old_capacity);
                     return Err(
                         std::io::Error::other("candidate ID capacity exceeds reservation").into(),
@@ -159,17 +241,27 @@ impl VectorCandidates {
                 }
                 self.work.retain(before - old_capacity + id.len());
             }
+            // Replacing a shorter ID can reuse the full existing capacity. Keep
+            // that actual capacity charged and replace both score representations
+            // so the reported raw value still describes the selected ID.
             worst.chunk_id.clear();
             worst.chunk_id.push_str(id);
             worst.raw_score = raw_score;
             worst.normalized_score = normalized_score;
             return Ok(());
         }
+        // With space for another hit, reserve its ID before growing the heap. If
+        // spare array capacity is keeping the ID from fitting, try releasing those
+        // slots and retry the copy once while existing hits remain owned.
         let copy = match ReservedString::copy(id, self.work.context()) {
             Err(error)
                 if error.code() == crate::ErrorCode::ResourceExhausted
                     && self.heap.len() < self.heap.capacity() =>
             {
+                // Shrinking is worthwhile only if it releases quota that the same
+                // ID copy can use. If the heap cannot surrender any capacity,
+                // preserve the first failure instead of retrying an unchanged
+                // allocation.
                 if !try_shrink_heap(&mut self.heap, &mut self.work)? {
                     return Err(error);
                 }
@@ -177,12 +269,18 @@ impl VectorCandidates {
             }
             result => result?,
         };
+        // Create the owned hit while its new string still has a separate guard.
+        // The slot admission below has to coexist with that allocation even if the
+        // heap itself must grow.
         let (chunk_id, work) = copy.into_parts();
         let hit = VectorHit {
             chunk_id,
             raw_score,
             normalized_score,
         };
+        // The ID still has its own reservation while admitting the heap slot. Only
+        // after the hit enters the heap can both allocations move under the heap's
+        // owner. An insertion failure drops the temporary ID and its credit.
         reserve_heap_slot(&mut self.heap, &mut self.work, self.limit)?;
         self.heap.push(hit);
         self.work.merge(work);
@@ -190,6 +288,9 @@ impl VectorCandidates {
     }
 
     pub(crate) fn finish(self) -> VectorHits {
+        // The sorted vector reuses the heap allocation and takes its reservation.
+        // Score and ID ordering are already defined by VectorHit, so no second
+        // array of owned IDs is required.
         VectorHits {
             hits: self.heap.into_sorted_vec(),
             work: self.work,
@@ -199,8 +300,14 @@ impl VectorCandidates {
 
 #[derive(Clone, Copy, Debug)]
 pub struct VectorSearchOptions {
+    /// Distance or similarity selected by the collection, used both to score a
+    /// vector and to interpret that raw value.
     pub metric: DistanceMetric,
+    /// Collection declaration used to select the normalized-dot-product transform.
+    /// Scoring does not normalize the stored vectors here.
     pub vectors_normalized: bool,
+    /// Maximum number of eligible hits to keep. It bounds the heap and leaves the
+    /// exact scan free to inspect the full collection.
     pub limit: usize,
 }
 
@@ -223,24 +330,45 @@ impl ExactVectorIndex {
         F: FnMut(&crate::catalog::VisibleEmbedding<'_>) -> Result<V>,
         V: AsRef<[f32]>,
     {
+        // The snapshot provides visible embedding identities. The caller supplies
+        // the payload loader so eligibility can be decided before reading a vector
+        // and each loaded buffer can be dropped after scoring.
         let mut hits = VectorCandidates::new(options.limit, context);
+        // Build one scorer before walking embeddings. For cosine it keeps the
+        // query norm across all candidates, so rescoring another row only needs
+        // dot product and its own norm.
         let scorer = VectorScorer::new(query, options.metric);
         let mut work = VectorWork::default();
         for visible in snapshot.live_embeddings() {
             let embedding = visible.embedding;
+            // Reject other collections before incrementing the scan counters. Even
+            // though the catalog iterator can traverse them, returned work reports
+            // only the embeddings checked in the requested collection.
             if embedding.collection_id != collection_id {
                 continue;
             }
+            // Scanning a visible embedding and evaluating its distance are separate
+            // costs. Test the chunk filter before loading its payload so rejected
+            // rows consume neither vector I/O here nor distance operations.
             work.scans += 1;
             context.search_cost_add(crate::search_cost::Counter::VectorChecks, 1);
             if !include(&embedding.chunk_id) {
                 continue;
             }
+            // The accepted row's payload is loaded lazily by the caller. A read
+            // error ends this attempt rather than returning a candidate window
+            // assembled from an arbitrary prefix.
             let loaded = load_vector(&visible)?;
             let vector = loaded.as_ref();
+            // Skip vectors whose dimension differs from the query. The visit still
+            // counts as a scan, but neither a partial distance nor a candidate from
+            // the matching prefix is valid here.
             if vector.len() != query.len() {
                 continue;
             }
+            // Count the work of a distance evaluation in components, regardless of
+            // whether the final list keeps the candidate. The payload length
+            // equals the query length at this point.
             let raw = scorer.score(vector);
             work.distance_ops += vector.len();
             context.search_cost_add(
@@ -248,6 +376,8 @@ impl ExactVectorIndex {
                 vector.len() as u64,
             );
             let normalized = normalize_score(raw, options.metric, options.vectors_normalized);
+            // Candidate insertion can allocate its own ID and heap slot. Release
+            // the loaded vector first so its payload need not fit alongside them.
             drop(loaded);
             hits.push(&embedding.chunk_id, raw, normalized)?;
         }
@@ -257,8 +387,12 @@ impl ExactVectorIndex {
 
 // The query norm is invariant across all vectors in one exact scan.
 pub(crate) struct VectorScorer<'a> {
+    // Borrow the same query components across all candidate comparisons.
     query: &'a [f32],
+    // Collection metric shared by every comparison in this scan or completion pass.
     metric: DistanceMetric,
+    // Length of the query vector in the Euclidean norm, computed once for cosine
+    // scoring. Other metrics leave the field unused at zero.
     cosine_query_norm: f64,
 }
 
@@ -276,6 +410,9 @@ impl<'a> VectorScorer<'a> {
     }
 
     pub(crate) fn score(&self, vector: &[f32]) -> f64 {
+        // The precomputed cosine norm describes the full query. The general helper
+        // uses the common prefix for unequal lengths and therefore must also
+        // compute its norm over that prefix.
         if self.metric == DistanceMetric::Cosine && vector.len() == self.query.len() {
             cosine_with_query_norm(self.query, vector, self.cosine_query_norm)
         } else {
@@ -284,12 +421,18 @@ impl<'a> VectorScorer<'a> {
     }
 }
 
+// The low-level helpers use the common prefix for differently sized slices. Exact
+// recall checks the dimension first so this mathematical helper's permissive input
+// cannot admit a partial score.
 pub fn raw_score(query: &[f32], vector: &[f32], metric: DistanceMetric) -> f64 {
     match metric {
         DistanceMetric::Cosine => cosine(query, vector),
         DistanceMetric::DotProduct => query
             .iter()
             .zip(vector)
+            // Widen both inputs before multiplying. Accumulating in f64 keeps
+            // precision and range that would already be lost if the product were
+            // evaluated in f32.
             .map(|(a, b)| *a as f64 * *b as f64)
             .sum::<f64>(),
         DistanceMetric::Euclidean => query
@@ -304,15 +447,24 @@ pub fn raw_score(query: &[f32], vector: &[f32], metric: DistanceMetric) -> f64 {
     }
 }
 
+// Fusion orders larger normalized scores first. Euclidean raw values are distances,
+// while an unnormalized dot product has no fixed upper bound. Preserve the raw
+// value separately for explanations.
 pub fn normalize_score(raw: f64, metric: DistanceMetric, vectors_normalized: bool) -> f64 {
     match metric {
         DistanceMetric::Cosine => ((raw + 1.0) / 2.0).clamp(0.0, 1.0),
         DistanceMetric::DotProduct if vectors_normalized => ((raw + 1.0) / 2.0).clamp(0.0, 1.0),
         DistanceMetric::DotProduct => raw,
+        // A distance of zero receives the highest Euclidean score. The reciprocal
+        // decreases as distance grows, so the normalized value can share the same
+        // sort direction as cosine.
         DistanceMetric::Euclidean => (1.0 / (1.0 + raw)).clamp(0.0, 1.0),
     }
 }
 
+// Compute cosine using exactly the query components paired by zip. On unequal
+// slices, including unpaired components in the query norm would change the result
+// even though they contribute nothing to the dot product.
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     cosine_with_query_norm(a, b, vector_norm(&a[..a.len().min(b.len())]))
 }
@@ -330,12 +482,18 @@ fn vector_norm(vector: &[f32]) -> f64 {
 fn cosine_with_query_norm(a: &[f32], b: &[f32], query_norm: f64) -> f64 {
     let mut dot = 0.0;
     let mut bn = 0.0;
+    // Accumulate the candidate norm and dot product in one pass. The caller
+    // supplies a norm for the query prefix used here, and the zero-norm check
+    // happens before the division.
     for (x, y) in a.iter().zip(b) {
         let x = *x as f64;
         let y = *y as f64;
         dot += x * y;
         bn += y * y;
     }
+    // Cosine similarity has no direction when either norm is zero. Return a finite
+    // raw zero instead of dividing by zero. The normal cosine-to-unit-interval
+    // mapping subsequently places that value at 0.5.
     if query_norm == 0.0 || bn == 0.0 {
         0.0
     } else {

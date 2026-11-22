@@ -7,16 +7,34 @@ use crate::json::{JsonOperationContext, WorkspaceReservation};
 pub(crate) struct LazyVectorCheckpoint {
     #[cfg(test)]
     pub(crate) text_segments: Vec<TextIndexSegmentPayload>,
+    // Location of both text and vector segments in the validated checkpoint. The
+    // source owns the directory and its memory reservation.
     pub(crate) vectors: IndexSegmentSource,
 }
 
+// The directory is a map into one checkpoint, not a long-lived map of
+// collection IDs to file offsets. An append can put new bytes at the same
+// offset. Use the covered commit and generation when reusing entries or
+// statistics; a collection name surviving the write proves nothing about
+// the bytes at its old extent.
 #[derive(Debug)]
 pub(crate) struct IndexSegmentSource {
+    // Absolute file position where the checkpoint header begins, immediately after
+    // the covered critical log.
     offset: u64,
+    // Length of the framed records in the checkpoint payload, excluding the outer
+    // header, directory and trailer. Bounds each extent lookup.
     payload_len: usize,
+    // Generation stamped on the checkpoint extents. The source also binds locally
+    // retained text statistics to this value.
     generation: u64,
+    // Visible commit sequence that each decoded segment must cover.
     commit_sequence_no: u64,
+    // Only segment rows, ordered by (record type, numeric collection ID) for
+    // query-time binary search.
     extents: IndexDirectory,
+    // Optional statistics accompanied by the checkpoint generation at which they
+    // were installed. A disk directory need not come with these statistics.
     text_stats: Option<(u64, TextStatsSummary)>,
 }
 
@@ -28,11 +46,18 @@ impl IndexSegmentSource {
         commit_sequence_no: u64,
         mut extents: IndexDirectory,
     ) -> Result<Self> {
+        // The persisted table is ordered by record ID for verification. Once
+        // verified, keep just the segment rows and order them by the key used by
+        // queries. Adjacent duplicate keys would leave lookup unable to choose
+        // between two representations of one collection.
         extents
             .retain(|entry| matches!(entry.record_type, INDEX_TEXT_SEGMENT | INDEX_VECTOR_SEGMENT));
         extents
             .as_mut_slice()
             .sort_unstable_by_key(|entry| (entry.record_type, entry.stream_id));
+        // A collection may have both a text and a vector record with the same
+        // stream ID. Reject only a repeated pair of record type and stream ID,
+        // which would make selecting that kind of extent ambiguous.
         if extents.as_slice().windows(2).any(|pair| {
             (pair[0].record_type, pair[0].stream_id) == (pair[1].record_type, pair[1].stream_id)
         }) {
@@ -47,11 +72,17 @@ impl IndexSegmentSource {
             generation,
             commit_sequence_no,
             extents,
+            // A parsed directory identifies where to read records. It does not by
+            // itself supply collection term counts; the database attaches those
+            // after a writer or validated text visit produces them.
             text_stats: None,
         })
     }
 
     pub(crate) fn with_text_stats(mut self, stats: TextStatsSummary) -> Self {
+        // Preserve the generation alongside the summary at installation. A later
+        // stats request compares the saved stamp with this directory as well as
+        // checking the caller's primary boundary and commit position.
         self.text_stats = Some((self.generation, stats));
         self
     }
@@ -61,6 +92,9 @@ impl IndexSegmentSource {
         critical_end_offset: u64,
         commit_sequence_no: u64,
     ) -> Option<&TextStatsSummary> {
+        // The database supplies its current critical end and commit. Statistics
+        // from a previous write can have a valid-looking collection number, so
+        // check all three pieces of snapshot identity before returning them.
         let (generation, stats) = self.text_stats.as_ref()?;
         (self.offset == critical_end_offset
             && self.generation == *generation
@@ -70,6 +104,9 @@ impl IndexSegmentSource {
 
     fn extent(&self, kind: u16, collection: u64) -> Option<&IndexExtentEntry> {
         let entries = self.extents.as_slice();
+        // Search with the same composite key used at construction. A directory
+        // miss means this source has no segment of the requested kind for the
+        // collection; an equal stream ID under the other kind is irrelevant.
         entries
             .binary_search_by_key(&(kind, collection), |entry| {
                 (entry.record_type, entry.stream_id)
@@ -131,12 +168,21 @@ impl IndexSegmentSource {
         Ok(source)
     }
 
+    // The size used to plan a vector read is the length of its framed record. The
+    // text-side estimate below sums only text records across collections and
+    // returns None if that sum overflows.
     pub(crate) fn encoded_len(&self, collection_id: &str) -> Option<u64> {
+        // Convert the textual identity to its numeric wire key for this lookup. An
+        // unparseable value supplies no length estimate and does not justify a
+        // speculative read from another extent.
         self.extent(INDEX_VECTOR_SEGMENT, catalog_id_number(collection_id).ok()?)
             .map(|extent| extent.length)
     }
 
     pub(crate) fn text_encoded_len(&self) -> Option<u64> {
+        // Text prewarming can cover several collections. Sum their frame lengths
+        // with overflow detection so a wrapped estimate cannot admit a cache under
+        // an artificially small byte budget.
         self.extents
             .as_slice()
             .iter()
@@ -171,6 +217,9 @@ impl IndexSegmentSource {
         reservation: crate::json::CacheReservation,
         context: &JsonOperationContext,
     ) -> Result<Option<CachedVectorSegment>> {
+        // Use the open storage descriptor as the source of the bytes. Resolving
+        // its pathname again could obtain a different file after a rewrite, even
+        // if this directory still describes the original inode.
         let mut file = storage.file.try_clone()?;
         self.read_cached_from(&mut file, collection_id, reservation, context)
     }
@@ -182,6 +231,9 @@ impl IndexSegmentSource {
         reservation: crate::json::CacheReservation,
         context: &JsonOperationContext,
     ) -> Result<Option<CachedVectorSegment>> {
+        // The cache reservation is for the retained segment. Read-ahead has a
+        // separate, temporary charge that ends after decoding. On an unusable
+        // extent the cache reservation drops without a cache entry.
         let input = self.reserve_read_buffer(collection_id, context)?;
         let segment = self.read_with_capacity(
             reader,
@@ -190,6 +242,9 @@ impl IndexSegmentSource {
             input.reserved_bytes(),
             Some(context),
         )?;
+        // Retain-mode decoding supplies an owned payload on success. Transfer the
+        // cache reservation together with that payload only after the complete
+        // record has validated.
         Ok(segment.map(|segment| CachedVectorSegment::new(segment.payload.unwrap(), reservation)))
     }
 
@@ -199,6 +254,9 @@ impl IndexSegmentSource {
         context: &JsonOperationContext,
     ) -> Result<WorkspaceReservation> {
         let mut input = context.workspace_reservation();
+        // Choose a preferred input buffer from the encoded record length. Zero is a
+        // valid admission, allowing the same read to proceed unbuffered under
+        // memory pressure.
         let preferred = self.encoded_len(collection_id).unwrap_or(0).min(64 * 1024) as usize;
         input.grow_to(0, preferred, "operation_scratch")?;
         Ok(input)
@@ -212,6 +270,9 @@ impl IndexSegmentSource {
         input: &WorkspaceReservation,
         visit: impl FnMut(&str, &[f32]) -> Result<()>,
     ) -> Result<bool> {
+        // Visiting uses the open physical file that supplied the catalog view. A
+        // reader can stream coordinate rows to scoring without first admitting a
+        // complete resident vector segment.
         let mut file = storage.file.try_clone()?;
         self.visit_from(&mut file, collection, input, visit)
     }
@@ -223,6 +284,9 @@ impl IndexSegmentSource {
         input: &WorkspaceReservation,
         mut visit: impl FnMut(&str, &[f32]) -> Result<()>,
     ) -> Result<bool> {
+        // The decoder and the downstream visitor have different failure channels.
+        // Save the callback's error separately while validation decides whether
+        // the extent can be trusted at all.
         let mut error = None;
         let segment = self.read_with_mode(
             reader,
@@ -232,11 +296,18 @@ impl IndexSegmentSource {
                 input,
                 error: &mut error,
                 visit: &mut |chunk, _, values| {
+                    // Reconstruct the externally formatted internal chunk ID from
+                    // the numeric row key in stack storage. The visitor borrows
+                    // this spelling and the decoded coordinates only for the
+                    // duration of this row.
                     let mut id = [0; 24];
                     visit(catalog_id_text(&mut id, b"chk_", chunk), values)
                 },
             },
         )?;
+        // Return false for an unusable frame. The caller must discard any rows
+        // already delivered to its visitor. Once the frame validates, propagate the
+        // visitor's saved error.
         if segment.is_none() {
             return Ok(false);
         }
@@ -252,10 +323,16 @@ impl IndexSegmentSource {
         collection_id: &str,
         mode: VectorDecodeMode<'_>,
     ) -> Result<Option<ParsedVectorIndexSegment>> {
+        // A visiting caller can reduce its retained input buffer all the way to
+        // zero under pressure. Use that actual grant as the read capacity so a
+        // later retry does not silently restore the discarded buffer.
         let capacity = match &mode {
             VectorDecodeMode::Visit { input, .. } => input.reserved_bytes(),
             _ => 64 * 1024,
         };
+        // Charge visitor reads to the operation that owns the buffer. The decoder
+        // variants without an input guard do not provide a search context for the
+        // index I/O counters on this path.
         let context = match &mode {
             VectorDecodeMode::Visit { input, .. } => Some(input.context()),
             _ => None,
@@ -271,6 +348,9 @@ impl IndexSegmentSource {
         capacity: usize,
         context: Option<&JsonOperationContext>,
     ) -> Result<Option<ParsedVectorIndexSegment>> {
+        // Let the extent reader locate and verify the outer frame. The vector
+        // decoder receives only the permitted body bytes and checks the embedded
+        // segment against the checkpoint's covered commit.
         self.read_extent(
             reader,
             INDEX_VECTOR_SEGMENT,
@@ -284,6 +364,9 @@ impl IndexSegmentSource {
                     self.offset,
                     mode,
                 )?;
+                // Return the decoded collection number along with the segment. The
+                // extent layer compares it with the directory key so a valid frame
+                // belonging to another collection cannot satisfy this read.
                 Ok((segment.collection_number, segment))
             },
         )
@@ -298,6 +381,8 @@ impl IndexSegmentSource {
         input: &WorkspaceReservation,
         visit: impl FnMut(TextSegmentEntry<'_>) -> Result<()>,
     ) -> Result<bool> {
+        // Read from the file already owned by Storage. The cloned descriptor
+        // refers to that file even if its pathname has subsequently been replaced.
         let mut file = storage.file.try_clone()?;
         self.visit_text_from(&mut file, collection_id, input, visit)
     }
@@ -327,10 +412,16 @@ impl IndexSegmentSource {
         staging: &mut TextStaging,
         context: &JsonOperationContext,
     ) -> Result<Option<TextExtent>> {
+        // A collection without an extent can be rebuilt from its catalog data.
+        // Check for it before reserving input or output buffers or starting an
+        // append to the staging file.
         let number = catalog_id_number(collection_id)?;
         if self.extent(INDEX_TEXT_SEGMENT, number).is_none() {
             return Ok(None);
         }
+        // Keep input buffering and staging output buffering under separate grants.
+        // A low-memory retry can surrender either or both while leaving the
+        // staging owner and the previously accepted extents intact.
         let mut input = context.workspace_reservation();
         let mut output = context.workspace_reservation();
         let mut buffered = true;
@@ -340,7 +431,14 @@ impl IndexSegmentSource {
                 input.grow_to(0, 64 * 1024, "operation_scratch")?;
                 output.grow_to(0, 64 * 1024, "operation_scratch")?;
             }
+            // Each attempt seeks through the saved extent directory on the open
+            // storage file. Reopening by pathname here could pair the old
+            // directory offsets with an unrelated file.
             let mut file = storage.file.try_clone()?;
+            // The decoder copies a candidate body to staging as it reads.
+            // read_extent still has to check the outer record and embedded
+            // collection. Only an accepted result may advance staging's committed
+            // end.
             let staged = self.read_extent(
                 &mut file,
                 INDEX_TEXT_SEGMENT,
@@ -348,6 +446,9 @@ impl IndexSegmentSource {
                 input.reserved_bytes(),
                 Some(context),
                 |source, remaining| {
+                    // Pass the source checkpoint's covered sequence into staging.
+                    // The copied text body must agree with its source view before
+                    // it can be reused and retagged for a newer checkpoint.
                     let body = staging.copy_body_from(
                         source,
                         remaining,
@@ -355,24 +456,46 @@ impl IndexSegmentSource {
                         context,
                         output.reserved_bytes(),
                     )?;
+                    // The copied body is still tentative when its collection
+                    // number is returned. Matching the directory's entry and
+                    // passing the outer checksum checks are prerequisites for
+                    // retaining this span in the staging file.
                     Ok((body.collection_number(), body))
                 },
             );
+            // Unlike visitor callbacks, this tentative file append has an explicit
+            // rollback. A memory refusal can be retried after restoring staging's
+            // previous end and releasing both optional buffers. Other unsuccessful
+            // reads also roll back before returning.
             match staged {
                 Err(error)
                     if crate::json::is_memory_budget_error(&error)
                         && input.reserved_bytes() + output.reserved_bytes() > 0 =>
                 {
+                    // Restore staging's last accepted length before attempting a
+                    // second read. If rollback fails, return that failure because
+                    // the shared file is no longer a valid basis for appending
+                    // another candidate.
                     staging.rollback()?;
                     input.retain(0);
                     output.retain(0);
+                    // Disable optional buffers for the rest of this operation. A
+                    // second resource failure with nothing left to release
+                    // propagates through the rollback-and-return branch.
                     buffered = false;
                 }
                 Ok(Some(body)) => {
+                    // Advance the committed end of the temporary file only for an
+                    // accepted extent. Return its descriptor after that step so
+                    // later writers can safely append another collection after
+                    // these bytes.
                     staging.finish_copy(&body)?;
                     return Ok(Some(body));
                 }
                 result => {
+                    // Roll back on a missing or invalid extent as well as on a
+                    // hard read error. A decoder can have copied a prefix before
+                    // the outer checks decide that the candidate cannot be used.
                     staging.rollback()?;
                     return result;
                 }
@@ -387,6 +510,9 @@ impl IndexSegmentSource {
         input: &WorkspaceReservation,
         mut visit: impl FnMut(TextSegmentEntry<'_>) -> Result<()>,
     ) -> Result<bool> {
+        // Preserve the first consumer error independently of the decoder result.
+        // The decoder can stop delivering events while still consuming the
+        // remaining bytes needed to assess the segment.
         let mut error = None;
         let segment = self.read_extent(
             reader,
@@ -402,6 +528,10 @@ impl IndexSegmentSource {
                     TextDecodeMode::Visit {
                         error: &mut error,
                         visit: &mut |entry| {
+                            // Count visits when a chunk or posting event is
+                            // delivered, before the consumer decides whether to
+                            // accept it. Header and term events contribute neither
+                            // counter.
                             match entry {
                                 TextSegmentEntry::Chunk { .. } => input.context().search_cost_add(
                                     crate::search_cost::Counter::TextDocumentVisits,
@@ -423,21 +553,37 @@ impl IndexSegmentSource {
                 Ok((segment.collection_number, segment))
             },
         );
+        // If decoder scratch is refused after a callback has failed, return the
+        // recorded callback error. A corrupt or truncated frame instead gives the
+        // caller a chance to search committed data.
         let segment = match segment {
             Err(failure) if crate::json::is_memory_budget_error(&failure) => {
+                // A late budget failure can prevent validation from reaching the
+                // end. Prefer an already recorded consumer failure in that case,
+                // otherwise expose the resource refusal that stopped decoding.
                 return Err(error.unwrap_or(failure));
             }
             result => result?,
         };
+        // A missing, damaged, or truncated extent invalidates the provisional
+        // events. Report false so callers can discard those results and choose
+        // another index source before interpreting a consumer error.
         if segment.is_none() {
             return Ok(false);
         }
+        // Reaching this branch establishes that the entire segment was accepted. A
+        // previously recorded consumer failure now ends the call even if all
+        // remaining bytes and checksums were valid.
         match error {
             Some(error) => Err(error),
             None => Ok(true),
         }
     }
 
+    // Run the caller's decoder at most once on the selected extent. This matters
+    // for a visitor that has already delivered rows or a copy that has written
+    // temporary bytes. A successful return requires both those decoded fields and
+    // the original frame checks.
     fn read_extent<R: Read + Seek, T>(
         &self,
         reader: &mut R,
@@ -447,6 +593,9 @@ impl IndexSegmentSource {
         context: Option<&JsonOperationContext>,
         decode: impl FnOnce(&mut dyn Read, usize) -> std::result::Result<(u64, T), IndexReadError>,
     ) -> Result<Option<T>> {
+        // The directory is keyed by the numeric collection ID and record kind. A
+        // miss can mean the snapshot has no segment of this kind for the
+        // collection. Return before seeking or recording a read request.
         let collection_number = catalog_id_number(collection_id)?;
         let Some(extent) = self.extent(kind, collection_number) else {
             return Ok(None);
@@ -457,26 +606,51 @@ impl IndexSegmentSource {
         };
         let reader = &mut counted;
         let loaded = (|| {
+            // Resolve the stored relative offset against the checkpoint's own
+            // origin and generation. An extent must fit within the segment range
+            // before the reader may seek to it. The directory entry alone cannot
+            // authorize an arbitrary file offset.
             let (offset, length) =
                 index_extent_range(self.payload_len, extent, self.generation, self.offset)?;
+            // Charge requested bytes once from the checked extent size. The wrapped
+            // reader separately counts actual I/O, which can be smaller when the
+            // frame fails early.
             if let Some(context) = context {
                 context.search_cost_add(
                     crate::search_cost::Counter::IndexRequestedBytes,
                     length as u64,
                 );
             }
+            // An extent remembered at open time is a locator into a rebuildable
+            // suffix. Validate the frame at that offset again before exposing the
+            // decoded result: the file can still exist after its index bytes have
+            // been replaced.
             reader.seek(SeekFrom::Start(offset))?;
             let mut header = [0; INDEX_RECORD_HEADER_LEN];
             reader.read_exact(&mut header)?;
+            // Check the header against the locator before using its claimed
+            // payload length. A different valid record at the same offset cannot
+            // stand in for the requested extent.
             let mut record =
                 parse_index_record_header(&header, extent, self.generation, offset, length)?;
+            // The inner segment CRC occupies the last four bytes. Reject a payload
+            // that cannot hold it before subtracting the footer from the decoder's
+            // allowance.
             if record.payload.len < 4 {
                 validate_record_segment_checksum(&record, self.offset)?;
             }
             let mut checked = SegmentChecksumReader::new(reader, &header, record.payload.len);
             let decoded = {
+                // Use the caller's buffer capacity, including zero when optional
+                // read-ahead was relinquished. Decoding and draining share this
+                // one reader so prefetched bytes cannot disappear from the
+                // integrity check.
                 let mut source = BufReader::with_capacity(capacity, &mut checked);
                 let decoded = decode(&mut source, record.payload.len as usize - 4);
+                // An actual I/O error from the decoder makes further reads in this
+                // attempt unreliable. A semantic or memory failure can still be
+                // compared with the outcome of the frame checks below after the
+                // remaining bytes have been read.
                 if matches!(&decoded, Err(IndexReadError::Io(_))) {
                     return decoded.map(|(_, value)| value);
                 }
@@ -484,9 +658,15 @@ impl IndexSegmentSource {
                 std::io::copy(&mut source, &mut std::io::sink())?;
                 decoded
             };
+            // Copying to a sink stops normally at EOF, including an EOF short of
+            // the promised extent. Compare byte counts explicitly before
+            // interpreting any digest or releasing a decoded result.
             if checked.bytes_read != record.payload.len {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
+            // Check the immutable directory's whole-record CRC first, then the
+            // header's payload CRC, then the segment's own footer. Each covers a
+            // different range of the same bytes read during this call.
             if checked.record_checksum() != extent.extent_record_checksum {
                 return Err(index_extent_diagnostic(
                     "index_extent_record_checksum_mismatch",
@@ -513,8 +693,15 @@ impl IndexSegmentSource {
                 )
                 .into());
             }
+            // Compare the segment footer with the digest captured at the segment
+            // body boundary. The enclosing payload and whole-record checks can
+            // both agree even if a stale inner checksum was written into the
+            // footer.
             record.segment_checksum_valid = read_u32(&checked.tail) == checked.segment_checksum;
             validate_record_segment_checksum(&record, self.offset)?;
+            // A valid CRC only establishes that these bytes match their recorded
+            // values. Check the collection encoded in the segment against the
+            // directory key as the last condition for returning it.
             let (decoded_collection, segment) = decoded?;
             if decoded_collection != collection_number {
                 return Err(IndexReadError::Invalid(index_suffix_diagnostic(
@@ -529,7 +716,15 @@ impl IndexSegmentSource {
             }
             Ok(segment)
         })();
+        // An unusable or truncated extent gives the caller a chance to search
+        // committed data. Other read failures and operation budget failures must
+        // propagate; silently falling back would lose the reason this read could not
+        // finish.
         match loaded {
+            // Some is the only outcome that transfers a usable decoded result. A
+            // callback can have already produced rows by the time the final
+            // checksum fails, so its caller must discard any effects collected for
+            // this attempt when it receives None.
             Ok(segment) => Ok(Some(segment)),
             Err(IndexReadError::Invalid(_)) => Ok(None),
             // A concurrent writer may truncate or replace this advisory suffix.
@@ -551,17 +746,34 @@ impl Clone for IndexSegmentSource {
 }
 
 struct SegmentChecksumReader<R> {
+    // Underlying stream capped at the record's payload length so draining it stops
+    // before the next header.
     source: std::io::Take<R>,
+    // CRC of the previously read record header, saved for combination with the full
+    // payload CRC.
     header_checksum: Crc32c,
+    // Running CRC of all payload bytes delivered, including the segment footer when
+    // reached.
     payload_checksum: Crc32c,
+    // Snapshot of the running CRC at the end of the segment body, before the footer
+    // is included.
     segment_checksum: u32,
+    // Four footer bytes collected in order even when the underlying read splits
+    // them.
     tail: [u8; 4],
+    // Payload bytes preceding the stored segment CRC. Separates the body from its
+    // footer in every read.
     body_len: u64,
+    // Payload bytes consumed so far, used to find the footer boundary and detect a
+    // short physical read.
     bytes_read: u64,
 }
 
 impl<R: Read> SegmentChecksumReader<R> {
     fn new(source: R, header: &[u8; INDEX_RECORD_HEADER_LEN], payload_len: u64) -> Self {
+        // Seed the record checksum with the complete outer header. The payload
+        // still starts at zero bytes read, so the two checks are independent until
+        // record_checksum combines them using the exact delivered payload length.
         let mut header_checksum = Crc32c::default();
         header_checksum.update(header);
         Self {
@@ -575,6 +787,9 @@ impl<R: Read> SegmentChecksumReader<R> {
         }
     }
 
+    // Append the payload CRC with its byte length to the header CRC. CRC
+    // concatenation gives the checksum of the complete record without rereading
+    // either part.
     fn record_checksum(&self) -> u32 {
         let mut checksum = self.header_checksum;
         checksum.append_crc(self.payload_checksum.finish(), self.bytes_read);
@@ -585,6 +800,10 @@ impl<R: Read> SegmentChecksumReader<R> {
 impl<R: Read> Read for SegmentChecksumReader<R> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         let count = self.source.read(output)?;
+        // One read may straddle the body/CRC boundary, or may contain only part of
+        // the CRC. Hash the body portion first, capture its final CRC exactly at
+        // the boundary, then collect the remaining bytes as both footer and payload
+        // data.
         let body_count = self
             .body_len
             .saturating_sub(self.bytes_read)
@@ -594,6 +813,10 @@ impl<R: Read> Read for SegmentChecksumReader<R> {
         {
             self.segment_checksum = self.payload_checksum.finish();
         }
+        // The footer's destination index is the number of footer bytes already
+        // accepted. Subtracting the body length with saturation gives zero on the
+        // first crossing, and the limited source keeps every later index within
+        // the four-byte footer.
         if body_count < count {
             let start = self.bytes_read.saturating_sub(self.body_len) as usize;
             self.tail[start..start + count - body_count]

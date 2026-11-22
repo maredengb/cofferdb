@@ -1,3 +1,6 @@
+//! Drive the SQLite benchmark child through pipes. Statement generation, result
+//! decoding and process exit can fail independently, so each operation must close
+//! its handles and reap the child on every exit path.
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -6,14 +9,22 @@ use std::sync::{Arc, Mutex};
 use crate::{Error, ErrorCode, Result};
 
 struct ChildGuard {
+    // Child shared with I/O workers for cancellation. The owner kills and waits on
+    // drop so an early error cannot leave the process running.
     child: Arc<Mutex<Child>>,
 }
 
+// Own the buffered stdin until the SQL producer has explicitly flushed it or
+// abandoned it. A normal BufWriter drop would try to write pending bytes, which
+// could send part of a failed request.
 struct InputGuard(Option<BufWriter<ChildStdin>>);
 
 impl Drop for InputGuard {
     fn drop(&mut self) {
         if let Some(output) = self.0.take() {
+            // Discard any buffered suffix without a second write attempt. Closing
+            // the underlying pipe also lets a child waiting for the end of input
+            // stop reading.
             let (stdin, _) = output.into_parts();
             drop(stdin);
         }
@@ -22,12 +33,21 @@ impl Drop for InputGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        // A poisoned mutex does not release ownership of the child. Recover the
+        // handle so cleanup still signals and reaps the process after an I/O
+        // worker unwinds.
         let mut child = self.child.lock().unwrap_or_else(|error| error.into_inner());
         let _ = child.kill();
+        // Wait even if the kill request failed; the child may already have exited.
+        // Drop is best-effort because there is no place to propagate a second
+        // error during unwinding.
         let _ = child.wait();
     }
 }
 
+// Arm this guard inside the SQL writer. A failed or unwinding writer kills the
+// child so a reader blocked on the other pipe can wake; the owning ChildGuard
+// remains responsible for waiting.
 struct KillOnFailure(Option<Arc<Mutex<Child>>>);
 
 impl Drop for KillOnFailure {
@@ -45,6 +65,9 @@ pub(super) fn execute(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<ChildStdin>) -> Result<()>,
 ) -> Result<()> {
+    // Install the configured extension in the same SQLite session that will
+    // execute the generated SQL. Loading it in a separate invocation would not
+    // configure this connection.
     execute_command(&mut super::sqlite3_command(path), |output| {
         load_extension(output)?;
         write(output)
@@ -55,11 +78,22 @@ fn execute_command(
     command: &mut Command,
     write: impl FnOnce(&mut BufWriter<ChildStdin>) -> Result<()>,
 ) -> Result<()> {
+    // A write-only request has no stdout consumer. Send output to the null device
+    // so verbose SQL cannot block the child on an unread pipe.
     let (child, mut input, _) = spawn(command, false)?;
     let output = input.0.as_mut().expect("stdin was installed at spawn");
+    // Flush only after the producer succeeds. Whichever step fails supplies the
+    // error to the caller, and the guard discards any unflushed suffix when stdin
+    // is closed.
     let written = write(output).and_then(|()| output.flush().map_err(Error::from));
+    // Close stdin before waiting for exit, even when the SQL producer failed.
+    // SQLite reads statements until EOF and can otherwise wait indefinitely for
+    // another statement.
     drop(input);
     written?;
+    // Successful writes only prove that the pipe accepted the bytes. Inspect the
+    // child exit status as well, since SQLite can reject one of those statements
+    // after it has been sent.
     wait(&child)
 }
 
@@ -67,6 +101,9 @@ fn spawn(
     command: &mut Command,
     capture: bool,
 ) -> Result<(ChildGuard, InputGuard, Option<ChildStdout>)> {
+    // Install the child cleanup guard immediately after spawn. If extracting a
+    // required pipe fails, leaving this function still owns and reaps the newly
+    // started process.
     let child = ChildGuard {
         child: Arc::new(Mutex::new(
             command
@@ -76,6 +113,9 @@ fn spawn(
                 } else {
                     Stdio::null()
                 })
+                // Suppress child stderr for these baseline subprocesses.
+                // Result-producing calls use stdout for framed data and use exit
+                // status, rather than diagnostic text, to report command failure.
                 .stderr(Stdio::null())
                 .spawn()?,
         )),
@@ -84,6 +124,9 @@ fn spawn(
         .child
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    // Move the pipe endpoints out of Child so the producer and consumer can use
+    // them independently. The shared process handle then only needs locking for
+    // wait or cancellation.
     let stdin = process.stdin.take().ok_or_else(|| {
         Error::new(
             ErrorCode::IoError,
@@ -91,6 +134,9 @@ fn spawn(
         )
     })?;
     let stdout = process.stdout.take();
+    // Release the process mutex before performing any I/O. A writer or reader can
+    // block on a pipe, and the peer must remain able to acquire the process handle
+    // to cancel the command.
     drop(process);
     Ok((
         child,
@@ -99,6 +145,7 @@ fn spawn(
     ))
 }
 
+// Report a nonzero exit separately from failure of the wait system call.
 fn wait(child: &ChildGuard) -> Result<()> {
     if !child
         .child
@@ -107,6 +154,9 @@ fn wait(child: &ChildGuard) -> Result<()> {
         .wait()?
         .success()
     {
+        // Use a stable subprocess error for a nonzero exit. The child's stderr is
+        // not captured, so the marker must remain usable without a
+        // platform-specific diagnostic string.
         return Err(Error::new(
             ErrorCode::IoError,
             "sqlite3 benchmark baseline command failed",
@@ -116,6 +166,9 @@ fn wait(child: &ChildGuard) -> Result<()> {
     Ok(())
 }
 
+// Feed a query script and consume its results in the same SQLite process. The two
+// callbacks may return independent values, such as the number of scored rows and
+// the prepared candidates.
 pub(super) fn query<T: Send, U>(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<ChildStdin>) -> Result<T> + Send,
@@ -124,6 +177,9 @@ pub(super) fn query<T: Send, U>(
     query_command(
         &mut super::sqlite3_command(path),
         |output| {
+            // Load the optional vector extension on the same connection before
+            // writing the query. A successful load in an earlier CLI process does
+            // not register functions in this one.
             load_extension(output)?;
             write(output)
         },
@@ -136,30 +192,56 @@ fn query_command<T: Send, U>(
     write: impl FnOnce(&mut BufWriter<ChildStdin>) -> Result<T> + Send,
     read: impl FnOnce(&mut ChildStdout) -> Result<U>,
 ) -> Result<(T, U)> {
+    // Request a captured stdout for queries. The execute-only path discards it
+    // instead; taking this pipe gives the reader sole ownership without keeping
+    // the process mutex locked.
     let (child, mut input, stdout) = spawn(command, true)?;
     let mut stdout =
         stdout.ok_or_else(|| Error::new(ErrorCode::IoError, "failed to open sqlite3 stdout"))?;
+    // Feed SQL and drain rows concurrently: either pipe can fill while SQLite
+    // is waiting for the other side to make progress.
     std::thread::scope(move |scope| {
         // This guard must drop inside the scope, before a panicking reader joins the writer.
         let child = child;
+        // Share only the child handle with the writer's cancellation guard. The
+        // writer owns stdin and the caller reads stdout, so neither stream holds
+        // the child mutex during I/O.
         let process = Arc::clone(&child.child);
         let writer = std::thread::Builder::new()
             .name("sqlite-input".into())
             .spawn_scoped(scope, move || {
+                // Arm cancellation before running caller code in the worker. A
+                // failure or panic must stop SQLite even if the reader is still
+                // waiting on output that will never arrive.
                 let mut failure = KillOnFailure(Some(process));
                 let output = input.0.as_mut().expect("stdin was installed at spawn");
+                // Flush before declaring the SQL producer successful. Acceptance
+                // by the buffer alone is insufficient for SQLite to receive the
+                // tail of a statement.
                 let result = write(output).and_then(|value| {
                     output.flush()?;
                     Ok(value)
                 });
+                // Closing stdin tells SQLite no more statements are coming. On an
+                // error InputGuard discards unflushed bytes instead of retrying a
+                // partially written script from Drop.
                 drop(input);
+                // Disarm the worker's kill guard only after the write and flush
+                // both succeeded. The parent still waits for the final process
+                // status.
                 if result.is_ok() {
                     failure.0 = None;
                 }
                 result
             })?;
+        // Drain stdout on the calling thread while the scoped writer feeds SQL. A
+        // streaming reader can visit each score without collecting the entire
+        // query result.
         let result = read(&mut stdout);
         drop(stdout);
+        // Stop the process if the reader fails. Otherwise a writer blocked on the
+        // child's stdin could prevent the join from completing after the reader
+        // has abandoned stdout.
         if result.is_err() {
             let _ = child
                 .child
@@ -167,10 +249,16 @@ fn query_command<T: Send, U>(
                 .unwrap_or_else(|error| error.into_inner())
                 .kill();
         }
+        // Join before propagating either callback's ordinary error. A writer panic
+        // must unwind as a panic, while the in-scope child guard still owns
+        // cleanup.
         let written = match writer.join() {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
         };
+        // For ordinary errors, prefer the reader's diagnosis over a writer error
+        // caused by cancellation. Check SQLite's exit status only after both
+        // callbacks have succeeded.
         let result = result?;
         let written = written?;
         wait(&child)?;
@@ -178,23 +266,34 @@ fn query_command<T: Send, U>(
     })
 }
 
+// Use this collecting path for small CLI probe responses such as version strings.
+// Row-producing score queries use a streaming visitor with their benchmark
+// context.
 pub(super) fn script(path: &Path, sql: &str) -> Result<String> {
     query(
         path,
         |output| Ok(output.write_all(sql.as_bytes())?),
         |input| {
+            // The probe owns a standalone operation context for the response
+            // buffer. Reserving under that context bounds accumulation while it
+            // reads an output of unknown length.
             let context = crate::json::JsonOperationContext::standalone();
             let mut work = context.reservation();
             let mut bytes = Vec::new();
             let mut buffer = [0; 8192];
             loop {
                 let count = match input.read(&mut buffer) {
+                    // Interrupted reads have not established EOF and can be
+                    // retried. Any other read error belongs to this attempt and
+                    // triggers the child-cancellation path above.
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     result => result?,
                 };
                 if count == 0 {
                     break;
                 }
+                // Reserve room for the newly read bytes before appending them.
+                // Reuse the fixed read buffer for the next chunk.
                 work.reserve_vec(
                     &mut bytes,
                     count,
@@ -202,6 +301,8 @@ pub(super) fn script(path: &Path, sql: &str) -> Result<String> {
                 )?;
                 bytes.extend_from_slice(&buffer[..count]);
             }
+            // Check UTF-8 after collecting the entire byte stream. A multibyte
+            // character can span two reads.
             String::from_utf8(bytes).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -211,27 +312,41 @@ pub(super) fn script(path: &Path, sql: &str) -> Result<String> {
             })
         },
     )
+    // Return the collected output only after query_command has confirmed that
+    // writing succeeded and SQLite exited successfully. The script writer's result
+    // carries no separate user data.
     .map(|(_, output)| output)
 }
 
+// Visit SQLite score rows directly from the child's output stream. Decode one JSON
+// object at a time under the benchmark operation context.
 pub(super) fn visit_scores(
     input: impl Read,
     context: &crate::json::JsonOperationContext,
     mut visit: impl FnMut(String, f64) -> Result<()>,
 ) -> Result<()> {
     use crate::json::{JsonLines, JsonSchema, JsonValue};
+    // Use the general benchmark JSONL schema for result rows. Reader and parsing
+    // limits apply while the result stream remains unmaterialized.
     for row in JsonLines::new(input, JsonSchema::BenchmarkRecord, context, u64::MAX)? {
         let (line, mut row) = row?;
+        // Use the physical output line for structural failures. The same
+        // diagnostic covers a missing identifier, a nonobject row and an unusable
+        // score.
         let invalid = || {
             Error::new(ErrorCode::InvalidJsonlSchema, "invalid sqlite3 result row")
                 .with_detail("line", line)
         };
+        // Read the score before moving the row's ID out. Ranking accepts only
+        // finite numbers, regardless of which SQLite route produced the row.
         let score = row
             .value
             .get("score")
             .and_then(JsonValue::as_f64)
             .filter(|score| score.is_finite())
             .ok_or_else(invalid)?;
+        // Remove the owned identifier from the parse tree so the visitor can
+        // receive it without allocating a duplicate copy.
         let mut id = row
             .value
             .as_object_mut()
@@ -240,11 +355,16 @@ pub(super) fn visit_scores(
         let JsonValue::String(id) = &mut id else {
             return Err(invalid());
         };
+        // Invoke the consumer while the parsed row's reservation is still in
+        // scope. A visitor that keeps the identifier must account for the
+        // allocation in its retained state.
         visit(std::mem::take(id), score)?;
     }
     Ok(())
 }
 
+// Load sqlite-vec only when an explicit extension path is supplied. Otherwise
+// capability probes use what the configured executable already exposes.
 pub(super) fn load_extension(output: &mut impl Write) -> Result<()> {
     if let Some(extension) = std::env::var_os("COFFERDB_SQLITE_VEC_EXTENSION") {
         write_load_extension(output, &extension)?;
@@ -252,6 +372,8 @@ pub(super) fn load_extension(output: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+// Pass the extension path as a SQL string to load_extension. Validate the native
+// setting before encoding so the generated statement has a valid textual path.
 fn write_load_extension(output: &mut impl Write, extension: &std::ffi::OsStr) -> Result<()> {
     let extension = extension
         .to_str()
@@ -262,15 +384,25 @@ fn write_load_extension(output: &mut impl Write, extension: &std::ffi::OsStr) ->
                 "sqlite-vec extension path must be UTF-8 without NUL bytes",
             )
         })?;
+    // Use the same SQL string writer as for ordinary input data. The extension
+    // path remains one argument even when it contains a quote.
     output.write_all(b"SELECT load_extension(")?;
     write_string(output, extension)?;
     output.write_all(b");\n")?;
     Ok(())
 }
 
+// Write one SQLite text expression incrementally. Callers can stream long
+// identifiers and content without constructing another full-size escaped String.
 pub(super) fn write_string(output: &mut impl Write, value: &str) -> std::io::Result<()> {
+    // Represent strings containing NUL as hexadecimal bytes cast back to text.
+    // This preserves the original UTF-8 bytes without placing an embedded NUL in
+    // the SQL source.
     if value.contains('\0') {
         output.write_all(b"CAST(X'")?;
+        // Use a fixed byte buffer for hexadecimal encoding. Each input byte
+        // becomes two output bytes, so an iteration consumes at most half the
+        // buffer's size.
         let mut buffer = [0; 4096];
         const HEX: &[u8; 16] = b"0123456789abcdef";
         for chunk in value.as_bytes().chunks(buffer.len() / 2) {
@@ -278,15 +410,21 @@ pub(super) fn write_string(output: &mut impl Write, value: &str) -> std::io::Res
                 pair[0] = HEX[(value >> 4) as usize];
                 pair[1] = HEX[(value & 15) as usize];
             }
+            // Write only the prefix initialized for this chunk. The unused tail
+            // can still contain bytes left over from an earlier iteration.
             output.write_all(&buffer[..chunk.len() * 2])?;
         }
         return output.write_all(b"' AS TEXT)");
     }
+    // For other strings, use the ordinary single-quoted SQL spelling. Escape
+    // embedded single quotes by writing a doubled quote at each split boundary.
     output.write_all(b"'")?;
     for (index, part) in value.split('\'').enumerate() {
         if index != 0 {
             output.write_all(b"''")?;
         }
+        // Emit each unchanged part as bounded writes. Splitting the byte sequence
+        // across calls preserves the order and content of the complete SQL value.
         for chunk in part.as_bytes().chunks(64 * 1024) {
             output.write_all(chunk)?;
         }

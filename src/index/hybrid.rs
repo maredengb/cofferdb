@@ -10,20 +10,43 @@ use crate::model::SearchWeights;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CandidateScore<'a> {
+    /// Identifier borrowed from one of the recall windows. Those windows must
+    /// outlive the ranked rows.
     pub chunk_id: &'a str,
+    /// The BM25 recall window contained this chunk before score completion, even if
+    /// its lexical weight was zero.
     pub bm25_recalled: bool,
+    /// The vector window admitted this chunk. Completing a vector score for a text
+    /// hit leaves this flag unchanged.
     pub vector_recalled: bool,
+    /// Lexical score before normalization. With score completion, a text query can
+    /// produce a real zero for a vector-recalled chunk with no term matches.
     pub bm25_raw: Option<f64>,
+    /// Raw BM25 divided by the candidate union's positive maximum and clamped to
+    /// the unit interval. Zero if the maximum is zero.
     pub bm25_norm: f64,
+    /// The collection metric's original value, absent if the chunk has no available
+    /// vector score.
     pub vector_raw: Option<f64>,
+    /// Metric-specific vector component before fusion weighting. An absent
+    /// component contributes zero to the sum.
     pub vector_norm: Option<f64>,
+    /// Contribution supplied by the metadata scorer after the rule cap and before
+    /// applying the metadata weight.
     pub metadata_boost: f64,
+    /// Number of metadata rules that matched, including matches that add nothing
+    /// once the cap is reached.
     pub matched_boost_rule_count: usize,
+    /// Weighted sum used for ranking. A larger score ranks first, with the internal
+    /// chunk ID breaking ties.
     pub final_score: f64,
 }
 
 impl PartialEq for CandidateScore<'_> {
     fn eq(&self, other: &Self) -> bool {
+        // Use the same ranking comparison for equality and ordering. Component
+        // scores and recall flags can differ without changing a row's position
+        // when its final score and chunk ID are the same.
         self.cmp(other) == Ordering::Equal
     }
 }
@@ -36,6 +59,9 @@ impl PartialOrd for CandidateScore<'_> {
 // Best-first order leaves the worst retained candidate at the max-heap root.
 impl Ord for CandidateScore<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse only the score comparison. On equal scores the smaller internal
+        // ID sorts first, making the larger ID the first tied candidate displaced
+        // from a full heap.
         other
             .final_score
             .partial_cmp(&self.final_score)
@@ -44,6 +70,9 @@ impl Ord for CandidateScore<'_> {
     }
 }
 
+// Use the scores already present in the two recall windows when the caller supplies
+// no supplementary lookup tables. A component available only through the other
+// route then remains absent.
 pub fn fuse<'a>(
     bm25_hits: &'a [Bm25Hit],
     vector_hits: &'a [VectorHit],
@@ -52,6 +81,10 @@ pub fn fuse<'a>(
     context: &JsonOperationContext,
     metadata_boost: impl FnMut(&str) -> MetadataBoostScore,
 ) -> Result<ReservedVec<CandidateScore<'a>>> {
+    // Both recall windows own the strings borrowed by the resulting rows. This
+    // entry point uses their measured scores directly and returns only the bounded
+    // rows, discarding the union size and normalization maximum from the full
+    // fusion report.
     Ok(fuse_scored(
         bm25_hits,
         vector_hits,
@@ -65,8 +98,14 @@ pub fn fuse<'a>(
 }
 
 pub(crate) struct FusionResult<'a> {
+    /// Best-first rows, limited by the fusion window. Their IDs continue to borrow
+    /// from the recall inputs.
     pub hits: ReservedVec<CandidateScore<'a>>,
+    /// Number of distinct IDs presented to fusion before the heap cutoff. A zero
+    /// fusion limit skips the union and reports zero.
     pub candidate_count: usize,
+    /// Maximum raw BM25 over the normalization candidates, including completed
+    /// lexical scores. Zero when there is no positive lexical measurement.
     pub bm25_max: f64,
 }
 
@@ -83,11 +122,21 @@ pub(crate) fn fuse_completed<'a>(
     context: &JsonOperationContext,
     metadata_boost: impl FnMut(&str) -> MetadataBoostScore,
 ) -> Result<FusionResult<'a>> {
+    // The two recall slices select which IDs compete. The supplementary slices must
+    // be ordered by chunk ID for lookup and may cover a wider population, as in an
+    // exact diagnosis. Their extra rows may supply neither new candidates nor
+    // out-of-window normalization scores.
     fuse_scored(
         bm25_hits,
         vector_hits,
+        // Keep the text-present flag alongside the lookup slices. A requested text
+        // query with no match can contribute a known zero, whereas a vector-only
+        // query leaves the lexical component absent.
         Some((text_scores, vector_scores, text_present)),
         weights,
+        // This limit bounds the fused output after both score components and the
+        // metadata boost have been evaluated. The input slices already embody the
+        // independent retrieval cutoffs.
         fusion_limit,
         context,
         metadata_boost,
@@ -104,6 +153,8 @@ fn fuse_scored<'a>(
     context: &JsonOperationContext,
     mut metadata_boost: impl FnMut(&str) -> MetadataBoostScore,
 ) -> Result<FusionResult<'a>> {
+    // A caller requesting no retained rows gets an empty result before allocating
+    // the index permutation or invoking the metadata scorer.
     if fusion_limit == 0 {
         return Ok(FusionResult {
             hits: ReservedVec::with_capacity(0, context, "operation_scratch")?,
@@ -115,10 +166,16 @@ fn fuse_scored<'a>(
         .len()
         .checked_add(vector_hits.len())
         .ok_or_else(|| std::io::Error::other("candidate count overflow"))?;
+    // Index the two input slices together rather than copying their IDs. Entries
+    // with the same chunk ID become adjacent after sorting, so a chunk recalled by
+    // both routes occupies one fusion slot.
     let mut indices = ReservedVec::with_capacity(count, context, "operation_scratch")?;
     for index in 0..count {
         indices.push(index);
     }
+    // The permutation uses a single integer domain. Values below the text window
+    // length index that window, and the rest are vector indices shifted by that
+    // length. This keeps both scores borrowed throughout fusion.
     let chunk_id = |index: usize| {
         if index < bm25_hits.len() {
             bm25_hits[index].chunk_id.as_str()
@@ -131,6 +188,9 @@ fn fuse_scored<'a>(
         .as_mut_slice()
         .sort_unstable_by(|a, b| chunk_id(*a).cmp(chunk_id(*b)).then_with(|| a.cmp(b)));
     let indices = indices.as_slice();
+    // Count distinct IDs before reserving the ranked array. The two windows may
+    // overlap completely, and both the output capacity and the reported
+    // normalization population depend on that overlap.
     let unique = indices
         .iter()
         .enumerate()
@@ -142,9 +202,14 @@ fn fuse_scored<'a>(
     let (storage, work) =
         ReservedVec::with_capacity(capacity, context, "operation_scratch")?.into_parts();
     let mut candidates = BinaryHeap::<CandidateScore<'a>>::from(storage);
+    // Normalize over the recalled union, including text scores filled in for
+    // vector-only candidates. Scores outside that union must not dilute the hits.
     let bm25_max = bm25_hits
         .iter()
         .map(|hit| hit.score)
+        // A diagnostic caller can supply text scores for the whole collection while
+        // testing a narrower recall window. Consult the union index for each such
+        // score so a stronger out-of-window hit cannot rescale every returned row.
         .chain(completion.into_iter().flat_map(|(scores, _, _)| {
             scores
                 .iter()
@@ -158,6 +223,9 @@ fn fuse_scored<'a>(
         .inspect(|_| {
             context.search_cost_add(crate::search_cost::Counter::NormalizationScoreVisits, 1)
         })
+        // Seed the maximum at zero. When the recall union has no positive lexical
+        // score, normalization below returns zero without dividing by that
+        // maximum.
         .fold(0.0_f64, f64::max)
         .max(0.0);
     let mut offset = 0;
@@ -168,6 +236,10 @@ fn fuse_scored<'a>(
             chunk_id: id,
             ..CandidateScore::default()
         };
+        // Consume the entire run for one ID before applying weights. Entries from
+        // the two branches fill separate components. Repeated entries from the same
+        // branch are visited in input order, leaving its last measurement in the
+        // row.
         while offset < indices.len() && chunk_id(indices[offset]) == id {
             let index = indices[offset];
             if index < bm25_hits.len() {
@@ -189,6 +261,9 @@ fn fuse_scored<'a>(
             }
             offset += 1;
         }
+        // Keep the recall flags from the input windows when filling a missing
+        // component. A text-only hit may acquire a real vector score here; explain
+        // must still report that text was the route that retrieved it.
         if let Some((text_scores, vector_scores, text_present)) = completion {
             if text_present && score.bm25_raw.is_none() {
                 // Full-score lookup may omit genuine zero-match rows (debug full scan).
@@ -199,6 +274,9 @@ fn fuse_scored<'a>(
                         .unwrap_or(0.0),
                 );
             }
+            // A missing vector measurement has no numeric interpretation for the
+            // collection's metric. Leave its raw and normalized fields absent and
+            // supply zero only when forming the sum.
             if score.vector_raw.is_none() {
                 if let Ok(index) =
                     vector_scores.binary_search_by(|hit| hit.chunk_id.as_str().cmp(id))
@@ -207,24 +285,44 @@ fn fuse_scored<'a>(
                     score.vector_norm = Some(vector_scores[index].normalized_score);
                 }
             }
+            // Recompute the lexical fraction after completion as a vector-recalled
+            // chunk may just have acquired its BM25 measurement. Use the same union
+            // maximum for every candidate, including those that will later be
+            // evicted.
             score.bm25_norm = if bm25_max > 0.0 {
                 (score.bm25_raw.unwrap_or(0.0) / bm25_max).clamp(0.0, 1.0)
             } else {
                 0.0
             };
         }
+        // Rank only after score completion and the metadata boost. A candidate near
+        // the edge of the retained heap can beat the current worst only after its
+        // other component has been taken into account.
         let boost = metadata_boost(id);
         score.metadata_boost = boost.boost;
         score.matched_boost_rule_count = boost.matched_rule_count;
+        // This is the first point at which the configured weights are applied to
+        // all available components. A missing vector contributes zero to the
+        // weighted sum, while output fields retain its absence for diagnostics.
         score.final_score = weights.bm25 * score.bm25_norm
             + weights.vector * score.vector_norm.unwrap_or(0.0)
             + weights.metadata * score.metadata_boost;
+        // The ordering makes the lowest score the heap maximum. At equal scores a
+        // smaller chunk ID can displace the current worst, preserving the same
+        // cutoff and order as a full sort.
         if candidates.len() < capacity {
             candidates.push(score);
+        // The cutoff is deterministic even across equal scores. Once the heap is
+        // full, compare against its current worst entry and replace only if the
+        // new candidate would precede it under the same ordering used for the
+        // returned array.
         } else if candidates.peek().is_some_and(|worst| score < *worst) {
             *candidates.peek_mut().unwrap() = score;
         }
     }
+    // Reuse the admitted heap allocation for the best-first array. Only that
+    // allocation escapes with the scores. The index permutation was temporary and
+    // its reservation ends here.
     Ok(FusionResult {
         hits: ReservedVec::from_reserved(candidates.into_sorted_vec(), work),
         candidate_count: unique,

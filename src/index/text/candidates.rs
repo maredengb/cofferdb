@@ -8,6 +8,9 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 impl Bm25Hit {
+    // Admission compares borrowed score-and-ID pairs before allocating the
+    // explanation. Project an existing hit onto the same ranking key so its
+    // matched terms can never break a tie.
     fn rank(&self) -> RankedChunk<'_> {
         RankedChunk {
             chunk_id: &self.chunk_id,
@@ -16,11 +19,17 @@ impl Bm25Hit {
     }
 
     fn payload_bytes(&self) -> usize {
+        // Use capacities for each distinct allocation the hit will drop. The
+        // Bm25Hit slot itself belongs to the outer heap or result array, which can
+        // retain that slot after evicting this row.
         self.chunk_id.capacity()
             + self.matched_terms.capacity() * std::mem::size_of::<MatchedTerm>()
             + self
                 .matched_terms
                 .iter()
+                // The match array stores String handles inline. Its capacity
+                // accounts for those handles and scalar fields; each initialized
+                // term's text has a separate backing buffer.
                 .map(|term| term.term.capacity())
                 .sum::<usize>()
     }
@@ -28,6 +37,9 @@ impl Bm25Hit {
 
 impl MatchedTerm {
     fn borrowed(&self) -> MatchedTerm<&str> {
+        // Prefix copies feed the same budgeted constructor as newly scored hits.
+        // Borrow the text for that constructor and preserve the observed corpus
+        // statistics instead of recomputing the explanation.
         MatchedTerm {
             term: &self.term,
             document_frequency: self.document_frequency,
@@ -41,6 +53,9 @@ impl MatchedTerm {
 
 // The maximum is the worst retained candidate, including the original signed-zero ties.
 impl PartialEq for Bm25Hit {
+    // Two explanations for the same score and ID have equal rank. Deriving
+    // equality from their term lists would give the heap two different notions of
+    // the same comparison key.
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
@@ -53,12 +68,19 @@ impl PartialOrd for Bm25Hit {
 }
 impl Ord for Bm25Hit {
     fn cmp(&self, other: &Self) -> Ordering {
+        // RankedChunk considers the better hit greater. Reversing its operands
+        // puts a losing score, or the lexically larger ID on a tie, at the
+        // max-heap root for replacement.
         other.rank().cmp(&self.rank())
     }
 }
 
 struct OwnedHit {
+    // One winner with its owned ID, match array and term strings, built before it
+    // is published to the enclosing heap or result array.
     hit: Bm25Hit,
+    // Credit for this row's payload. The destination owns its own array slots and
+    // absorbs this reservation only when the row is inserted.
     work: WorkspaceReservation,
 }
 
@@ -69,6 +91,9 @@ impl OwnedHit {
         terms: impl Iterator<Item = MatchedTerm<&'a str>> + Clone,
         context: &JsonOperationContext,
     ) -> Result<Self> {
+        // A winner can outlive the segment callback or the resident posting list
+        // that supplied it. Give the row an owner for all heap storage that must
+        // survive those borrows.
         let mut owned = Self {
             hit: Bm25Hit {
                 score,
@@ -76,16 +101,31 @@ impl OwnedHit {
             },
             work: context.workspace_reservation(),
         };
+        // Count the borrowed match iterator to reserve its exact array size, then
+        // replay it while copying each term. A failure drops the partially prepared
+        // hit together with its own reservation.
         let (terms_array, work) =
             ReservedVec::with_capacity(terms.clone().count(), context, "operation_scratch")?
                 .into_parts();
+        // Moving a raw Vec or String out of a reservation wrapper also returns its
+        // grant. Merge that grant into the row as soon as the corresponding
+        // allocation becomes part of the row.
         owned.hit.matched_terms = terms_array;
         owned.work.merge(work);
+        // The chunk ID may come from a temporary decoder buffer. Copy its bytes
+        // along with the hit so later ID-based lookups remain valid after that
+        // buffer is reused.
         let (id, work) = ReservedString::copy(id, context)?.into_parts();
         owned.hit.chunk_id = id;
         owned.work.merge(work);
+        // The iterator supplies only matched terms. Preserve their traversal order
+        // and scoring inputs so a later explanation describes the same
+        // contribution that selected this hit.
         for term in terms {
             let (text, work) = ReservedString::copy(term.term, context)?.into_parts();
+            // The count pass sized this array for the replay. An implicit growth
+            // here would bypass the operation's workspace accounting, so enforce
+            // that contract before each push.
             assert!(owned.hit.matched_terms.len() < owned.hit.matched_terms.capacity());
             owned.hit.matched_terms.push(MatchedTerm {
                 term: text,
@@ -95,6 +135,9 @@ impl OwnedHit {
                 frequency: term.frequency,
                 bm25_contribution: term.bm25_contribution,
             });
+            // The term string has its own grant in addition to the slot already
+            // paid for in the match array. Move its grant after the row takes
+            // ownership of the string.
             owned.work.merge(work);
         }
         Ok(owned)
@@ -103,10 +146,16 @@ impl OwnedHit {
 
 #[derive(Debug)]
 pub(crate) struct Bm25Hits {
+    // Owned lexical hits in the caller's current order. Ranking returns best first
+    // and score completion can sort the same array by ID for lookup.
     hits: Vec<Bm25Hit>,
+    // Covers the array's capacity and the nested payloads of hits still in it.
     work: WorkspaceReservation,
 }
 
+// Slice access lets scoring and fusion borrow nested explanations while this
+// result keeps their workspace credit. Moving the backing Vec out would break that
+// ownership relationship.
 impl std::ops::Deref for Bm25Hits {
     type Target = [Bm25Hit];
     fn deref(&self) -> &Self::Target {
@@ -116,12 +165,18 @@ impl std::ops::Deref for Bm25Hits {
 
 impl Bm25Hits {
     pub(crate) fn empty(context: &JsonOperationContext) -> Self {
+        // Even an empty result carries its originating operation context. A later
+        // prefix copy can allocate against the same budget through the existing
+        // result owner.
         Self {
             hits: Vec::new(),
             work: context.workspace_reservation(),
         }
     }
 
+    // Callers know the maximum number of selected IDs or retained winners. Admit
+    // the outer row slots once, before copying any variable-size chunk IDs or
+    // explanations.
     pub(crate) fn with_capacity(count: usize, context: &JsonOperationContext) -> Result<Self> {
         let (hits, work) =
             ReservedVec::with_capacity(count, context, "operation_scratch")?.into_parts();
@@ -134,7 +189,13 @@ impl Bm25Hits {
         score: f64,
         terms: impl Iterator<Item = MatchedTerm<&'a str>> + Clone,
     ) -> Result<()> {
+        // The caller supplied the row bound at construction. Enforcing it here
+        // keeps a new winner from silently growing the outer Vec outside its
+        // reservation.
         assert!(self.hits.len() < self.hits.capacity());
+        // Finish every fallible copy while the existing result remains intact.
+        // Only a fully owned row and its grant can be moved into the pre-admitted
+        // slot.
         let owned = OwnedHit::copy(id, score, terms, self.work.context())?;
         self.hits.push(owned.hit);
         self.work.merge(owned.work);
@@ -142,6 +203,8 @@ impl Bm25Hits {
     }
 
     pub(crate) fn sort_by_id(&mut self) {
+        // Fusion uses binary search by internal chunk ID. After this sort, a row's
+        // position cannot stand in for its one-based lexical recall rank.
         self.hits
             .sort_unstable_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
     }
@@ -151,18 +214,34 @@ impl Bm25Hits {
     }
 
     pub(crate) fn retain(&mut self, mut include: impl FnMut(&Bm25Hit) -> bool) {
+        // Filtering frees IDs and explanations of rejected rows. The hit array's
+        // capacity survives retain, so leave those slots in the workspace
+        // reservation.
         let mut released = 0;
+        // retain preserves the order among survivors. A filter can therefore
+        // discard invisible hits from a ranked list without recomputing the scores
+        // or losing their relative tie order.
         self.hits.retain(|hit| {
             let retained = include(hit);
+            // Measure the capacities while the rejected hit still owns them.
+            // Visible string lengths can be smaller than the buffers whose charges
+            // must be returned.
             if !retained {
                 released += hit.payload_bytes();
             }
             retained
         });
+        // Vec::retain has dropped the rejected payloads by this point. Return
+        // their aggregate credit only after destruction so another allocation
+        // cannot spend it prematurely.
         self.work.retain(self.work.reserved_bytes() - released);
     }
 
     pub(crate) fn copy_prefix(&self, limit: usize) -> Result<Self> {
+        // Copy the current slice order without invoking the scorer or applying
+        // another cutoff comparison. The caller must supply hits in the desired
+        // prefix order. Reserve only the requested range and keep the original
+        // accessible if this copy fails.
         let mut copy = Self::with_capacity(limit.min(self.len()), self.work.context())?;
         for hit in self.iter().take(limit) {
             copy.push(
@@ -176,8 +255,13 @@ impl Bm25Hits {
 }
 
 pub(crate) struct TextCandidates {
+    // Maximum number of complete hit payloads that may survive lexical recall.
     limit: usize,
+    // Worst retained hit at the root, including the chunk-ID ordering of equal
+    // scores.
     heap: BinaryHeap<Bm25Hit>,
+    // Covers heap slots and payloads already in the heap. A new hit is prepared
+    // with its own temporary reservation.
     work: WorkspaceReservation,
 }
 
@@ -196,6 +280,9 @@ impl TextCandidates {
         score: f64,
         terms: impl Iterator<Item = MatchedTerm<&'a str>> + Clone,
     ) -> Result<()> {
+        // Compare using the borrowed ID and score first. A nonwinning row never
+        // allocates an owned ID or visits its matched-term iterator, even when it
+        // ties on the numeric score.
         if self.limit == 0
             || (self.heap.len() == self.limit
                 && self.heap.peek().is_some_and(|worst| {
@@ -209,11 +296,23 @@ impl TextCandidates {
         }
         if self.heap.len() == self.limit {
             // The query aborts on admission failure; do not keep the evicted payload alive.
+            // Once the rank comparison admits a replacement, the old worst hit no
+            // longer needs to survive a failed search. Recover its variable-sized
+            // payload first so an otherwise valid replacement is not refused
+            // merely because both copies coexist.
             let removed = self.heap.pop().unwrap();
             let bytes = removed.payload_bytes();
             drop(removed);
             self.work.retain(self.work.reserved_bytes() - bytes);
         }
+        // A winning hit can be too large while spare heap slots remain charged.
+        // After a budget refusal, reclaim spare slots before retrying the copy. The
+        // previous worst may already have been evicted, so a second failure ends
+        // this search.
+        // Prepare the owned hit with a temporary reservation. A retry reconstructs
+        // details from the same borrowed iterator, so its traversal must produce
+        // the same terms when cloned. No output has escaped the candidate
+        // collector yet.
         let owned = match OwnedHit::copy(id, score, terms.clone(), self.work.context()) {
             Err(error)
                 if error.code() == crate::ErrorCode::ResourceExhausted
@@ -224,14 +323,23 @@ impl TextCandidates {
                 }
                 OwnedHit::copy(id, score, terms, self.work.context())?
             }
+            // An error unrelated to quota propagates directly. Reclaiming heap
+            // slack only addresses the case where native workspace headroom might
+            // let the same borrowed winner fit on a second attempt.
             result => result?,
         };
+        // The payload can already have been copied while the heap has no free
+        // slot. If slot admission fails, the temporary hit drops with its
+        // reservation. Transfer the payload lease only after the heap owns it.
         reserve_heap_slot(&mut self.heap, &mut self.work, self.limit)?;
         self.heap.push(owned.hit);
         self.work.merge(owned.work);
         Ok(())
     }
 
+    // Move the heap's allocation into the sorted result. It retains the ranked IDs
+    // and their copied explanation terms, so the accompanying reservation must
+    // survive along with those values.
     pub(crate) fn finish(self) -> Bm25Hits {
         Bm25Hits {
             hits: self.heap.into_sorted_vec(),

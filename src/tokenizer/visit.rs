@@ -9,7 +9,11 @@ use crate::Result;
 use std::borrow::Cow;
 
 struct SymbolTokens<'a> {
+    // Normalized tokens unique within the current symbol, in first-encounter order,
+    // with the array slots charged to its reservation.
     values: ReservedVec<Cow<'a, str>>,
+    // Credit for separately owned lowercase strings in values. Entries borrowing
+    // slices of the source symbol have no payload charge.
     payload: WorkspaceReservation,
 }
 
@@ -20,19 +24,34 @@ pub(crate) fn visit_tokens_in(
 ) -> Result<()> {
     #[cfg(test)]
     super::TOKEN_VISITS.with(|count| count.set(count.get() + 1));
+    // Deduplicate within each source symbol. The same normalized word in two
+    // separate symbols must generate two visits so its lexical term frequency is
+    // preserved.
     for symbol in symbols(input) {
         let mut parts = symbol_parts(symbol);
         let first = parts.next();
+        // A symbol with no components, or one component identical to the original,
+        // can produce at most one normalized spelling. Skip allocating a
+        // uniqueness table in that common case.
         if first.is_none() || first == Some(symbol) {
             if let Some(token) = normalize(symbol, context)? {
                 visit(token.value.as_ref())?;
             }
             continue;
         }
+        // Collect a symbol's unique tokens before invoking callbacks. A failed
+        // preparation can restart by scanning the original slices because no token
+        // from this symbol has been emitted yet.
         let unique = match build_symbol(symbol, context) {
             Ok(unique) => unique,
+            // Only a workspace-budget failure selects the rescan strategy. Other
+            // preparation failures, including allocator or capacity-check errors,
+            // reach the caller with their original causes.
             Err(error) if is_memory_budget_error(&error) => {
                 drop(error);
+                // This visitor has no external state reclamation hook. Its
+                // fallback can trade repeated normalization for lower live memory,
+                // but cannot retry an error by freeing a consumer's allocations.
                 visit_without_array(
                     symbol,
                     context,
@@ -44,6 +63,9 @@ pub(crate) fn visit_tokens_in(
             }
             Err(error) => return Err(error),
         };
+        // The prepared table retains each spelling and its workspace grant through
+        // the callback. A callback error propagates immediately because replay
+        // would duplicate already observed tokens.
         for value in unique.values.as_slice() {
             visit(value.as_ref())?;
         }
@@ -65,6 +87,9 @@ pub(crate) fn visit_tokens_in_reclaiming<S>(
     for symbol in symbols(input) {
         let mut parts = symbol_parts(symbol);
         let first = parts.next();
+        // The simple-symbol path can still need workspace to lowercase the token.
+        // Let the consumer free optional state before retrying that preparation,
+        // with no side effects from a token visit yet.
         if first.is_none() || first == Some(symbol) {
             if let Some(token) =
                 prepare_reclaiming(state, &mut reclaim, || normalize(symbol, context))?
@@ -72,6 +97,9 @@ pub(crate) fn visit_tokens_in_reclaiming<S>(
                 visit(state, token.value.as_ref())?;
             }
         } else {
+            // For a compound symbol, rescan the source slices even when memory is
+            // currently available. A callback can retain new state, so an eagerly
+            // held set of normalized strings would compete with it.
             visit_without_array(symbol, context, state, &mut visit, &mut reclaim)?;
         }
     }
@@ -83,12 +111,21 @@ fn prepare_reclaiming<T, S>(
     reclaim: &mut impl FnMut(&mut S) -> Result<bool>,
     mut prepare: impl FnMut() -> Result<T>,
 ) -> Result<T> {
+    // Retry only preparation after the consumer has released optional work. Already
+    // executed callbacks may have mutated the caller's state, so they are never
+    // replayed by this helper.
     match prepare() {
         Err(error) if is_memory_budget_error(&error) => {
+            // A false return means the consumer released no optional space.
+            // Preserve the original budget error in that case. An error from the
+            // reclamation itself propagates independently.
             if !reclaim(state)? {
                 return Err(error);
             }
             drop(error);
+            // The successful reclamation authorizes one new preparation attempt. A
+            // second refusal is final here, preventing a nonproductive reclaim
+            // loop from hiding the budget failure.
             prepare()
         }
         result => result,
@@ -96,18 +133,29 @@ fn prepare_reclaiming<T, S>(
 }
 
 fn build_symbol<'a>(symbol: &'a str, context: &JsonOperationContext) -> Result<SymbolTokens<'a>> {
+    // The staging array and separately allocated lowercase strings have different
+    // owners. A failed symbol build drops both before the caller starts over using
+    // the source slices.
     let mut unique = SymbolTokens {
         values: ReservedVec::with_capacity(0, context, "operation_scratch")?,
         payload: context.workspace_reservation(),
     };
+    // Offer the whole identifier first, then its components in source order.
+    // Deduplication keeps the first occurrence of each normalized spelling.
     for raw in std::iter::once(symbol).chain(symbol_parts(symbol)) {
         let Some(token) = normalize(raw, context)? else {
             continue;
         };
+        // Test the normalized spelling, so differently cased components compete
+        // for the same first occurrence. A duplicate's temporary lowercase buffer
+        // is released on this path.
         if unique.values.as_slice().contains(&token.value) {
             continue;
         }
         let Token { value, work } = token;
+        // Adding a distinct token can grow the slot array while its string still
+        // holds a separate grant. Only merge that grant once the slot insertion
+        // has succeeded.
         unique.values.try_push(value)?;
         unique.payload.merge(work);
     }
@@ -124,6 +172,9 @@ fn visit_without_array<S>(
     visit: &mut impl FnMut(&mut S, &str) -> Result<()>,
     reclaim: &mut impl FnMut(&mut S) -> Result<bool>,
 ) -> Result<()> {
+    // Probe the whole symbol and first-occurrence checks before issuing token
+    // callbacks. A probe may ask the consumer to reclaim workspace. Later
+    // callbacks can still consume credit after this pass.
     drop(prepare_reclaiming(state, reclaim, || {
         normalize(symbol, context)
     })?);
@@ -132,10 +183,16 @@ fn visit_without_array<S>(
             is_first_part(symbol, index, raw, context)
         })?;
     }
+    // The probes leave no reusable tokens or eligibility bitmap. Recreate the
+    // whole token for the first callback, then repeat the part checks in their
+    // original order.
     if let Some(token) = prepare_reclaiming(state, reclaim, || normalize(symbol, context))? {
         visit(state, token.value.as_ref())?;
     }
     for (index, raw) in symbol_parts(symbol).enumerate() {
+        // An earlier callback can have consumed workspace. Reclaim and retry only
+        // the duplicate check or normalization that is still pending, never an
+        // earlier successful callback.
         if prepare_reclaiming(state, reclaim, || {
             is_first_part(symbol, index, raw, context)
         })? {
@@ -153,12 +210,20 @@ fn is_first_part(
     raw: &str,
     context: &JsonOperationContext,
 ) -> Result<bool> {
+    // A stop-word component has no first occurrence to emit. Test it with the same
+    // normalizer as the buffered tokenizer, including its Unicode casing rules.
     let Some(token) = normalize(raw, context)? else {
         return Ok(false);
     };
+    // Release this trial token before comparing any pair. Keeping it while
+    // constructing both normalized operands would charge a third copy during a
+    // low-memory fallback.
     drop(token);
     // Whole has nonempty output outside each proper part; compare only parts.
     for previous in symbol_parts(symbol).take(index) {
+        // Identical raw text is already a duplicate. Two ASCII spellings can be
+        // compared case-insensitively without allocating, while a mixed or Unicode
+        // pair can require full string normalization.
         if raw == previous || (raw.is_ascii() && previous.is_ascii()) {
             if raw.eq_ignore_ascii_case(previous) {
                 return Ok(false);
@@ -167,6 +232,9 @@ fn is_first_part(
         }
         let (left_capacity, left_peak) = lowercase_layout(raw);
         let (right_capacity, right_peak) = lowercase_layout(previous);
+        // Normalize the operand with the larger transient overhead first. Its peak
+        // occurs while no other result buffer is retained, reducing the
+        // simultaneous space needed to compare the pair.
         let (first, second) = if left_peak - left_capacity >= right_peak - right_capacity {
             (raw, previous)
         } else {
@@ -174,6 +242,9 @@ fn is_first_part(
         };
         let first = normalize(first, context)?;
         let second = normalize(second, context)?;
+        // Only two retained token values can suppress the current component. A
+        // preceding spelling that normalizes to a stop word has no emitted
+        // occurrence to match.
         if matches!((&first, &second), (Some(left), Some(right)) if left.value == right.value) {
             return Ok(false);
         }

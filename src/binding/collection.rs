@@ -4,12 +4,21 @@ use crate::{CollectionConfig, CollectionHandle, Database, Result};
 
 /// Owned names retained through construction of the corresponding host handle.
 pub struct CollectionIdentity {
+    // Engine-assigned stable identifier moved from the native collection handle for
+    // use in subsequent operations.
     collection_id: String,
+    // Name returned by the native handle, retained for the host collection and
+    // operations such as named export.
     name: String,
+    // Lease covering the native identity strings until the host collection takes
+    // ownership. Its JSON value is a placeholder.
     work: Output,
 }
 
 impl CollectionIdentity {
+    // Consume the native handle without duplicating either identity string. Its
+    // database reference travels with the output lease so host allocation can
+    // still use the same reclamation path.
     fn new(handle: CollectionHandle, work: RecordReservation) -> Self {
         let CollectionHandle {
             db: database,
@@ -19,17 +28,31 @@ impl CollectionIdentity {
         Self {
             collection_id,
             name,
+            // The strings themselves are the result. A null JSON payload lets the
+            // shared Output type carry their native credit, the host-copy
+            // allowance and the database reference through handoff.
             work: Output::new(crate::JsonValue::Null, work, Some(database)),
         }
     }
 
     /// Retain the returned lease until the host handle's ownership handoff.
+    /// Returns the stable collection ID, display name and lease, in that order.
+    /// Hosts can transfer the two owned strings without looking up the collection
+    /// a second time.
     pub fn into_parts(self) -> (String, String, Output) {
         (self.collection_id, self.name, self.work)
     }
 }
 
 impl Operation {
+    /// Creates a collection from a configuration prepared by this operation and
+    /// returns its owned identity for a host handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign argument, an invalid configuration, a
+    /// duplicate collection name, or a resource or storage failure. An observation
+    /// retained before the call can report confirmed write progress.
     pub fn create_collection(
         self,
         database: &Database,
@@ -37,12 +60,25 @@ impl Operation {
     ) -> Result<CollectionIdentity> {
         self.check_input(&input)?;
         let Argument { value, work } = input;
+        // Validation of ownership precedes the start of write tracking. Preserve
+        // the consumed configuration's reservation through the engine call and
+        // transfer the new identity's credit with the returned handle.
         self.progress.begin();
         database
+            // Supply the prepared configuration's existing reservation to the
+            // engine. Even on validation failure the owned buffers stay charged
+            // until the engine releases them.
             .create_collection_retained_in(value, &self.context, Some(work))
             .map(|(handle, work)| CollectionIdentity::new(handle, work))
     }
 
+    /// Looks up a collection by its prepared name and returns its owned ID, name
+    /// and associated lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a name prepared by another operation, a missing
+    /// collection, or a failure to read or retain the identity.
     pub fn collection(
         self,
         database: &Database,
@@ -50,20 +86,37 @@ impl Operation {
     ) -> Result<CollectionIdentity> {
         self.check_input(&name)?;
         database
+            // Borrow the input as a lookup key. The engine returns independently
+            // owned catalog spellings under a new reservation, so the host handle
+            // outlives the temporary name argument.
             .collection_retained_in(&name.value, &self.context)
             .map(|(handle, work)| CollectionIdentity::new(handle, work))
     }
 
+    /// Lists collections under this operation's retained read context. Keep the
+    /// returned Output alive while projecting the JSON array into host-owned
+    /// values.
     pub fn list_collections(self, database: &Database) -> Result<Output> {
         let (value, work) = database.list_collections_json_in(&self.context)?;
         Ok(Output::new(value, work, Some(database.clone())))
     }
 
+    /// Reads statistics for the existing internal collection ID and returns a
+    /// retained output. Missing collections and read/admission failures are
+    /// reported by the database.
     pub fn collection_stats(self, database: &Database, collection_id: &str) -> Result<Output> {
         let (value, work) = database.collection_stats_json_in(collection_id, &self.context)?;
         Ok(Output::new(value, work, Some(database.clone())))
     }
 
+    /// Deletes the document with this internal ID from the selected collection.
+    /// The operation consumes its prepared argument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the argument belongs to another operation, the document
+    /// cannot be resolved in the collection, or the native write fails. A write
+    /// observation can be retained before the call.
     pub fn delete_document(
         self,
         database: &Database,
@@ -71,8 +124,12 @@ impl Operation {
         id: Argument<String>,
     ) -> Result<Output> {
         self.check_input(&id)?;
+        // Record the attempt only after checking ownership of the prepared input.
+        // Actual committed progress comes from the append path.
         self.progress.begin();
         database.delete_document_in_collection_in(collection_id, &id.value, &self.context)?;
+        // Use JSON null for a completed mutation with no result payload. The
+        // resulting Output still participates in the host ownership handoff.
         Ok(Output::new(
             crate::JsonValue::Null,
             RecordReservation::from(self.context.reservation()),
@@ -80,6 +137,12 @@ impl Operation {
         ))
     }
 
+    /// Deletes the chunk with this internal ID from the selected collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for foreign prepared input, an unknown chunk in this
+    /// collection, or a native write failure.
     pub fn delete_chunk(
         self,
         database: &Database,
@@ -88,6 +151,9 @@ impl Operation {
     ) -> Result<Output> {
         self.check_input(&id)?;
         self.progress.begin();
+        // Pass the same context used for argument admission through to the native
+        // delete. This preserves the budget and operation's write observation
+        // together.
         database.delete_chunk_in_collection_in(collection_id, &id.value, &self.context)?;
         Ok(Output::new(
             crate::JsonValue::Null,
@@ -96,6 +162,9 @@ impl Operation {
         ))
     }
 
+    /// Converts one prepared JSON value into a tokenizer configuration for this
+    /// operation. A foreign argument or invalid tokenizer definition returns an
+    /// error.
     pub fn tokenizer(&self, value: Argument<crate::JsonValue>) -> Result<crate::TokenizerConfig> {
         self.check_input(&value)?;
         crate::TokenizerConfig::from_validated_in(&value.value, &self.context)

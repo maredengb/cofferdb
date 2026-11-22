@@ -1,15 +1,24 @@
 use super::*;
 
+// Each directory row stores an eight-byte data offset, a four-byte encoded record
+// length and a four-byte CRC. Fixed width lets a binary-search midpoint locate its
+// row without decoding any preceding keys.
 const INDEX_ENTRY_BYTES: u64 = 16;
 const PAGE_BYTES: usize = 2048;
 const CACHE_PAGES: usize = 16;
 
+// A probe can hold the record being checked and the key from the last successful
+// lookup simultaneously. Reserve room for both at the maximum key size even if no
+// cache page fits.
 fn query_workspace(key: u128) -> u128 {
     (MIN_WORKSPACE as u128)
         .max(2 * key + ENTRY_HEADER_BYTES as u128 + std::mem::size_of::<Entry>() as u128)
 }
 
 pub(super) fn preferred_workspace(key: u128) -> u128 {
+    // Extra headroom pays for the backing buffers and Page records of a bounded
+    // cache. The smaller required grant remains usable because a probe can read
+    // directly from either file.
     required_workspace(key).max(
         2 * key
             + ENTRY_HEADER_BYTES as u128
@@ -19,30 +28,61 @@ pub(super) fn preferred_workspace(key: u128) -> u128 {
 }
 
 pub(super) fn required_workspace(key: u128) -> u128 {
+    // Directory construction reads a buffered run and writes a buffered index at
+    // the same time. Query buffers take over after construction, so the workspace
+    // need only cover the larger of these phases.
     query_workspace(key).max(2 * IO_BYTES as u128 + key + std::mem::size_of::<Entry>() as u128)
 }
 
 pub(crate) struct ExternalKeyLookup {
+    // Paired run and directory files. An empty sorter produces None so even the
+    // first lookup can return a miss without opening a file.
     files: Option<LookupFiles>,
+    // Largest key length in bytes from the sorter. It bounds both a checked on-disk
+    // entry and the memory reserved to probe it.
     max_key: usize,
+    // Reusable buffer for one complete data entry, including its fixed-width
+    // header. The entry CRC is checked before comparing the key.
     buffer: Vec<u8>,
+    // Optional last successful hit, retaining its verified key, source line and
+    // value so repeated probes can bypass both files.
     last: Option<Entry>,
+    // Cached aligned pages from both files, ordered from least to most recently
+    // used. Direct positional reads remain possible with zero pages.
     pages: Vec<Page>,
+    // Workspace handed over by the sorter for the probe buffer, saved key and
+    // optional page cache.
     _work: WorkspaceReservation,
 }
 
 struct Page {
+    // Selects the fixed-width directory file when true and the variable-length data
+    // file when false. Equal offsets in the two files denote different pages.
     index: bool,
+    // Aligned byte offset of the page's first byte in the selected file.
     offset: u64,
+    // Actual data read for that page. The last page of either file can be shorter
+    // than PAGE_BYTES.
     bytes: Vec<u8>,
 }
 
 struct LookupFiles {
+    // Sorted variable-width run containing full keys, source positions and values.
     data: TemporaryFile,
+    // Keeps the data run and its disk charge alive after ownership moves out of the
+    // sort cursor.
     _data_temporary: TempFileGuard,
+    // Fixed-width directory file mapping entry ordinals to data offsets, encoded
+    // lengths and record CRCs.
     index: TemporaryFile,
+    // Retains ownership of the directory file's temporary name and disk reservation
+    // for the lookup's lifetime.
     _index_temporary: TempFileGuard,
+    // Number of sorted keys. It bounds binary search and determines the expected
+    // directory length.
     count: u64,
+    // Original run length in bytes, used to bound each directory-provided range
+    // before reading from data.
     data_bytes: u64,
 }
 
@@ -62,33 +102,59 @@ impl ExternalKeyLookup {
             pages: Vec::new(),
             _work: work,
         };
+        // An empty run set needs neither file. An empty key set answers misses
+        // without attempting to read or generate an index.
         let Some(run) = run else { return Ok(lookup) };
         let count = run.count;
         let data_bytes = run.bytes;
+        // The cursor checks the source file's declared length on open. Reading it
+        // through exhaustion below also checks the remaining extent and running
+        // CRC before a lookup can be returned.
         let mut cursor = RunCursor::new(run, max_key)?;
         let (file, mut temporary) =
             create_budgeted_sort_file(directory, "import-lookup", disk, lookup._work.context())?;
         temporary.reserve_disk(
+            // Reserve the complete fixed-size directory up front. Its data file
+            // already belongs to the run, and the two disk reservations stay
+            // separate even though the resulting lookup owns both.
             count
                 .checked_mul(INDEX_ENTRY_BYTES)
                 .ok_or_else(invalid_run)?,
         )?;
         let mut output = BufWriter::with_capacity(IO_BYTES, file);
+        // Keep variable-length keys in the sorted run. A fixed-width directory
+        // lets binary search seek by entry number; its CRC binds each probe to
+        // the full data record before the key can influence the next seek.
         let mut offset = 0u64;
         while let Some(entry) = cursor.next()? {
+            // Regenerate the canonical run header from the decoded entry. This
+            // produces the same bytes stored at offset, allowing a later point
+            // probe to check one record without rescanning the entire run.
             let header = entry.header()?;
             let length =
+                // The directory length covers header and key together. Its
+                // four-byte field must therefore fit even when the key length
+                // alone was representable in a run header.
                 u32::try_from(ENTRY_HEADER_BYTES + entry.key.len()).map_err(|_| invalid_run())?;
             let mut crc = Crc32c::default();
             crc.update(&header);
             crc.update(&entry.key);
+            // The row is little-endian in offset, length, checksum order. Keep the
+            // encoding here in step with get, which must validate the range before
+            // using it to read data.
             output.write_all(&offset.to_le_bytes())?;
             output.write_all(&length.to_le_bytes())?;
             output.write_all(&crc.finish().to_le_bytes())?;
             offset = offset
+                // Advance by the encoded record length including its header. A
+                // wrapped byte offset would make later ordinal lookups seek into
+                // unrelated records.
                 .checked_add(u64::from(length))
                 .ok_or_else(invalid_run)?;
         }
+        // Complete the directory writes before installing either file. A build
+        // error drops the local file owners, leaving no queryable lookup backed by
+        // a partial directory.
         output.flush()?;
         lookup.files = Some(LookupFiles {
             data: cursor.input.into_inner(),
@@ -98,6 +164,9 @@ impl ExternalKeyLookup {
             count,
             data_bytes,
         });
+        // Once both buffering adapters have surrendered their files, trim
+        // construction credit to the preferred probe budget. Retain a smaller
+        // grant as-is so a valid lookup can operate with less caching.
         let retained = lookup
             ._work
             .reserved_bytes()
@@ -107,21 +176,34 @@ impl ExternalKeyLookup {
     }
 
     pub(crate) fn get(&mut self, key: &[u8]) -> Result<Option<(u64, u64)>> {
+        // The last hit already holds an owned key with its verified line and
+        // value. Repeated references to the same key can return without consulting
+        // either temporary file.
         if let Some(last) = &self.last {
             if last.key == key {
                 return Ok(Some((last.line, last.value)));
             }
         }
+        // An empty sorter has no files and released its workspace. Answer the miss
+        // before subtracting the memory required by a nonempty lookup.
         let Some(files) = &mut self.files else {
             return Ok(None);
         };
+        // Leave room for the decoded record, a separate saved key and its Entry.
+        // Only the surplus lease is available for pages, and a zero-page lookup
+        // can still read both files directly.
         let cache_bytes = self._work.reserved_bytes()
             - (2 * self.max_key + ENTRY_HEADER_BYTES + std::mem::size_of::<Entry>());
         let mut low = 0;
         let mut high = files.count;
+        // Search the half-open interval of entry ordinals. Computing the midpoint
+        // from the remaining width avoids overflowing when the directory is large.
         while low < high {
             let middle = low + (high - low) / 2;
             let mut index = [0; INDEX_ENTRY_BYTES as usize];
+            // Every directory record has a fixed width, so its offset depends only
+            // on the midpoint. The same page cache serves both files and the index
+            // flag keeps their offsets distinct.
             read_cached(
                 &mut self.pages,
                 &mut files.index,
@@ -131,9 +213,16 @@ impl ExternalKeyLookup {
                 middle * INDEX_ENTRY_BYTES,
                 cache_bytes,
             )?;
+            // The directory entry comes from a separate temporary file. Bound its
+            // data range and key length before using either value to allocate or
+            // seek. The record checksum below then protects the comparison that
+            // chooses the next half of the search.
             let offset = u64::from_le_bytes(index[..8].try_into().unwrap());
             let length = u32::from_le_bytes(index[8..12].try_into().unwrap()) as usize;
             let checksum = u32::from_le_bytes(index[12..].try_into().unwrap());
+            // A complete record may consist solely of its header for an empty key.
+            // Check the lower bound before subtracting it, and reject an
+            // overflowing or out-of-run end offset.
             if length < ENTRY_HEADER_BYTES
                 || length - ENTRY_HEADER_BYTES > self.max_key
                 || offset
@@ -144,17 +233,26 @@ impl ExternalKeyLookup {
                 return Err(invalid_run());
             }
             if length > self.buffer.capacity() {
+                // Drop the old probe allocation before acquiring a larger one.
+                // Growing the existing vector could temporarily hold two record
+                // buffers under a lease sized for only one.
                 self.buffer = Vec::new();
                 self.buffer
                     .try_reserve_exact(length)
                     .map_err(allocation_error)?;
             }
+            // An exact reserve can still yield spare capacity. Fail if the actual
+            // allocation exceeds the largest admitted record even though the
+            // declared length passed the format checks.
             if self.buffer.capacity() > self.max_key + ENTRY_HEADER_BYTES {
                 return Err(
                     std::io::Error::other("lookup buffer exceeds admitted capacity").into(),
                 );
             }
             self.buffer.resize(length, 0);
+            // Read the entire variable-width record into one buffer. Its data
+            // extent comes from the run, whereas the location and expected
+            // checksum came from the directory.
             read_cached(
                 &mut self.pages,
                 &mut files.data,
@@ -166,6 +264,9 @@ impl ExternalKeyLookup {
             )?;
             let mut crc = Crc32c::default();
             crc.update(&self.buffer);
+            // Check both the checksum and the key length encoded in the record
+            // itself. A bad length is a malformed run even if the recorded bytes
+            // happen to match the directory CRC.
             if crc.finish() != checksum
                 || u32::from_le_bytes(self.buffer[..4].try_into().unwrap()) as usize
                     != length - ENTRY_HEADER_BYTES
@@ -173,22 +274,36 @@ impl ExternalKeyLookup {
                 return Err(invalid_run());
             }
             let stored_key = &self.buffer[ENTRY_HEADER_BYTES..];
+            // Compare only the verified key bytes in the same order used to sort
+            // the run. The line and payload do not contribute to ordering.
             match stored_key.cmp(key) {
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
                 std::cmp::Ordering::Equal => {
                     let line = u64::from_le_bytes(self.buffer[4..12].try_into().unwrap());
                     let value = u64::from_le_bytes(self.buffer[12..20].try_into().unwrap());
+                    // The verified line and value are already available. The saved
+                    // key merely speeds up a repeated lookup; failing to cache it
+                    // should not turn a valid hit into a resource error.
+                    // Reuse the previous hit's key allocation when it fits. Give
+                    // it up before reserving a larger key so two saved-hit buffers
+                    // never overlap.
                     let mut saved = self.last.take().map(|entry| entry.key).unwrap_or_default();
                     if saved.capacity() < stored_key.len() {
                         saved = Vec::new();
                     }
                     saved.clear();
+                    // A failed or oversized optional allocation leaves the
+                    // last-hit slot empty. The verified lookup can still return
+                    // its line and value immediately.
                     if saved.try_reserve_exact(stored_key.len()).is_err()
                         || saved.capacity() > self.max_key
                     {
                         return Ok(Some((line, value)));
                     }
+                    // Copy the key out of the reusable record buffer before saving
+                    // it. The next midpoint or query can overwrite that scratch
+                    // space.
                     saved.extend_from_slice(stored_key);
                     self.last = Some(Entry {
                         key: saved,
@@ -199,10 +314,14 @@ impl ExternalKeyLookup {
                 }
             }
         }
+        // A clean miss leaves any prior successful hit in place. The empty
+        // interval establishes absence without reading an extra directory entry.
         Ok(None)
     }
 }
 
+// Read from either file through a caller-sized optional page cache. The cache
+// shares one byte allowance between index pages and run data pages.
 fn read_cached(
     pages: &mut Vec<Page>,
     file: &mut File,
@@ -212,6 +331,8 @@ fn read_cached(
     mut offset: u64,
     cache_bytes: usize,
 ) -> Result<()> {
+    // Check the entire requested extent so cached and direct reads reject the same
+    // overflow or out-of-file range before modifying the caller's buffer.
     if offset
         .checked_add(output.len() as u64)
         .filter(|end| *end <= file_bytes)
@@ -219,23 +340,39 @@ fn read_cached(
     {
         return Err(invalid_run());
     }
+    // Account for a full payload allocation and its metadata slot for each page.
+    // The resulting bound applies to retained capacity even when the last page is
+    // short.
     let page_limit = (cache_bytes / (PAGE_BYTES + std::mem::size_of::<Page>())).min(CACHE_PAGES);
+    // Discard the old vector when its allocation exceeds the new grant. Merely
+    // truncating the number of cached pages would keep oversized metadata
+    // capacity.
     if pages.capacity() > page_limit {
         *pages = Vec::new();
     }
+    // When a full cache slot does not fit, use the same bounded read directly. No
+    // page needs to be allocated for correctness.
     if page_limit == 0 {
         return read_at(file, output, offset);
     }
     while !output.is_empty() {
+        // Align down to the containing page. Key cache entries by both file kind
+        // and byte offset because the index and data can share the same numeric
+        // offsets.
         let start = offset / PAGE_BYTES as u64 * PAGE_BYTES as u64;
         let found = pages
             .iter()
             .position(|page| page.index == index && page.offset == start);
+        // Take a matching page out of the list while using it. Putting it at the
+        // end below makes it most recently used, leaving eviction at the front.
         let mut page = if let Some(position) = found {
             pages.remove(position)
         } else if pages.len() == page_limit {
             pages.remove(0)
         } else {
+            // Verify metadata capacity after allocation as well as on entry. An
+            // optional cache can abandon an allocator-rounded capacity and finish
+            // this request directly.
             if pages.capacity() < page_limit
                 && (pages.try_reserve_exact(page_limit - pages.len()).is_err()
                     || pages.capacity() > page_limit)
@@ -251,11 +388,16 @@ fn read_cached(
                 bytes: Vec::new(),
             }
         };
+        // On a miss, read the actual remaining file bytes for the last page. This
+        // avoids requiring padding beyond the recorded extent.
         if found.is_none() {
             let length = (file_bytes - start).min(PAGE_BYTES as u64) as usize;
             if page.bytes.capacity() < length {
                 page.bytes = Vec::new();
             }
+            // Reuse an evicted page's buffer if it already fits. If allocating
+            // another buffer fails or rounds above the page size, read directly
+            // into the caller's remaining slice.
             if page.bytes.capacity() < length
                 && (page
                     .bytes
@@ -267,9 +409,15 @@ fn read_cached(
             }
             page.bytes.resize(length, 0);
             read_at(file, &mut page.bytes, start)?;
+            // Publish page identity only after the exact fill succeeded. A failed
+            // fill drops the detached page without installing stale data at the
+            // new offset.
             page.index = index;
             page.offset = start;
         }
+        // Copy just the requested portion within this page. Update both the
+        // destination slice and absolute offset to complete reads that cross page
+        // boundaries.
         let within = (offset - start) as usize;
         let count = output.len().min(page.bytes.len() - within);
         output[..count].copy_from_slice(&page.bytes[within..within + count]);
@@ -280,6 +428,9 @@ fn read_cached(
     Ok(())
 }
 
+// Read exactly at the requested byte position. Unix uses positional I/O, while
+// other targets use a seek on the mutably borrowed file followed by the same
+// exact-read check.
 fn read_at(file: &mut File, bytes: &mut [u8], offset: u64) -> Result<()> {
     #[cfg(unix)]
     {
@@ -294,6 +445,9 @@ fn read_at(file: &mut File, bytes: &mut [u8], offset: u64) -> Result<()> {
     Ok(())
 }
 
+// An early EOF inside the already validated extent means an incomplete run. Keep
+// other read failures as I/O errors so callers can distinguish operational failure
+// from corrupt layout.
 fn read_error(error: std::io::Error) -> Error {
     if error.kind() == std::io::ErrorKind::UnexpectedEof {
         invalid_run()

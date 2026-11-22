@@ -1,8 +1,11 @@
 # Dependency And License Summary
 
-The core crate declares no third-party Cargo dependencies. Core source follows the
+On Unix the core uses libc 0.2.191 (MIT OR Apache-2.0) for native file locking. Core source follows the
 existing repository Apache-2.0 LICENSE; Cargo metadata is synchronized to it.
 The packaged LICENSE is byte-identical to the repository license text.
+
+Directory ingestion uses encoding_rs 0.8.35 and cfg-if 1.0.5. The locked source
+inventory includes their upstream licenses, encoding data notice and copyright.
 
 Compiled executables also use the Rust standard library and platform runtime.
 The Rust project uses MIT/Apache-2.0 terms; binary release preparation must include

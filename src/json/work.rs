@@ -5,17 +5,39 @@ use super::{JsonInputKind, JsonLimitReason, JsonProcessingPolicyV1};
 use crate::{Error, ErrorCode, Result};
 
 pub(crate) struct WorkLedger {
+    // Process in which the ledger and its mutex were created. A forked handle must
+    // not interact with synchronization state inherited from its parent.
     pid: u32,
+    // Shared counters and ceilings updated under the same lock, including when
+    // ownership moves between budget categories.
     state: Mutex<LedgerState>,
 }
 
+// JSON and workspace share the working limit. Catalog allocations and cache
+// entries have their own admission checks; all four also count toward the
+// total. A buffer moving from scratch into retained storage is still the same
+// allocation. Transfer its credit under the ledger lock so another operation
+// can never spend the bytes in between release and reacquisition.
 struct LedgerState {
+    // Maximum combined JSON and general workspace bytes across operations attached
+    // to this ledger.
     limit: usize,
+    // Maximum combined bytes for JSON, workspace, retained catalog and cache.
+    // Individual categories can still reject a request below this total.
     total_limit: usize,
+    // Separate ceiling for bytes promoted to the retained catalog.
     catalog_limit: usize,
+    // JSON bytes charged across attached operations, including spare bytes of
+    // active reservations.
     used: usize,
+    // General workspace bytes currently charged to attached operations. Together
+    // with used, these consume the shared working limit.
     workspace_used: usize,
+    // Resident catalog bytes charged to this ledger. Transferring storage into the
+    // catalog changes its category without allocating it a second time.
     catalog_used: usize,
+    // Resident cache bytes charged across entries and collections, also subject to
+    // the cache limit supplied by the caller.
     cache_used: usize,
 }
 
@@ -40,13 +62,23 @@ impl WorkLedger {
         Self::with_limits(limit, limit, limit)
     }
 
+    // Limits describe separate ceilings, not reserved pools of memory. Several
+    // operations may share this ledger, so an otherwise small request can fail
+    // because other owners already consumed its working or total headroom.
     pub(crate) fn with_limits(limit: usize, catalog_limit: usize, total_limit: usize) -> Self {
         Self {
+            // Record the creating process before the first reservation exists.
+            // Drop paths compare this identity without acquiring the mutex, which
+            // can be inherited in a locked state after a fork.
             pid: std::process::id(),
             state: Mutex::new(LedgerState {
                 limit,
                 total_limit,
                 catalog_limit,
+                // A new ledger starts with no outstanding bytes in any category.
+                // Limits may deliberately be zero, so a zero-byte owner can still
+                // be meaningful without promising that its first growth will
+                // succeed.
                 used: 0,
                 workspace_used: 0,
                 catalog_used: 0,
@@ -58,26 +90,44 @@ impl WorkLedger {
 
 impl LedgerState {
     fn try_admit_cache(&mut self, additional: u128, limit: usize) -> bool {
+        // Requests can be wider than a host allocation size. Reject an
+        // individually impossible request before adding it to resident cache
+        // credit or narrowing it for the stored counter.
         if additional > limit as u128 {
             return false;
         }
         let cache = self.cache_used as u128 + additional;
         let total =
             cache + self.used as u128 + self.workspace_used as u128 + self.catalog_used as u128;
+        // Enforce the caller's cache allowance against all resident cache bytes on
+        // this ledger, then include JSON, workspace and catalog bytes in the
+        // parent check. Optional admission reports a miss with no counter update.
         if cache > limit as u128 || total > self.total_limit as u128 {
             return false;
         }
+        // Both cache and parent limits are host-sized. After the wide comparisons
+        // pass, narrowing the accepted cache total to usize cannot discard any
+        // part of the requested allocation.
         self.cache_used = cache as usize;
         true
     }
 
     fn working_available(&self) -> usize {
+        // Working headroom can be limited by either the working pool itself or
+        // other categories using the parent total. Taking the smaller remainder
+        // enforces both invariants when a caller asks for a preferred buffer.
         let working = self.used + self.workspace_used;
         (self.limit - working).min(self.total_limit - working - self.catalog_used - self.cache_used)
     }
 
     fn admit_workspace(&self, extra: u128, phase: &'static str) -> Result<()> {
+        // Saturating wide addition keeps an unrepresentably large request on the
+        // rejection path. Resource errors carry the attempted combined usage and
+        // the phase that made the request.
         let working = (self.used as u128 + self.workspace_used as u128).saturating_add(extra);
+        // Workspace competes with JSON input and results for the same working
+        // pool. Catalog and cache use distinct categories that enter only the
+        // later check against the total ceiling.
         if working > self.limit as u128 {
             return Err(Error::resource_exhausted(
                 "memory",
@@ -86,6 +136,9 @@ impl LedgerState {
                 working,
             ));
         }
+        // Only consult the parent ceiling after the working request fits. If both
+        // ceilings would reject the same allocation, the first error identifies
+        // the more local working limit.
         let total = working + self.catalog_used as u128 + self.cache_used as u128;
         if total > self.total_limit as u128 {
             return Err(Error::resource_exhausted(
@@ -100,6 +153,9 @@ impl LedgerState {
 
     fn admit_catalog(&self, additional: u128, transferred: usize) -> Result<()> {
         let catalog = self.catalog_used as u128 + additional;
+        // The catalog has its own retained quota even for memory that was already
+        // admitted as working storage. Check the full destination amount before
+        // discounting a transfer from total usage.
         if catalog > self.catalog_limit as u128 {
             return Err(Error::resource_exhausted(
                 "catalog",
@@ -108,9 +164,17 @@ impl LedgerState {
                 catalog,
             ));
         }
+        // Subtract only bytes already held on the same ledger. A fresh catalog
+        // allocation increases parent usage. Promoting a precharged allocation
+        // changes its category while leaving that portion of parent usage
+        // constant.
         let total =
             self.used as u128 + self.workspace_used as u128 + catalog + self.cache_used as u128
                 - transferred as u128;
+        // A catalog-specific refusal reports resource catalog. Fresh catalog
+        // growth can fit that quota yet report resource memory when other
+        // categories have filled the parent ledger. A pure ownership transfer
+        // leaves total usage unchanged.
         if total > self.total_limit as u128 {
             return Err(Error::resource_exhausted(
                 "memory",
@@ -124,11 +188,18 @@ impl LedgerState {
 }
 
 pub(crate) struct CacheReservation {
+    // Ledger against which this cache allocation was admitted. Dropping or
+    // shrinking it must refund the same ledger.
     ledger: Arc<WorkLedger>,
+    // Bytes this owner currently holds as cache credit, including transfers from a
+    // workspace reservation.
     bytes: usize,
 }
 
 impl CacheReservation {
+    // Two caches with identical configured limits can still belong to different
+    // databases. Require ledger identity before moving credit between their local
+    // owners.
     pub(crate) fn assert_same_ledger(&self, other: &Self) {
         assert!(Arc::ptr_eq(&self.ledger, &other.ledger));
     }
@@ -139,6 +210,9 @@ impl CacheReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Global admission and the owner's byte count advance together. A false
+        // return leaves the previous reservation intact so a cache can keep
+        // serving from it or choose to evict it.
         if !ledger.try_admit_cache(additional, limit) {
             return false;
         }
@@ -147,6 +221,9 @@ impl CacheReservation {
     }
 
     pub(crate) fn transfer_to(&mut self, target: &mut Self, bytes: usize) {
+        // Moving bytes between two cache guards requires no new global admission.
+        // The shared cache total already includes the source charge, and exclusive
+        // access to both guards prevents a second transfer of the same bytes.
         self.assert_same_ledger(target);
         assert!(bytes <= self.bytes);
         // Both guards are exclusively borrowed; the shared total never changes.
@@ -163,23 +240,38 @@ impl CacheReservation {
         limit: usize,
     ) -> bool {
         assert!(bytes <= work.bytes);
+        // Lock the workspace's operation before the shared ledger, as other
+        // cross-category transfers do. Update both views under those guards so
+        // concurrent admissions cannot spend an in-between credit.
         let mut operation = work
             .context
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Check the workspace's currently attached ledger while its operation
+        // state is locked. Taking the ledger from an earlier unlocked snapshot
+        // could assign a refund to a different database after an attachment.
         assert!(Arc::ptr_eq(&operation.ledger, &self.ledger));
         let mut ledger = self
             .ledger
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // This allocation is already inside the parent total as workspace. Check
+        // only whether its new cache category can accept it, with no mutation to
+        // either owner on refusal.
         if ledger.cache_used as u128 + bytes as u128 > limit as u128 {
             return false;
         }
+        // The operation ceases to own these bytes as temporary work. Moving them
+        // out of both workspace counters lets other operations use working
+        // headroom even though total resident bytes stay constant.
         ledger.workspace_used -= bytes;
         operation.workspace_used -= bytes;
         ledger.cache_used += bytes;
+        // The shared ledger counters and the two individual owners must describe
+        // the same transfer. Update the outgoing owner too so dropping it later
+        // cannot refund bytes now owned by the cache.
         work.bytes -= bytes;
         self.bytes += bytes;
         true
@@ -196,6 +288,9 @@ impl CacheReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Refund only the difference between the old and retained sizes. The
+        // remaining reservation still belongs to this cache and cannot be offered
+        // to another owner.
         ledger.cache_used -= self.bytes - bytes;
         self.bytes = bytes;
     }
@@ -203,6 +298,10 @@ impl CacheReservation {
 
 impl Drop for CacheReservation {
     fn drop(&mut self) {
+        // A fork child has its own copy of the ledger memory but may have
+        // inherited a locked mutex. Skip inherited refunds there before taking any
+        // lock. The parent's original owner remains responsible for its
+        // accounting.
         if self.bytes != 0 && self.ledger.pid == std::process::id() {
             self.retain(0);
         }
@@ -210,11 +309,16 @@ impl Drop for CacheReservation {
 }
 
 pub(crate) struct CatalogReservation {
+    // Owner of the catalog quota and total quota that backed this reservation.
     ledger: Arc<WorkLedger>,
+    // Retained bytes charged to the catalog by this owner. Temporary input can
+    // transfer into the charge before becoming a permanent row.
     bytes: usize,
 }
 
 impl CatalogReservation {
+    // Attach incoming operations to this catalog's ledger so later promotions can
+    // transfer already admitted input storage without crossing database budgets.
     pub(crate) fn attach_context(&self, context: &JsonOperationContext) -> Result<()> {
         context.attach(Arc::clone(&self.ledger), JsonInputKind::StoredJson)
     }
@@ -229,6 +333,9 @@ impl CatalogReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Ordinary catalog growth has no source reservation to consume. Pass zero
+        // transferred bytes so all of the new storage counts against both catalog
+        // and total headroom.
         ledger.admit_catalog(additional as u128, 0)?;
         ledger.catalog_used += additional;
         self.bytes += additional;
@@ -236,6 +343,9 @@ impl CatalogReservation {
     }
 
     pub(crate) fn retain(&mut self, bytes: usize) {
+        // Retaining catalog storage can only shrink an existing reservation. New
+        // allocations must go through grow or absorb so the category and parent
+        // limits get a chance to refuse them.
         assert!(bytes <= self.bytes);
         let mut ledger = self
             .ledger
@@ -255,8 +365,14 @@ impl CatalogReservation {
         json_bytes: usize,
         workspace_bytes: usize,
     ) -> Result<()> {
+        // Only covered JSON bytes can travel with an allocation. A reservation may
+        // also hold unused growth credit, but moving that portion as if it were
+        // live input would undercharge future work in the source operation.
         assert!(json_bytes <= json.covered);
         assert!(workspace_bytes <= workspace.as_ref().map_or(0, |work| work.bytes));
+        // Both input owners must belong to one operation because the transfer
+        // decrements its single pair of JSON and workspace counters. Sharing a
+        // database ledger alone is insufficient.
         if let Some(workspace) = &workspace {
             assert!(Arc::ptr_eq(&json.context.state, &workspace.context.state));
         }
@@ -271,7 +387,13 @@ impl CatalogReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Add the JSON and ordinary workspace portions for the catalog admission
+        // check. Debit the two source categories separately after the check
+        // succeeds.
         let bytes = json_bytes + workspace_bytes;
+        // Check the complete promotion before changing any counter. A refused
+        // catalog admission leaves every input reservation valid and leaves the
+        // destination catalog's previous charge intact.
         ledger.admit_catalog(bytes as u128, bytes)?;
         ledger.used -= json_bytes;
         operation.used -= json_bytes;
@@ -279,6 +401,9 @@ impl CatalogReservation {
         operation.workspace_used -= workspace_bytes;
         ledger.catalog_used += bytes;
         self.bytes += bytes;
+        // Move the covered portion out of both JSON counters. Any spare grant
+        // stays with the input owner. The catalog receives just the actual storage
+        // passed across.
         json.bytes -= json_bytes;
         json.covered -= json_bytes;
         if let Some(workspace) = &mut workspace {
@@ -290,6 +415,9 @@ impl CatalogReservation {
 
 impl Drop for CatalogReservation {
     fn drop(&mut self) {
+        // Only a reservation's originating process should touch its ledger on
+        // destruction. Skipping a fork-child refund also avoids entering a mutex
+        // whose owner thread did not survive the fork.
         if self.bytes != 0 && self.ledger.pid == std::process::id() {
             self.retain(0);
         }
@@ -298,30 +426,55 @@ impl Drop for CatalogReservation {
 
 #[derive(Clone)]
 pub(crate) struct JsonOperationContext {
+    // Owning process for this operation. Fork checks must precede touching its
+    // shared mutex.
     pid: u32,
+    // State shared by clones of this operation context. Independent operations can
+    // have separate local totals while sharing a database ledger.
     state: Arc<Mutex<OperationState>>,
     // Optional diagnostics are independent of the resource ledger. The stage
     // belongs to this clone; changing it cannot relabel other live owners.
     search_cost: Option<crate::search_cost::Handle>,
+    // Optional observation of actual primary commit boundaries for a host
+    // operation. Propagates to nested work without inferring commits from return
+    // values.
     write_progress: Option<crate::write_progress::WriteProgress>,
+    // Weak link to maintenance-effect tracking for this call. Retaining catalog or
+    // cache state must not keep a finished observation alive.
+    pub(crate) maintenance: crate::maintenance_progress::Tracking,
 }
 
 struct OperationState {
+    // Ledger to which this operation currently contributes. Attaching a preexisting
+    // context must account for the bytes it already holds.
     ledger: Arc<WorkLedger>,
+    // This operation's portion of the ledger's JSON-byte charge, including credit
+    // held by its cloned reservations.
     used: usize,
+    // General scratch and retained workspace bytes owned by reservations from this
+    // operation.
     workspace_used: usize,
 }
 
 impl JsonOperationContext {
+    // This check is safe before taking the operation mutex because pid is stored
+    // directly on the context. Destructors can use it to avoid touching inherited
+    // synchronization state.
     pub(crate) fn is_current_process(&self) -> bool {
         self.pid == std::process::id()
     }
 
+    // Clone the ledger currently attached to the operation under its lock. A
+    // consumer needing a longer-lived catalog or cache owner can then hold that
+    // ledger independently of later context clones.
     pub(crate) fn ledger(&self) -> Arc<WorkLedger> {
         let operation = self.state.lock().unwrap_or_else(|error| error.into_inner());
         Arc::clone(&operation.ledger)
     }
 
+    // Pointer equality distinguishes two views of the same operation from
+    // independently created operations using one shared database ledger. Only the
+    // former can merge local JSON ownership directly.
     pub(crate) fn same_operation(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
     }
@@ -330,23 +483,35 @@ impl JsonOperationContext {
         &self,
         progress: &crate::write_progress::WriteProgress,
     ) -> Self {
+        // Observation is attached to the returned clone. Nested work can report
+        // actual append boundaries while both views continue charging the same
+        // underlying operation.
         let mut context = self.clone();
         context.write_progress = Some(progress.clone());
         context
     }
 
+    // A planner can declare the whole import's expected record count before the
+    // first storage append. The observer retains its first declared total instead
+    // of overwriting it with an individual batch size.
     pub(crate) fn expect_write_records(&self, count: usize) {
         if let Some(progress) = &self.write_progress {
             progress.expect_records(count);
         }
     }
 
+    // Starting an append records that its result can be uncertain if the write
+    // fails. Confirmation records the affected record count and the batch and
+    // sequence numbers returned by storage.
     pub(crate) fn begin_append(&self, count: usize) {
         if let Some(progress) = &self.write_progress {
             progress.begin_append(count);
         }
     }
 
+    // A batch ID and sequence number are available only at confirmation. Record
+    // them on the observer here rather than inferring a successful commit from a
+    // requested or started append.
     pub(crate) fn confirm_append(&self, records: usize, batch_id: u64, sequence_no: u64) {
         if let Some(progress) = &self.write_progress {
             progress.confirmed(records, batch_id, sequence_no);
@@ -360,10 +525,16 @@ impl JsonOperationContext {
     }
 
     pub(crate) fn inherit_search_cost(&mut self, source: &Self) {
+        // An index-cache load can need its own operation lifetime yet be
+        // attributable to the search that triggered it. Copy just the diagnostic
+        // handle, leaving both operations' resource counters independent.
         self.search_cost = source.search_cost.clone();
     }
 
     pub(crate) fn search_cost_stage(&self, stage: crate::search_cost::Stage) -> Self {
+        // Change the stage on a cloned diagnostic handle. Earlier reservations may
+        // still carry the old stage, but their accounting uses the same operation
+        // and their measurements keep the original attribution.
         let mut context = self.clone();
         context.search_cost = context.search_cost.map(|handle| handle.stage(stage));
         context
@@ -381,6 +552,9 @@ impl JsonOperationContext {
         }
     }
 
+    // A stage counter is additive, but a window count records a cardinality
+    // observation. Use the trace's count operation so repeated observations do not
+    // inflate the reported size.
     pub(crate) fn search_cost_count(&self, count: crate::search_cost::Count, amount: usize) {
         if let Some(handle) = &self.search_cost {
             handle.count(count, amount);
@@ -425,10 +599,14 @@ impl JsonOperationContext {
     }
 
     pub(crate) fn new(ledger: Arc<WorkLedger>) -> Self {
+        // Each new operation begins with zero local charges on the supplied
+        // ledger. Clones share this operation state, whereas another call using
+        // the same Arc starts independent local counters.
         Self {
             pid: ledger.pid,
             search_cost: None,
             write_progress: None,
+            maintenance: Default::default(),
             state: Arc::new(Mutex::new(OperationState {
                 ledger,
                 used: 0,
@@ -438,6 +616,9 @@ impl JsonOperationContext {
     }
 
     pub(crate) fn standalone() -> Self {
+        // A standalone entry point has its own default ledger. Database paths can
+        // later attach a context to the handle's ledger and must account for any
+        // bytes already retained during parsing.
         Self::new(Arc::new(WorkLedger::default()))
     }
 
@@ -445,17 +626,26 @@ impl JsonOperationContext {
         JsonReservation {
             context: self.clone(),
             bytes: 0,
+            // Keep bytes granted and bytes actually covered separate. Aggregate
+            // construction may reserve ahead of the next child and later return
+            // the unclaimed remainder.
             covered: 0,
             aggregate: false,
         }
     }
 
+    // Aggregate guards can reserve ahead for several small descendants. Start that
+    // behavior only on aggregate construction, allowing ordinary reservations to
+    // admit individual allocations without speculative growth.
     pub(super) fn aggregate_reservation(&self) -> JsonReservation {
         let mut work = self.reservation();
         work.start_aggregate();
         work
     }
 
+    // This owner charges general working memory, including native buffers beside
+    // the JSON tree. Sharing the operation keeps conversions between it and JSON
+    // from counting the same live allocation twice.
     pub(crate) fn workspace_reservation(&self) -> WorkspaceReservation {
         WorkspaceReservation {
             context: self.clone(),
@@ -464,6 +654,9 @@ impl JsonOperationContext {
     }
 
     pub(crate) fn catalog_reservation(&self) -> CatalogReservation {
+        // A catalog reservation stores a direct reference to the operation's
+        // current ledger. Its retained bytes can outlive the short-lived operation
+        // that built the catalog.
         let operation = self.state.lock().unwrap_or_else(|error| error.into_inner());
         CatalogReservation {
             ledger: Arc::clone(&operation.ledger),
@@ -480,6 +673,9 @@ impl JsonOperationContext {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Refusing an optional cache is a normal fallback and does not mark a
+        // source invalid. On success retain the exact ledger that accepted the
+        // charge so later drops return it to the correct database.
         if !ledger.try_admit_cache(bytes, limit) {
             return None;
         }
@@ -490,14 +686,30 @@ impl JsonOperationContext {
     }
 
     pub(crate) fn attach(&self, target: Arc<WorkLedger>, kind: JsonInputKind) -> Result<()> {
+        // Hold the operation lock throughout the transfer. Its reservations
+        // consult the current ledger when shrinking or dropping, so none can
+        // refund the old owner between moving counters and publishing the new
+        // owner.
         let mut operation = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let previous = Arc::clone(&operation.ledger);
+        // Attaching to the same Arc is already complete. Return before trying to
+        // lock the same ledger twice or readmit bytes the destination still owns.
         if Arc::ptr_eq(&previous, &target) {
             return Ok(());
         }
+        // A parser can own JSON values and temporary workspace before it is attached
+        // to a database. Check both charges against the destination while the
+        // operation and ledgers are locked. On refusal the guards must still refund
+        // the original ledger.
         let transfer = |source: &mut LedgerState, destination: &mut LedgerState| {
+            // Check the operation's JSON charge against both its policy cap and
+            // the space the target can supply. Workspace follows in a separate
+            // combined check because its refusal carries the resource phase.
             let limit =
                 JsonProcessingPolicyV1::WORK_BUDGET_BYTES.min(destination.working_available());
+            // A JSON transfer can exceed the target's effective JSON limit even if
+            // the target ledger has not exhausted every category. Report that
+            // category failure before the general shared-workspace preflight.
             if operation.used > limit {
                 return Err(kind.limit_error(
                     JsonLimitReason::WorkBudget,
@@ -505,17 +717,29 @@ impl JsonOperationContext {
                     Some(operation.used),
                 ));
             }
+            // The target currently accounts for neither of this operation's
+            // charges. Test their sum before subtracting anything from the source,
+            // while the source still owns both on failure.
             destination.admit_workspace(
                 operation.used as u128 + operation.workspace_used as u128,
                 "operation_scratch",
             )?;
+            // After the fallible checks, move JSON and workspace into their
+            // corresponding destination categories. Their distinction still
+            // matters for later per-operation JSON admission.
             source.used -= operation.used;
             destination.used += operation.used;
+            // Only this operation's charges leave the source ledger. Other
+            // operations sharing that ledger keep their own JSON, workspace,
+            // catalog and cache counters.
             source.workspace_used -= operation.workspace_used;
             destination.workspace_used += operation.workspace_used;
             Ok(())
         };
         // A stable lock order also permits simultaneous transfers in opposite directions.
+        // Order locks by ledger allocation identity rather than transfer
+        // direction. Concurrent A-to-B and B-to-A attaches then acquire the same
+        // two mutexes in the same order.
         if Arc::as_ptr(&previous) < Arc::as_ptr(&target) {
             let mut source = previous
                 .state
@@ -526,6 +750,9 @@ impl JsonOperationContext {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             transfer(&mut source, &mut destination)?;
+        // Reverse the acquisition sequence when the destination sorts first, but
+        // pass source and destination to transfer in their semantic order.
+        // Changing lock order must not reverse the direction of the accounting.
         } else {
             let mut destination = target
                 .state
@@ -537,6 +764,9 @@ impl JsonOperationContext {
                 .unwrap_or_else(|error| error.into_inner());
             transfer(&mut source, &mut destination)?;
         }
+        // All outstanding guards share the operation, so switching this one ledger
+        // pointer redirects their future release. Keep it pointed at the source
+        // until the counter transfer has succeeded.
         operation.ledger = target;
         Ok(())
     }
@@ -548,6 +778,9 @@ impl JsonOperationContext {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // When no reliable requested size is available, still report the effective
+        // JSON allowance. The structured error can omit actual rather than
+        // inventing a measurable allocation size.
         let limit = effective_limit(&operation, &ledger);
         kind.limit_error(JsonLimitReason::WorkBudget, limit, None)
     }
@@ -559,18 +792,28 @@ impl JsonOperationContext {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // The absolute limit includes bytes already held by this operation.
+        // Subtract that usage when answering how much additional JSON work can
+        // still be admitted.
         effective_limit(&operation, &ledger) - operation.used
     }
 }
 
 fn effective_limit(operation: &OperationState, ledger: &LedgerState) -> usize {
+    // Add back this operation's existing JSON usage when computing its absolute
+    // ceiling. The ledger's remaining headroom is already net of those bytes and
+    // of other operations' live allocations.
     JsonProcessingPolicyV1::WORK_BUDGET_BYTES.min(ledger.working_available() + operation.used)
 }
 
 // This is a lease for bounded working buffers, not an allocator/RSS measurement.
 // Keep it alive until the buffers are freed or transfer it with their ownership.
 pub(crate) struct WorkspaceReservation {
+    // Operation that must receive the refund or ownership transfer for this
+    // workspace.
     context: JsonOperationContext,
+    // Bytes of general workspace this reservation currently owns, independent of
+    // any preferred size requested by the caller.
     bytes: usize,
 }
 
@@ -588,6 +831,9 @@ impl WorkspaceReservation {
         bytes: usize,
         kind: JsonInputKind,
     ) -> Result<JsonReservation> {
+        // Transfer only bytes held by this workspace lease. The returned JSON
+        // lease covers that same allocation, which must never become uncharged
+        // between these two owners.
         assert!(bytes <= self.bytes);
         let mut operation = self
             .context
@@ -599,12 +845,25 @@ impl WorkspaceReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // These bytes already count toward shared memory as workspace. Converting
+        // them to retained JSON also subjects them to the JSON allowance. Check that
+        // allowance before changing either view so refusal leaves the original
+        // reservation intact.
         let limit = JsonProcessingPolicyV1::WORK_BUDGET_BYTES
+            // The shared ledger already counts the bytes as workspace. Add them
+            // back for this category check because their conversion will not
+            // consume new shared capacity.
             .min(ledger.working_available() + operation.used + bytes);
+        // Compare existing JSON plus the conversion amount. A transfer of already
+        // charged workspace can still cross the per-operation JSON ceiling even
+        // though no new shared bytes were allocated.
         let requested = operation.used + bytes;
         if requested > limit {
             return Err(kind.limit_error(JsonLimitReason::WorkBudget, limit, Some(requested)));
         }
+        // Move both the operation's and the ledger's category counters under the
+        // same locks. Total working usage stays constant throughout a successful
+        // ownership conversion.
         operation.workspace_used -= bytes;
         ledger.workspace_used -= bytes;
         operation.used += bytes;
@@ -613,6 +872,9 @@ impl WorkspaceReservation {
         Ok(JsonReservation {
             context: self.context.clone(),
             bytes,
+            // Mark all transferred bytes covered immediately. A later aggregate
+            // reservation must not treat live payload credit as spare admission it
+            // could spend on another field.
             covered: bytes,
             aggregate: false,
         })
@@ -623,8 +885,14 @@ impl WorkspaceReservation {
     }
 
     pub(crate) fn merge(&mut self, mut other: Self) {
+        // Only guards belonging to the same operation can merge, even if that
+        // operation shares a database ledger with others. Move ownership locally
+        // and leave ledger totals as they were.
         assert!(Arc::ptr_eq(&self.context.state, &other.context.state));
         self.bytes += other.bytes;
+        // Zero the consumed lease before it drops. Its bytes are now part of the
+        // receiver, so allowing its destructor to refund them would leave live
+        // allocations without credit.
         other.bytes = 0;
     }
 
@@ -634,6 +902,9 @@ impl WorkspaceReservation {
 
     pub(crate) fn retain(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes);
+        // An unchanged grant needs no shared ledger access. Retaining fewer bytes
+        // takes the normal refund path so another operation can see the freed
+        // headroom.
         if bytes == self.bytes {
             return;
         }
@@ -647,6 +918,9 @@ impl WorkspaceReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Use the ledger currently attached to this operation. It may differ from
+        // the ledger that originally admitted the buffer, but attach transferred
+        // the outstanding workspace with it.
         let released = self.bytes - bytes;
         operation.workspace_used -= released;
         ledger.workspace_used -= released;
@@ -668,6 +942,9 @@ impl WorkspaceReservation {
         preferred: u128,
         phase: &'static str,
     ) -> Result<usize> {
+        // A preferred size smaller than the minimum is a caller error. Both values
+        // can exceed usize during admission so overflow is reported with the
+        // requested size before selecting an implementable grant.
         assert!(minimum <= preferred);
         let mut operation = self
             .context
@@ -679,11 +956,20 @@ impl WorkspaceReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // The arguments are absolute target sizes. Test only the extra minimum
+        // needed beyond this lease's current bytes, and do not shrink a larger
+        // existing reservation implicitly.
         let minimum_extra = minimum.saturating_sub(self.bytes as u128);
         ledger.admit_workspace(minimum_extra, phase)?;
+        // Once the minimum fits, grant as much of the preferred size as current
+        // headroom allows. The available count bounds the wide request before
+        // converting to a native-size grant.
         let additional = preferred
             .saturating_sub(self.bytes as u128)
             .min(ledger.working_available() as u128) as usize;
+        // Update the ledger, the operation and this individual lease while both
+        // mutexes are held. Future release must remove the same additional amount
+        // at each level.
         ledger.workspace_used += additional;
         operation.workspace_used += additional;
         self.bytes += additional;
@@ -693,6 +979,9 @@ impl WorkspaceReservation {
 
 impl Drop for WorkspaceReservation {
     fn drop(&mut self) {
+        // A fork child inherits the parent's memory image and locks but cannot
+        // return the parent's credit. Check process identity before retain would
+        // enter either inherited ledger mutex.
         if self.bytes != 0 && self.context.is_current_process() {
             self.retain(0);
         }
@@ -704,32 +993,56 @@ pub(crate) fn reserve_heap_slot<T: Ord>(
     work: &mut WorkspaceReservation,
     limit: usize,
 ) -> Result<()> {
+    // A spare heap slot has already been paid for and can accept a candidate
+    // without a new grant. Grow only at the boundary where insertion would ask the
+    // allocator for more storage.
     if heap.len() < heap.capacity() {
         return Ok(());
     }
     let size = std::mem::size_of::<T>();
     let old_capacity = heap.capacity();
     let before = work.reserved_bytes();
+    // The heap's owner can also cover the retained candidates' IDs or
+    // explanations. Isolate those payload bytes before replacing the slots so
+    // later capacity changes preserve their separate credit.
     let payload = before - old_capacity * size;
+    // Count capacity in elements but admit bytes in u128. Growing to one more slot
+    // must include the entire prospective backing buffer, even when just one new
+    // candidate is about to be inserted.
     let minimum = heap.len() as u128 + 1;
+    // Callers reject the incoming candidate or evict a loser when the result limit
+    // is full. This makes room for one more slot. The cap here limits speculative
+    // growth.
     let preferred = (old_capacity as u128 * 2).max(4).min(limit as u128);
     let granted = work.grow_to_wide(
         before as u128 + minimum * size as u128,
         before as u128 + preferred * size as u128,
         "operation_scratch",
     )?;
+    // A byte grant need not contain an integral number of slots. Round down before
+    // requesting native capacity and release any unusable remainder while both
+    // buffers may still be live.
     let capacity = (granted - before) / size;
     // Keep both arrays charged until the old allocation has actually been replaced.
     work.retain(before + capacity * size);
+    // Allocator refusal leaves the original heap intact. Return only the
+    // speculative replacement budget and preserve the old array and payload
+    // charge.
     if let Err(error) = heap.try_reserve_exact(capacity - heap.len()) {
         work.retain(before);
         return Err(std::io::Error::other(error.to_string()).into());
     }
+    // An allocator that returned an unadmitted capacity cannot leave that heap
+    // accessible. Discard it and remove slot credit, retaining the separately
+    // tracked payload allowance on this error path.
     if heap.capacity() != capacity {
         drop(std::mem::take(heap));
         work.retain(payload);
         return Err(std::io::Error::other("candidate capacity exceeds reservation").into());
     }
+    // Replace the old slot component of the grant with the final array size. Keep
+    // the heap's separately measured payload even when the new capacity exactly
+    // equals the minimum.
     work.retain(payload + capacity * size);
     Ok(())
 }
@@ -741,29 +1054,46 @@ pub(crate) fn try_shrink_heap<T: Ord>(
     let capacity = heap.capacity();
     let count = heap.len();
     let size = std::mem::size_of::<T>();
+    // A full heap has no spare slots to reclaim, and zero-sized entries have no
+    // backing slot bytes. Report that the caller gained no workspace for its
+    // pending retry.
     if count == capacity || size == 0 {
         return Ok(false);
     }
     let before = work.reserved_bytes();
+    // Only the backing array gets smaller. Existing heap elements can own
+    // additional bytes under this lease, which must still be covered after their
+    // values move.
     let retained = before - capacity * size + count * size;
+    // An empty heap can release its array without first allocating another one.
+    // Keep any non-slot payload credit in the existing reservation.
     if count == 0 {
         drop(std::mem::take(heap));
         work.retain(retained);
         return Ok(true);
     }
     let peak = before as u128 + count as u128 * size as u128;
+    // Shrinking a nonempty heap needs temporary space for both arrays. A resource
+    // refusal means there was no usable opportunity to shrink, while a native
+    // allocation failure below remains an error.
     match work.grow_to_wide(peak, peak, "operation_scratch") {
         Err(error) if error.code() == ErrorCode::ResourceExhausted => return Ok(false),
         result => {
             result?;
         }
     }
+    // Build a separate replacement vector before touching the old heap. If
+    // reserving exact space fails, dropping that vector restores the pre-shrink
+    // state and existing candidate order.
     let mut values = Vec::new();
     if let Err(error) = values.try_reserve_exact(count) {
         drop(values);
         work.retain(before);
         return Err(std::io::Error::other(error.to_string()).into());
     }
+    // Check replacement capacity while the original heap is still intact. A
+    // mismatch can discard just the new Vec and roll back the speculative grant
+    // without losing retained candidates.
     if values.capacity() != count {
         drop(values);
         work.retain(before);
@@ -773,6 +1103,8 @@ pub(crate) fn try_shrink_heap<T: Ord>(
     let mut old = std::mem::take(heap).into_vec();
     values.append(&mut old);
     drop(old);
+    // The exact-size replacement releases the difference in slot bytes.
+    // Allocations owned by the elements stay with their moved values.
     *heap = BinaryHeap::from(values);
     work.retain(retained);
     Ok(true)
@@ -781,7 +1113,10 @@ pub(crate) fn try_shrink_heap<T: Ord>(
 // The array must be freed before its lease. Only an explicit ownership transfer
 // to a public result may detach it; growth beyond the admitted capacity is forbidden.
 pub(crate) struct ReservedVec<T> {
+    // Backing vector whose capacity is charged, including unused slots.
     values: Vec<T>,
+    // Keeps the charge alive while the vector or its transferred storage can be
+    // used.
     _work: WorkspaceReservation,
 }
 
@@ -813,12 +1148,21 @@ impl<T> ReservedVec<T> {
         phase: &'static str,
     ) -> Result<Self> {
         let mut work = context.workspace_reservation();
+        // Derive the byte count in u128 so a product too large for the address
+        // space still reaches the limit check at its real size before any
+        // allocator request.
         let bytes = (count as u128) * (std::mem::size_of::<T>() as u128);
+        // Ask the operation to admit the requested memory before trying the native
+        // allocation. If the allocator then fails, the local lease drops without
+        // exposing a partially usable vector.
         work.grow_to_wide(bytes, bytes, phase)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(count)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // Zero-sized elements use Vec's special capacity representation and
+        // require no backing allocation. For other types the measured slot grant
+        // must match the capacity actually returned.
         if std::mem::size_of::<T>() != 0 && values.capacity() != count {
             return Err(
                 std::io::Error::other("array allocation exceeds requested capacity").into(),
@@ -847,10 +1191,16 @@ impl<T> ReservedVec<T> {
     }
 
     pub(crate) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+        // Filtering changes the number of initialized elements while leaving the
+        // backing allocation intact. Keep the entire slot reservation until
+        // capacity is actually released or transferred.
         self.values.retain(keep);
     }
 
     pub(crate) fn push(&mut self, value: T) {
+        // This method is for callers that already know the bound. Prevent Vec from
+        // reallocating implicitly. Operations building an unknown number of
+        // elements must use the fallible growth path.
         assert!(
             self.values.len() < self.values.capacity(),
             "reserved array capacity exceeded"
@@ -868,6 +1218,9 @@ impl<T> ReservedVec<T> {
                 .checked_add(1)
                 .ok_or_else(|| std::io::Error::other("array capacity overflow"))?
                 as u128;
+            // Try geometric growth to amortize repeated appends, with one more
+            // element as the true minimum. A partially granted preference can
+            // still satisfy the insertion.
             let preferred = (self.values.capacity() as u128 * 2).max(4);
             let granted = self._work.grow_to_wide(
                 before as u128 + minimum * size as u128,
@@ -877,30 +1230,48 @@ impl<T> ReservedVec<T> {
             let capacity = (granted - before) / size;
             // The old array remains charged until its replacement is allocated.
             self._work.retain(before + capacity * size);
+            // A failed allocator reserve leaves the old Vec unchanged. Restore the
+            // pre-growth grant and let the caller distinguish that error from the
+            // capacity-mismatch branch below.
             if let Err(error) = self.values.try_reserve_exact(capacity - self.values.len()) {
                 self._work.retain(before);
                 return Err(std::io::Error::other(error.to_string()).into());
             }
+            // An unexpected capacity invalidates the bounded vector. Drop it
+            // before refunding its slot grant. Unlike an allocator refusal above,
+            // this path cannot keep the old elements accessible.
             if self.values.capacity() != capacity {
                 drop(std::mem::take(&mut self.values));
                 self._work.retain(0);
                 return Err(std::io::Error::other("array capacity exceeds reservation").into());
             }
+            // At this point the new capacity is exact and the old backing storage
+            // is gone. Keep only the new slot grant before publishing the appended
+            // element.
             self._work.retain(capacity * size);
         }
         self.values.push(value);
         Ok(())
     }
 
+    // Taking just the Vec transfers it out of this reservation's lifetime. A
+    // caller retaining the allocation within the operation needs into_parts so its
+    // grant follows it.
     pub(crate) fn into_vec(self) -> Vec<T> {
         self.values
     }
 
+    // Move backing storage and its existing workspace charge together without
+    // changing the operation's total. Consumers that adopt a different
+    // representation can then transfer that credit explicitly.
     pub(crate) fn into_parts(self) -> (Vec<T>, WorkspaceReservation) {
         (self.values, self._work)
     }
 
     pub(crate) fn from_reserved(values: Vec<T>, mut work: WorkspaceReservation) -> Self {
+        // A reclaimed or sorted Vec can arrive with temporary headroom in its
+        // lease. Trim the inherited credit to the actual slot capacity as the new
+        // owner adopts the vector.
         work.retain(values.capacity() * std::mem::size_of::<T>());
         Self {
             values,
@@ -921,6 +1292,9 @@ impl ReservedVec<u8> {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // Acquire the complete byte capacity before zero initialization. Resizing
+        // to that exact count then fills already admitted storage without another
+        // allocation.
         let mut bytes = Self::with_capacity(count, context, phase)?;
         bytes.values.resize(count, 0);
         Ok(bytes)
@@ -928,7 +1302,10 @@ impl ReservedVec<u8> {
 }
 
 pub(crate) struct ReservedString {
+    // Owned UTF-8 bytes of the string, with unused capacity still charged.
     value: String,
+    // Workspace for the string allocation. into_parts can move this credit with the
+    // string to its next owner.
     _work: WorkspaceReservation,
 }
 
@@ -946,6 +1323,9 @@ impl ReservedString {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // UTF-8 byte length determines the required capacity for this copy. Admit
+        // once before push_str so multibyte input does not trigger an unaccounted
+        // growth.
         let mut owned = Self::with_capacity(value.len(), context, phase)?;
         owned.value.push_str(value);
         Ok(owned)
@@ -953,6 +1333,9 @@ impl ReservedString {
 
     // Internal renderers must be deterministic. The second pass is bounded even
     // if a renderer changes its output after sizing.
+    // Use the same formatter to measure the intended byte length and then produce
+    // the text. Callers must supply a renderer whose output length is stable
+    // across both calls.
     pub(crate) fn build(
         context: &JsonOperationContext,
         phase: &'static str,
@@ -961,6 +1344,9 @@ impl ReservedString {
         Self::build_exact(rendered_string_bytes(&render)?, context, phase, render)
     }
 
+    // Use this entry when the caller already knows the expected encoded size. The
+    // writer uses the reserved capacity and completion checks the measured size
+    // against the actual output.
     pub(crate) fn build_exact(
         bytes: usize,
         context: &JsonOperationContext,
@@ -969,12 +1355,17 @@ impl ReservedString {
     ) -> Result<Self> {
         let mut owned = Self::with_capacity(bytes, context, phase)?;
         owned.append(render)?;
+        // A bounded write can still succeed with fewer bytes than promised. Reject
+        // that mismatch before handing the string to a caller that may rely on the
+        // exact length.
         if owned.value.len() != bytes {
             return Err(std::io::Error::other("reserved string formatting failed").into());
         }
         Ok(owned)
     }
 
+    // Append using already admitted capacity. If a fragment exceeds the remaining
+    // room, earlier fragments from the callback can still be present.
     pub(crate) fn append(
         &mut self,
         render: impl FnOnce(&mut dyn std::fmt::Write) -> std::fmt::Result,
@@ -987,10 +1378,16 @@ impl ReservedString {
         context: &JsonOperationContext,
         phase: &'static str,
     ) -> Result<Self> {
+        // Admit ordinary workspace before allocating the string. A failed
+        // allocation or exact-capacity check drops the local guard and gives its
+        // charge back.
         let mut work = context.workspace_reservation();
         work.grow_to(bytes, bytes, phase)?;
         let mut owned = String::new();
         owned
+            // Use a fallible allocation so allocator refusal is returned with an
+            // I/O error. The workspace admission above reports a different failure
+            // when the configured limit is exceeded.
             .try_reserve_exact(bytes)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         if owned.capacity() != bytes {
@@ -1001,6 +1398,9 @@ impl ReservedString {
         Ok(Self::from_reserved(owned, work))
     }
 
+    // Adopt a string backed by an existing workspace reservation. Refund the
+    // excess while retaining coverage for its capacity, including empty space
+    // available to append.
     pub(crate) fn from_reserved(value: String, mut work: WorkspaceReservation) -> Self {
         work.retain(value.capacity());
         Self { value, _work: work }
@@ -1013,15 +1413,26 @@ impl AsRef<str> for ReservedString {
     }
 }
 
+// A guard owns part of the JSON work charge for a single operation. Coverage
+// tracks live allocations. The charge can be larger during aggregation so child
+// allocations can use the grant without locking the shared ledger every time.
 pub(crate) struct JsonReservation {
+    // Operation that accounts for this reservation and classifies any admission
+    // failure.
     context: JsonOperationContext,
     // Charged blocks may include spare capacity; coverage only backs live work.
     bytes: usize,
+    // Bytes already assigned to live allocations or validated work. The rest of the
+    // charge, if any, is credit that can be reused or returned.
     covered: usize,
+    // Whether growth can reserve in blocks for many small allocations. Finishing
+    // the aggregate releases the unused difference between bytes and covered.
     aggregate: bool,
 }
 
 impl JsonReservation {
+    // Charge the estimated map storage separately from the owned names and
+    // payloads. This path is used when those values have already been admitted.
     pub(crate) fn reserve_object_nodes(
         &mut self,
         length: usize,
@@ -1030,39 +1441,58 @@ impl JsonReservation {
         self.grow(object_workspace(length), kind)
     }
 
+    // Round an aggregate grant to four KiB where budget allows. Near the byte
+    // limit an exact grant can still succeed.
     const BLOCK_BYTES: usize = 4096;
 
     pub(crate) fn context(&self) -> &JsonOperationContext {
         &self.context
     }
 
+    // Enable block precharging for a series of allocations made under this guard.
     pub(super) fn start_aggregate(&mut self) {
         self.aggregate = true;
     }
 
+    // Return spare precharge before transferring the completed value out of a
+    // traversal, and use exact charging on subsequent growth.
     pub(super) fn finish_aggregate(&mut self) {
         self.retain(self.covered);
         self.aggregate = false;
     }
 
+    // Collect the estimate for a complete map's keys and nodes in a child guard.
+    // The caller can merge the successful guard into the owner after obtaining the
+    // charge.
     pub(super) fn reserve_object_keys<'a>(
         &mut self,
         keys: impl ExactSizeIterator<Item = &'a str>,
         kind: JsonInputKind,
     ) -> Result<Self> {
         let entries = keys.len();
+        // Charge key lengths in UTF-8 bytes along with the estimated node cost.
+        // Accumulate with saturation so an unrepresentable sum cannot become a
+        // small allocation request.
         let bytes = keys.fold(object_workspace(entries), |bytes, key| {
             bytes.saturating_add(key.len())
         });
+        // Transfer unused precharge from the parent first. Both guards point at
+        // the same operation, so this part of the transfer does not change either
+        // shared counter.
         let reused = bytes.min(self.bytes - self.covered);
         let mut work = self.scratch();
         self.bytes -= reused;
         work.bytes = reused;
         work.covered = reused;
+        // Only the remainder needs a fresh grant. If it fails, dropping the child
+        // refunds the precharge moved out of the parent.
         work.grow(bytes - reused, kind)?;
         Ok(work)
     }
 
+    // Reclassify live JSON memory as ordinary workspace without reserving it
+    // twice. Update both sets of counters while holding the operation lock
+    // followed by its ledger lock.
     pub(crate) fn take_workspace(&mut self, bytes: usize) -> WorkspaceReservation {
         assert!(bytes <= self.covered);
         let mut operation = self
@@ -1075,10 +1505,16 @@ impl JsonReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Maintain the combined accounting across the two categories while
+        // changing which limit will govern future growth. Neither lock is released
+        // during the transfer.
         operation.used -= bytes;
         ledger.used -= bytes;
         operation.workspace_used += bytes;
         ledger.workspace_used += bytes;
+        // Remove the transferred charge from this guard before constructing the
+        // workspace owner. Destruction of either owner then releases only its own
+        // share.
         self.bytes -= bytes;
         self.covered -= bytes;
         WorkspaceReservation {
@@ -1087,14 +1523,20 @@ impl JsonReservation {
         }
     }
 
+    // Create an initially empty guard on the same operation for temporary
+    // allocations that need an independent lifetime.
     pub(super) fn scratch(&self) -> Self {
         self.context.reservation()
     }
 
+    // Bring coverage up to an absolute byte count. Repeated requests for the same
+    // total are free, and larger ones can precharge spare capacity.
     pub(super) fn cover(&mut self, bytes: usize, kind: JsonInputKind) -> Result<()> {
         self.grow_with_granularity(bytes.saturating_sub(self.covered), kind, true)
     }
 
+    // Keep the requested charge and refund the remainder. The retained bytes all
+    // count as live coverage after this call.
     pub(crate) fn retain(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes);
         self.refund(self.bytes - bytes);
@@ -1109,6 +1551,8 @@ impl JsonReservation {
         self.covered
     }
 
+    // Charge the actual UTF-8 allocation before copying. The returned String
+    // relies on this reservation remaining alive with it.
     pub(crate) fn copy_string(&mut self, value: &str, kind: JsonInputKind) -> Result<String> {
         let mut copy = String::new();
         self.reserve_string(&mut copy, value.len(), kind)?;
@@ -1121,17 +1565,28 @@ impl JsonReservation {
         kind: JsonInputKind,
         render: impl Fn(&mut dyn std::fmt::Write) -> std::fmt::Result,
     ) -> Result<String> {
+        // Measure before allocating, then take a coverage checkpoint for rollback.
+        // A failed formatting pass must leave coverage for other live strings
+        // intact.
         let length = rendered_string_bytes(&render)?;
         let covered = self.covered;
         let mut value = String::new();
+        // Treat allocation and both render checks as one attempt. A caller can
+        // reuse this guard after any of those steps fails because the error path
+        // restores the prior coverage.
         let built = (|| {
             self.reserve_string(&mut value, length, kind)?;
             write_precharged_string(&mut value, render)?;
+            // A too-short rendering also fails. The bounded writer catches excess
+            // beyond the admitted capacity, while the final length check enforces
+            // agreement with the sizing pass.
             if value.len() != length {
                 return Err(std::io::Error::other("reserved string formatting failed").into());
             }
             Ok(())
         })();
+        // Free the partial string before releasing its coverage. An aggregate can
+        // keep the returned portion as unused credit for later work.
         if let Err(error) = built {
             drop(value);
             self.release(self.covered - covered);
@@ -1145,12 +1600,17 @@ impl JsonReservation {
         value: &super::JsonValue,
         kind: JsonInputKind,
     ) -> Result<super::JsonValue> {
+        // Refund spare credit before the clone takes a new guard on this
+        // operation. Otherwise precharge held here could reduce the memory
+        // available to that guard.
         self.retain(self.covered);
         let (value, work) = value.clone_output_in(kind, &self.context)?.into_parts();
         self.merge(work);
         Ok(value)
     }
 
+    // Combine ownership within one operation. Zero the donor before Drop so it
+    // cannot refund bytes now accounted for by the receiver.
     pub(crate) fn merge(&mut self, mut other: Self) {
         assert!(Arc::ptr_eq(&self.context.state, &other.context.state));
         self.bytes += other.bytes;
@@ -1159,6 +1619,8 @@ impl JsonReservation {
         other.covered = 0;
     }
 
+    // Use the guard's current mode when admitting another allocation. The cover
+    // path can request aggregate growth without changing that mode.
     pub(crate) fn grow(&mut self, additional: usize, kind: JsonInputKind) -> Result<()> {
         self.grow_with_granularity(additional, kind, self.aggregate)
     }
@@ -1169,14 +1631,23 @@ impl JsonReservation {
         kind: JsonInputKind,
         aggregate: bool,
     ) -> Result<()> {
+        // A zero increment succeeds without inspecting the ledger. Other
+        // operations may consume available headroom but cannot revoke bytes
+        // already charged to this guard.
         if additional == 0 {
             return Ok(());
         }
+        // An aggregate guard can have credit ahead of the bytes its children have
+        // claimed. Consume that credit first. Charging the shared ledger again for
+        // every child would count one allocation twice.
         let needed = self.covered.checked_add(additional);
         if let Some(needed) = needed.filter(|bytes| *bytes <= self.bytes) {
             self.covered = needed;
             return Ok(());
         }
+        // Slow-path admission holds the operation lock and then its shared ledger,
+        // matching refund and workspace transfer. That keeps the available limit
+        // and the two counter changes consistent.
         let mut operation = self
             .context
             .state
@@ -1187,13 +1658,20 @@ impl JsonReservation {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Compare the operation's resulting charge with the effective limit, which
+        // also reflects shared usage. Overflow counts as refusal rather than
+        // underestimating the requested total.
         let limit = effective_limit(&operation, &ledger);
         let extra = needed.map(|bytes| bytes - self.bytes);
         let requested = extra.and_then(|extra| operation.used.checked_add(extra));
         if !requested.is_some_and(|bytes| bytes <= limit) {
             return Err(kind.limit_error(JsonLimitReason::WorkBudget, limit, requested));
         }
+        // A successful request established a representable coverage count. Compute
+        // optional precharge only after admitting the required bytes.
         let needed = needed.unwrap();
+        // Round the total reservation rather than the increment. That aligns
+        // successive small allocations to the same block boundaries.
         let preferred = if aggregate {
             needed
                 .checked_add(Self::BLOCK_BYTES - 1)
@@ -1203,11 +1681,15 @@ impl JsonReservation {
         } else {
             needed
         };
+        // Near the budget, use the exact increment. Optional rounding changes only
+        // the amount of spare credit, never whether required bytes are admissible.
         let granted = if preferred - self.bytes <= limit - operation.used {
             preferred - self.bytes
         } else {
             needed - self.bytes
         };
+        // Coverage grows by the requested increment. Any excess from the larger
+        // grant stays available to later allocations.
         operation.used += granted;
         ledger.used += granted;
         self.bytes += granted;
@@ -1215,6 +1697,9 @@ impl JsonReservation {
         Ok(())
     }
 
+    // When the local credit alone covers the minimum, use it as the estimate and
+    // avoid a ledger lookup. A caller sizing optional growth should still go
+    // through grow to confirm the actual charge.
     fn available_for(&self, minimum: usize) -> usize {
         let spare = self.bytes - self.covered;
         if spare >= minimum {
@@ -1224,6 +1709,8 @@ impl JsonReservation {
         }
     }
 
+    // Mark the released bytes as unused. Aggregate owners keep that credit for
+    // later allocations, while exact owners return it immediately.
     pub(crate) fn release(&mut self, bytes: usize) {
         assert!(bytes <= self.covered);
         self.covered -= bytes;
@@ -1232,6 +1719,9 @@ impl JsonReservation {
         }
     }
 
+    // Return a charged amount to the two shared counters. The caller updates the
+    // live coverage according to whether it is releasing an allocation or trimming
+    // spare credit.
     fn refund(&mut self, bytes: usize) {
         if bytes == 0 {
             return;
@@ -1258,6 +1748,9 @@ impl JsonReservation {
         additional: usize,
         kind: JsonInputKind,
     ) -> Result<()> {
+        // Determine the required number of elements from the current length.
+        // Already allocated slots can be reused without a new charge, and
+        // zero-sized elements have no backed allocation.
         let needed = values
             .len()
             .checked_add(additional)
@@ -1266,10 +1759,16 @@ impl JsonReservation {
             return Ok(());
         }
         let old = values.capacity();
+        // Prefer geometric growth to avoid reserving on every append. Keep
+        // optional headroom within the estimated budget and make room for the
+        // requested length regardless of that estimate.
         let mut target = needed
             .max(old.saturating_mul(2))
             .max(4)
             .min(old.saturating_add(
+                // Divide available bytes by element size before computing
+                // speculative capacity. The zero-size fast path above keeps that
+                // divisor nonzero.
                 self.available_for((needed - old).saturating_mul(std::mem::size_of::<T>()))
                     / std::mem::size_of::<T>(),
             ))
@@ -1277,24 +1776,38 @@ impl JsonReservation {
         let mut bytes = (target - old)
             .checked_mul(std::mem::size_of::<T>())
             .ok_or_else(|| self.context.limit_error(kind))?;
+        // Growth beyond the requested length is optional. If the preferred capacity
+        // is refused, admit just the required elements before asking the allocator.
+        // Reconcile the actual capacity afterwards since the allocator can round it
+        // up.
         if let Err(error) = self.grow(bytes, kind) {
             if target == needed {
                 return Err(error);
             }
+            // Retry only the admission for the exact required target. No allocator
+            // call has happened yet, so there is no new capacity to retain or roll
+            // back.
             target = needed;
             bytes = (target - old)
                 .checked_mul(std::mem::size_of::<T>())
                 .ok_or_else(|| self.context.limit_error(kind))?;
             self.grow(bytes, kind)?;
         }
+        // A failed allocation leaves the original vector in place. Release only
+        // the increment admitted for this attempt.
         if let Err(error) = values.try_reserve_exact(target - values.len()) {
             self.release(bytes);
             return Err(std::io::Error::other(error.to_string()).into());
         }
+        // Check the allocator's observed capacity before reporting success. If
+        // admitting its extra capacity fails, propagate the refusal to the caller
+        // handling the failed allocation.
         let extra = (values.capacity() - target) * std::mem::size_of::<T>();
         self.grow(extra, kind)
     }
 
+    // Use the vector admission policy in byte units for String. Length, capacity
+    // and the requested extension are UTF-8 byte counts.
     pub(crate) fn reserve_string(
         &mut self,
         value: &mut String,
@@ -1314,6 +1827,8 @@ impl JsonReservation {
             .max(8)
             .min(old.saturating_add(self.available_for(needed - old)))
             .max(needed);
+        // If the optional doubling cannot be admitted, try just the required
+        // capacity. Do not ask the allocator until one of those grants succeeds.
         if let Err(error) = self.grow(target - old, kind) {
             if target == needed {
                 return Err(error);
@@ -1321,10 +1836,14 @@ impl JsonReservation {
             target = needed;
             self.grow(target - old, kind)?;
         }
+        // A budget refusal precedes allocation. If the allocator itself rejects
+        // the request, release the admitted increment before returning its error.
         if let Err(error) = value.try_reserve_exact(target - value.len()) {
             self.release(target - old);
             return Err(std::io::Error::other(error.to_string()).into());
         }
+        // Reconcile any capacity above the requested target before the caller
+        // appends into the string.
         self.grow(value.capacity() - target, kind)
     }
 }
@@ -1333,6 +1852,8 @@ impl JsonReservation {
 fn rendered_string_bytes(
     render: &impl Fn(&mut dyn std::fmt::Write) -> std::fmt::Result,
 ) -> Result<usize> {
+    // The measuring writer counts bytes without storing text. Overflow becomes a
+    // formatting error before the allocation pass starts.
     struct Length(usize);
     impl std::fmt::Write for Length {
         fn write_str(&mut self, value: &str) -> std::fmt::Result {
@@ -1349,9 +1870,14 @@ fn write_precharged_string(
     value: &mut String,
     render: impl FnOnce(&mut dyn std::fmt::Write) -> std::fmt::Result,
 ) -> Result<()> {
+    // Present the formatter with a writer that refuses any fragment larger than
+    // the unused capacity. Appending therefore cannot trigger an implicit
+    // reallocation.
     struct Bounded<'a>(&'a mut String);
     impl std::fmt::Write for Bounded<'_> {
         fn write_str(&mut self, value: &str) -> std::fmt::Result {
+            // An oversized fragment leaves earlier writes from the same callback
+            // in place. The bounded adapter does not roll back the whole append.
             if value.len() > self.0.capacity() - self.0.len() {
                 return Err(std::fmt::Error);
             }
@@ -1369,6 +1895,9 @@ pub(crate) fn copy_precharged_string(value: &str) -> Result<String> {
     owned
         .try_reserve_exact(value.len())
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    // The enclosing reservation covers the requested byte length exactly. Reject
+    // an unexpectedly larger allocation before filling it and moving it into the
+    // containing value.
     if owned.capacity() != value.len() {
         return Err(std::io::Error::other("string allocation exceeds requested capacity").into());
     }
@@ -1376,6 +1905,9 @@ pub(crate) fn copy_precharged_string(value: &str) -> Result<String> {
     Ok(owned)
 }
 
+// Return any unspent precharge along with live coverage when the guard is
+// destroyed. The counters represent the full charge, which can exceed the sum of
+// the copied value's allocations.
 impl Drop for JsonReservation {
     fn drop(&mut self) {
         // A fork child cannot repair the parent's counters. In particular this

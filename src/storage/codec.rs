@@ -8,11 +8,20 @@ use crate::json::{
 };
 use crate::model::{SourceSpan, VectorIndexConfig};
 
+// A commit body has a fixed representation. The main-log writer can therefore
+// budget for the record before opening a batch and encode it into a known-size
+// buffer when the data-frame checksum is available.
 pub(super) const COMMIT_PAYLOAD_BYTES: usize = 44;
 
+// Encode coordinates a block at a time in little-endian binary32. Converting each
+// value explicitly preserves its floating-point bits on either host byte order. The
+// stack buffer bounds the extra memory independently of the collection dimension.
 pub(super) fn write_f32_values(output: &mut impl Write, values: &[f32]) -> Result<()> {
     let mut buffer = [0; 4 * 1024];
     for values in values.chunks(buffer.len() / 4) {
+        // Only the used prefix of the last block belongs to the vector. Writing
+        // the full scratch array here would leak bytes from the preceding block
+        // into the following record field.
         let bytes = &mut buffer[..values.len() * 4];
         for (value, encoded) in values.iter().zip(bytes.chunks_exact_mut(4)) {
             encoded.copy_from_slice(&value.to_le_bytes());
@@ -46,6 +55,9 @@ pub(super) fn encode_into(record: &RecordPayload, output: &mut impl Write) -> Re
     .map(|_| ())
 }
 
+// Write only the commit body. The caller supplies the frame header separately and
+// verifies the emitted length before appending the commit. No JSON tree or batch
+// encoding workspace is required for its fixed fields.
 pub(super) fn encode_commit_into(
     commit: &CommitPayload,
     output: &mut impl Write,
@@ -55,11 +67,17 @@ pub(super) fn encode_commit_into(
         output: Some(output),
         len: 0,
         context: context.clone(),
+        // The commit encoder does not need a traversal plan. Its checksum and
+        // sequence fields are already final when supplied and it has no stored
+        // JSON fields whose shape depends on the batch.
         planned_json: None,
     }
     .commit(commit)
 }
 
+// Encode an input record whose JSON allocations already have an owner. The
+// reservation lets the writer account for that existing tree while validating and
+// emitting canonical JSON. Each input field can report its own JSON input kind.
 pub(super) fn encode_retained_into(
     record: &RecordPayload,
     output: &mut impl Write,
@@ -77,6 +95,9 @@ pub(super) fn encode_retained_into(
     .map(|_| ())
 }
 
+// Compaction re-encodes values read back from storage. Attribute JSON failures in
+// these values to stored data while reusing the caller's reservation. The
+// serialized field layout is shared with newly supplied values.
 pub(super) fn encode_stored_into(
     record: &RecordPayload,
     output: &mut impl Write,
@@ -106,6 +127,10 @@ pub(super) fn encoded_len(record: &RecordPayload) -> Result<u64> {
     )
 }
 
+// Use one dispatch for the binary layout of each record type. The frame header
+// carries the type, so the body can encode fields in a fixed order without
+// repeating it. Length calculation and output must visit the same fields, including
+// the one-byte presence tag of an absent optional value.
 fn encode_with(
     record: &RecordPayload,
     output: Option<&mut impl Write>,
@@ -114,6 +139,9 @@ fn encode_with(
     json_kind: Option<JsonInputKind>,
     plan: Option<(&JsonEncodingWorkspace, Option<&JsonValue>)>,
 ) -> Result<u64> {
+    // Keep the byte counter in the same writer used for actual output. Length-only
+    // and emitting callers take this same dispatch so a field added to one record
+    // layout also changes its calculated size.
     let mut w = Writer {
         output,
         len: 0,
@@ -122,7 +150,14 @@ fn encode_with(
     };
     match record {
         RecordPayload::CollectionCreate(c) => {
+            // The scalar collection properties have fixed positions. The tokenizer
+            // and vector-index settings share one length-prefixed JSON object at
+            // the end. Keep that object under the collection-config input kind
+            // unless the caller is rewriting stored JSON.
             let kind = json_kind.unwrap_or(JsonInputKind::CollectionConfig);
+            // The binary collection ID contains only its numeric part. The record
+            // type identifies it as a collection; its external name is a
+            // separately framed string and need not resemble the generated ID.
             w.id(&c.collection_id, "col")?;
             w.string(&c.name)?;
             w.u32(c.embedding_dim)?;
@@ -130,7 +165,15 @@ fn encode_with(
             w.optional_string(c.embedding_model.as_deref())?;
             w.byte(u8::from(c.vectors_normalized))?;
             w.timestamp(&c.created_at)?;
+            // A planned batch already owns the complete collection configuration
+            // for this record. Reusing it prevents constructing a second parameter
+            // tree in the middle of a write. Callers without a plan build the
+            // configuration here and retain its reservation through serialization.
             if let Some((_, config)) = plan {
+                // A present plan must contain the configuration for this
+                // particular create record. Treat an absent entry as a layout
+                // error, since reconstructing it here could require new
+                // allocations after the batch was admitted.
                 w.json(config.ok_or_else(invalid)?, kind, None)?;
             } else {
                 let mut config = collection_config_in(c, kind, &w.context)?;
@@ -143,17 +186,28 @@ fn encode_with(
             dropped_at,
             reason,
         } => {
+            // The drop body retains both the internal collection ID and its name,
+            // followed by the time and optional reason. A collection tombstone
+            // identifies its target by kind and ID and has no collection-name
+            // field.
             w.id(collection_id, "col")?;
             w.string(name)?;
             w.timestamp(dropped_at)?;
             w.optional_string(reason.as_deref())?;
         }
         RecordPayload::DocumentPut(d) => {
+            // The document's internal identity and owning collection use
+            // generated-ID encoding. Keep the application-supplied external ID in
+            // its string representation, including when it resembles another
+            // generated ID.
             w.id(&d.document_id, "doc")?;
             w.id(&d.collection_id, "col")?;
             w.string(&d.external_id)?;
             w.optional_string(d.title.as_deref())?;
             w.optional_string(d.source_uri.as_deref())?;
+            // The typed metadata goes to the same length-prefixed JSON field on
+            // either write path. The selected input kind determines validation and
+            // accounting when a live request or a rewrite supplies that tree.
             w.json(
                 &d.metadata,
                 json_kind.unwrap_or(JsonInputKind::DocumentMetadata),
@@ -162,9 +216,15 @@ fn encode_with(
             w.timestamp(&d.created_at)?;
             w.timestamp(&d.updated_at)?;
         }
+        // The chunk carries a printable digest in memory, while its binary record
+        // stores digest bytes. Verify the supplied identity against the text before
+        // encoding, so a later summary scan can trust that pair after checking it.
         RecordPayload::ChunkPut(c) => {
             let digest = sha256(c.text.as_bytes());
             const HEX: &[u8; 16] = b"0123456789abcdef";
+            // Compare the full lowercase hexadecimal representation directly with
+            // the computed bytes. Checking the length separately prevents a digest
+            // with an extra trailing nibble from passing a zipped comparison.
             if c.text_hash.len() != 64
                 || !digest
                     .iter()
@@ -182,12 +242,19 @@ fn encode_with(
             w.string(&c.text)?;
             w.bytes(&digest)?;
             w.u32(c.ordinal)?;
+            // The ordinal describes the chunk's place in its document. The token
+            // count is a separate persisted hint and can differ from both the
+            // ordinal and the number of UTF-8 bytes in the text.
             w.u64(c.token_count as u64)?;
             w.json(
                 &c.metadata,
                 json_kind.unwrap_or(JsonInputKind::ChunkMetadata),
                 metadata_work,
             )?;
+            // The span is represented by four independent presence tags. An absent
+            // span produces four absent fields. Validate the combinations before
+            // encoding so an incomplete byte or line pair cannot be written as a
+            // valid source location.
             let span = c.source_span.clone().unwrap_or_default();
             span.validate()?;
             w.optional_u64(span.start)?;
@@ -197,6 +264,10 @@ fn encode_with(
             w.timestamp(&c.created_at)?;
         }
         RecordPayload::EmbeddingPut(e) => {
+            // The dimension determines the coordinate byte count. Check it against
+            // the actual vector and reject nonfinite values before writing the
+            // fixed fields. A reader can then bound its scan from the dimension
+            // even when discarding the coordinates.
             if e.vector.len() != e.dim || e.dim == 0 || e.vector.iter().any(|v| !v.is_finite()) {
                 return Err(invalid());
             }
@@ -204,12 +275,21 @@ fn encode_with(
             w.id(&e.chunk_id, "chk")?;
             w.id(&e.collection_id, "col")?;
             w.u32(e.dim)?;
+            // The component type on the wire is binary32. Its tag remains separate
+            // from the dimension, which tells a reader how many four-byte
+            // coordinates follow the timestamp.
             w.byte(1)?;
+            // The wire field is optional for decoding. This writer carries the
+            // embedding's model string as a present value, so an empty string
+            // still has a presence tag and a zero byte length.
             w.optional_string(Some(&e.model_name))?;
             w.timestamp(&e.created_at)?;
             w.vector(&e.vector)?;
         }
         RecordPayload::Tombstone(t) => {
+            // Only the numeric part of an ID is stored, so the tombstone's tag must
+            // identify the target kind. Choose the expected textual prefix from
+            // that same tag before stripping it on output.
             let (tag, prefix) = match t.target_type.as_str() {
                 "collection" => (1, "col"),
                 "document" => (2, "doc"),
@@ -223,32 +303,51 @@ fn encode_with(
             w.optional_string(t.reason.as_deref())?;
         }
         RecordPayload::Commit(c) => w.commit(c)?,
+        // A compaction marker describes the history from which this replacement
+        // was produced. Its source commit sequence lives in the old stream and
+        // must not be inferred from the marker's position in the rewritten file.
         RecordPayload::CompactMarker(m) => {
             w.u64(m.compact_generation)?;
             w.u64(m.source_last_commit_sequence_no)?;
+            // Watermarks occupy four positions in a fixed order. Write zero for a
+            // prefix with no recorded allocation so the reader can reconstruct the
+            // map without serializing keys or depending on their sorted order.
             for prefix in ["col_", "doc_", "chk_", "emb_"] {
                 w.u64(m.id_high_watermarks.get(prefix).copied().unwrap_or(0))?;
             }
             w.u64(m.records_rewritten as u64)?;
             w.timestamp(&m.compacted_at)?;
+            // Store the checksum of the compacted data prefix preceding the
+            // marker. The record envelope supplies its own separate payload
+            // checksum.
             w.bytes(&m.compacted_main_checksum.to_le_bytes())?;
         }
     }
     Ok(w.len)
 }
 
+// Build the on-disk configuration object from the collection's typed settings. Keep
+// the resulting tree and its reservation together. Batch precomputation may retain
+// this object well after the function that first saw the collection record returns.
 fn collection_config_in(
     collection: &CollectionInfo,
     kind: JsonInputKind,
     context: &JsonOperationContext,
 ) -> Result<CollectionEncoding> {
     let mut work = context.reservation();
+    // Keep vector-index settings nested under the generated configuration object.
+    // Exact mode needs only its type tag; the provider and its arbitrary parameter
+    // tree belong to the ANN variant.
     let vector_index = match &collection.vector_index {
         VectorIndexConfig::Exact => {
             let builder = crate::json::JsonBuilder::budgeted(&mut work, kind);
             builder.object([("type", builder.string("exact")?)])?
         }
         VectorIndexConfig::Ann { provider, params } => {
+            // ANN parameters belong to the input collection. The generated
+            // configuration owns a separate checked copy. Merge its reservation
+            // into the new configuration before adding the provider name and the
+            // enclosing object.
             let (params, params_work) = params.try_clone_in(kind, context)?.into_parts();
             work.merge(params_work);
             let builder = crate::json::JsonBuilder::budgeted(&mut work, kind);
@@ -259,6 +358,9 @@ fn collection_config_in(
             ])?
         }
     };
+    // Build the outer object using the reservation that already owns the
+    // vector-index subtree. The nested tokenizer and the two object keys must fit
+    // while that subtree's buffers are still live.
     let builder = crate::json::JsonBuilder::budgeted(&mut work, kind);
     let config = builder.object([
         ("tokenizer", collection.tokenizer.build_json(&builder)?),
@@ -270,30 +372,63 @@ fn collection_config_in(
     })
 }
 
+// The generated collection configuration and its memory reservation travel as one
+// value. This matters when a planned batch holds several collection settings until
+// their record ordinals are encoded.
 struct CollectionEncoding {
+    // Owned JSON object containing the tokenizer and vector-index configuration in
+    // their on-disk shape.
     value: JsonValue,
+    // JSON allocation credit for the tree above, including any copied ANN parameter
+    // values.
     work: JsonReservation,
 }
 
+// Encoding resources admitted for the append itself. The writer streams each record
+// through this plan in batch order and reuses one JSON traversal workspace across
+// the entire batch.
 pub(super) struct BatchEncoding {
+    // Collection configuration trees keyed by zero-based record ordinal. Records
+    // without generated configurations occupy no slot.
     configs: ReservedVec<(usize, CollectionEncoding)>,
+    // Precharged traversal capacity for one serialization at a time, sized for the
+    // largest required frame stack in this batch.
     json: JsonEncodingWorkspace,
+    // Shared operation context for the writer and its temporary encoding work.
     context: JsonOperationContext,
 }
 
+// Batch validation has measured the input trees and built any derived
+// configurations. The workspace requirement is recorded here so admission can occur
+// after catalog ownership of the inputs has been settled.
 pub(super) struct PreparedBatchEncoding {
+    // Generated collection configurations with their individual owners, sorted by
+    // the record positions encountered during preparation.
     configs: ReservedVec<(usize, CollectionEncoding)>,
+    // Maximum number of traversal frames required by one JSON value or generated
+    // configuration. An all-scalar-record batch can require no JSON frames.
     frames: usize,
+    // Input kind associated with the largest frame requirement. If its workspace
+    // cannot be admitted this identifies the kind of value that needed it.
     frame_kind: JsonInputKind,
+    // Operation that will reserve the serializer, retained so preparation and later
+    // admission charge the same operation.
     context: JsonOperationContext,
 }
 
 impl PreparedBatchEncoding {
+    // Validate and measure the JSON inputs while their owners are available. Live
+    // input trees coexist and their retained sizes add up. Only one tree is
+    // serialized at a time, so the reusable traversal stack needs the largest
+    // individual frame requirement.
     pub(super) fn prepare(
         records: &[RecordPayload],
         source_work: &mut JsonReservation,
         context: &JsonOperationContext,
     ) -> Result<Self> {
+        // Only collection creation synthesizes an additional configuration object.
+        // Reserve its ordinal directory up front at the exact number of such
+        // records. Other rows can carry their own metadata straight into encoding.
         let collections = records
             .iter()
             .filter(|record| matches!(record, RecordPayload::CollectionCreate(_)))
@@ -303,8 +438,16 @@ impl PreparedBatchEncoding {
         let mut frames = 0;
         let mut frame_kind = JsonInputKind::DocumentMetadata;
         for (ordinal, record) in records.iter().enumerate() {
+            // Track document metadata, chunk metadata and ANN settings under their
+            // respective JSON input kinds. Shape analysis uses that kind for
+            // admission and records it if this field sets the batch's peak
+            // traversal depth.
             let (value, kind) = match record {
                 RecordPayload::DocumentPut(value) => {
+                    // The binary metadata field expects a JSON object. A valid
+                    // JSON array or scalar still violates its record schema and
+                    // must be rejected before reserving traversal resources for
+                    // the write.
                     if value.metadata.as_object().is_none() {
                         return Err(invalid());
                     }
@@ -322,6 +465,10 @@ impl PreparedBatchEncoding {
                 }) => (Some(params), JsonInputKind::CollectionConfig),
                 _ => (None, JsonInputKind::CollectionConfig),
             };
+            // Grow the source reservation by the uncovered part of the cumulative
+            // retained size. The caller may already have charged bytes for values
+            // parsed from input. Asking for the full size again at each record
+            // would double-count that ownership.
             if let Some(value) = value {
                 let (required, bytes) = value.encoding_shape_in(kind, context)?;
                 source_bytes = source_bytes
@@ -331,11 +478,18 @@ impl PreparedBatchEncoding {
                     source_bytes.saturating_sub(source_work.covered_bytes()),
                     kind,
                 )?;
+                // Retain the input kind that raised the maximum. Later admission
+                // of the shared traversal stack can then attribute a refusal to a
+                // field that actually needs that depth.
                 if required > frames {
                     frames = required;
                     frame_kind = kind;
                 }
             }
+            // A generated configuration surrounds the tokenizer and vector-index
+            // settings with extra containers. Measure the complete generated object
+            // as well as any source ANN parameters. The wrapper can require a
+            // deeper stack than the original parameter tree.
             if let RecordPayload::CollectionCreate(collection) = record {
                 let config = collection_config_in(collection, kind, context)?;
                 let required = config.value.encoding_shape_in(kind, context)?.0;
@@ -343,6 +497,9 @@ impl PreparedBatchEncoding {
                     frames = required;
                     frame_kind = kind;
                 }
+                // Use the position within the entire batch, including records with
+                // no generated configuration. A collection following document or
+                // chunk records must recover its own configuration at encode time.
                 configs.push((ordinal, config));
             }
         }
@@ -361,6 +518,9 @@ impl PreparedBatchEncoding {
             || JsonEncodingWorkspace::new(self.frames, self.frame_kind, &self.context),
             reclaim,
         )?;
+        // Keep the synthesized configurations and the newly admitted traversal
+        // workspace in one batch plan. Repeated digest and output passes can
+        // borrow both without rebuilding a configuration tree during I/O.
         Ok(BatchEncoding {
             configs: self.configs,
             json,
@@ -370,17 +530,27 @@ impl PreparedBatchEncoding {
 }
 
 impl BatchEncoding {
+    // Pass the immutable batch ordinal through both the payload digest pass and the
+    // actual write. Each synthesized collection JSON tree was retained under that
+    // ordinal. Selecting by record type alone could encode one collection's
+    // settings for another.
     pub(super) fn encode(
         &self,
         ordinal: usize,
         record: &RecordPayload,
         output: &mut impl Write,
     ) -> Result<()> {
+        // Only collection creates have entries in this sorted table. A missing
+        // entry is normal for other record types; if the actual payload is a
+        // collection create, encode_with requires its corresponding configuration.
         let configs = self.configs.as_slice();
         let config = configs
             .binary_search_by_key(&ordinal, |entry| entry.0)
             .ok()
             .map(|index| &configs[index].1.value);
+        // Use the same wire encoder used for sizing. A planned JSON field borrows
+        // the existing traversal workspace on this pass, so field ordering and
+        // length-prefix rules stay common to both passes.
         encode_with(
             record,
             Some(output),
@@ -440,6 +610,10 @@ pub(super) fn decode_reader_in(
     )
 }
 
+// Decode exactly one payload using the type and length from its frame. A full read
+// retains chunk text and embedding coordinates. A summary read still consumes and
+// validates those bytes, leaving the catalog to fetch them later by file reference.
+// The caller is responsible for any outer frame checksum.
 pub(super) fn decode_reader_with_kind_in(
     record_type: u16,
     source: &mut impl Read,
@@ -449,7 +623,13 @@ pub(super) fn decode_reader_with_kind_in(
     context: &JsonOperationContext,
     strings: Option<(&mut WorkspaceReservation, &'static str)>,
 ) -> Result<(RecordPayload, JsonReservation)> {
+    // Bound decoding by the frame's declared payload length, even on a stream
+    // containing more records. Each field consumes this counter, and a successful
+    // decode must account for every payload byte.
     let mut r = Reader::new(source, payload_len, context.clone());
+    // The caller selects the error category for embedded JSON and can separately
+    // own native string and coordinate credit. Returning JSON credit with the row
+    // does not replace that native reservation.
     r.json_kind = json_kind;
     r.strings = strings;
     let record = match record_type {
@@ -457,19 +637,34 @@ pub(super) fn decode_reader_with_kind_in(
             let collection_id = r.id("col")?;
             let name = r.string()?;
             let embedding_dim = r.u32()? as usize;
+            // Decode the numeric metric through the same set of segment IDs used
+            // by the encoder. An unknown value cannot be mapped to a default
+            // distance without changing how stored vectors are interpreted.
             let distance_metric = distance_metric_from_segment_id(r.byte()?).ok_or_else(invalid)?;
             let embedding_model = r.optional_string()?;
             let vectors_normalized = r.boolean()?;
             let created_at = r.timestamp()?;
+            // The settings object is temporary input to the typed collection
+            // definition. Its processing guard stays alive while the tokenizer and
+            // vector index are derived from it.
             let config = r.json_processed()?;
             let config = config.value.as_object().ok_or_else(invalid)?;
+            // Unlike the optional vector-index setting, the tokenizer descriptor
+            // must exist and match a recognized complete identity. Replaying text
+            // under an arbitrary tokenizer would change index semantics.
             let tokenizer =
                 crate::TokenizerConfig::from_json(config.get("tokenizer").ok_or_else(invalid)?)?;
+            // Read older collection settings that did not declare a vector index as
+            // exact search. A present but malformed index setting is an error. Only
+            // an absent field selects the compatibility default.
             let vector_index = config
                 .get("vector_index")
                 .map(crate::model::vector_index_from_json)
                 .transpose()?
                 .unwrap_or(VectorIndexConfig::Exact);
+            // An empty collection name or zero dimension cannot describe a usable
+            // collection. Reject these scalar format errors here even if a later
+            // caller plans to keep only a catalog summary.
             if name.is_empty() || embedding_dim == 0 {
                 return Err(invalid());
             }
@@ -491,6 +686,9 @@ pub(super) fn decode_reader_with_kind_in(
             dropped_at: r.timestamp()?,
             reason: r.optional_string()?,
         },
+        // Document records retain their own metadata on both payload paths. The
+        // summary flag is for large chunk text and vector coordinates, not a
+        // signal to discard data needed for catalog lookups and filters.
         DOCUMENT_PUT => RecordPayload::DocumentPut(Document {
             document_id: r.id("doc")?,
             collection_id: r.id("col")?,
@@ -506,21 +704,40 @@ pub(super) fn decode_reader_with_kind_in(
             let document_id = r.id("doc")?;
             let collection_id = r.id("col")?;
             let chunk_external_id = r.string()?;
+            // Recovery normally asks for summaries. It can discard the text but must
+            // still hash its bytes and compare the stored digest, or corruption
+            // could be discovered only when a client next reads the chunk.
             let (text, digest) = r.text(retain_payloads)?;
             if r.fixed::<32>()? != digest {
                 return Err(invalid());
             }
+            // Expose the verified digest in the textual form used by the model.
+            // Keep this string in the summary even when the full text was streamed
+            // and discarded, so callers can still identify the stored content.
             let mut text_hash = r.string_buffer(64)?;
             crate::hash::append_digest_hex(&mut text_hash, digest);
+            // The writer stores the chunk's position and token-count hint
+            // separately from its text digest. Recover them even on a summary
+            // read, where an empty returned text cannot be tokenized to derive the
+            // original hint.
             let ordinal = r.u32()? as usize;
             let token_count = r.count()?;
+            // Retain the metadata object even when the large text bytes have been
+            // consumed without retention. Filtering or reading a chunk's source
+            // information must use the same metadata for both decoding modes.
             let metadata = r.json()?;
+            // Byte offsets occupy 64-bit fields while line coordinates occupy
+            // 32-bit fields. Each endpoint has an independent presence flag, so
+            // validation must distinguish a stored zero from an omitted value.
             let span = SourceSpan {
                 start: r.optional_u64()?,
                 end: r.optional_u64()?,
                 line_start: r.optional_u32()?,
                 line_end: r.optional_u32()?,
             };
+            // An all-absent group of span fields becomes None. Validate any
+            // supplied pairs first. A lone endpoint is invalid and must not be
+            // normalized into an absent span.
             span.validate()?;
             let source_span = if span == SourceSpan::default() {
                 None
@@ -538,15 +755,26 @@ pub(super) fn decode_reader_with_kind_in(
                 token_count,
                 metadata,
                 source_span,
+                // An embedding publication sets the current relationship by
+                // internal chunk ID during replay. Decoding a chunk put alone
+                // cannot identify a later embedding record that refers to this
+                // chunk.
                 embedding_id: None,
                 created_at: r.timestamp()?,
             })
         }
+        // Summary and full reads consume the same vector encoding. The dimension
+        // determines how many components must be validated even when the caller does
+        // not need to retain a Vec.
         EMBEDDING_PUT => {
             let embedding_id = r.id("emb")?;
             let chunk_id = r.id("chk")?;
             let collection_id = r.id("col")?;
             let dim = r.u32()? as usize;
+            // The scalar encoding tag and nonzero dimension are checked before
+            // interpreting the coordinate bytes. The model name has a presence tag
+            // on disk. A missing name is represented by an empty string when
+            // rebuilding the embedding.
             if r.byte()? != 1 || dim == 0 {
                 return Err(invalid());
             }
@@ -557,6 +785,9 @@ pub(super) fn decode_reader_with_kind_in(
                 embedding_id,
                 chunk_id,
                 collection_id,
+                // The binary embedding body stores the internal chunk ID. The
+                // external chunk ID belongs to the chunk and is not encoded in this
+                // record.
                 chunk_external_id: String::new(),
                 dim,
                 model_name,
@@ -565,6 +796,9 @@ pub(super) fn decode_reader_with_kind_in(
             })
         }
         TOMBSTONE => {
+            // The target tag supplies both the public object kind and the prefix
+            // for recreating its internal ID. Interpreting a known numeric suffix
+            // with the wrong tag would retire a different kind of object.
             let (target_type, prefix) = match r.byte()? {
                 1 => ("collection", "col"),
                 2 => ("document", "doc"),
@@ -579,19 +813,36 @@ pub(super) fn decode_reader_with_kind_in(
                 reason: r.optional_string()?,
             })
         }
+        // These fields describe the writer's proposed batch coverage. Decoding
+        // does not establish that the record count, sequence range, or checksum
+        // matches the preceding frames; the surrounding recovery scan verifies
+        // that.
         COMMIT => RecordPayload::Commit(CommitPayload {
             batch_id: r.u64()?,
             first_sequence_no: r.u64()?,
             last_sequence_no: r.u64()?,
             record_count: r.count()?,
+            // The wire checksum occupies four bytes, while the runtime commit
+            // field can hold historical 64-bit values. Widen the decoded CRC
+            // losslessly; the inverse conversion must check the field when
+            // writing.
             batch_checksum: r.u32()? as u64,
             committed_at: r.timestamp()?,
         }),
         COMPACT_MARKER => {
+            // Keep the rewrite generation and its source commit sequence as
+            // separate fields. Compaction can replace the on-disk record stream
+            // while carrying forward allocation history from records it omits.
             let compact_generation = r.u64()?;
             let source_last_commit_sequence_no = r.u64()?;
+            // Allocate for the decoded map and its keys even though the binary body
+            // contains only four integer values. Their positions, in this order,
+            // supply the prefix names on decode.
             r.reserve_owned_bytes(crate::json::btree_workspace::<String, u64>(4))?;
             let mut id_high_watermarks = BTreeMap::new();
+            // The wire layout has a fixed slot for every generated ID namespace. A
+            // watermark may exceed every surviving row after compaction and must
+            // be recovered from this marker without scanning only live entries.
             for prefix in ["col_", "doc_", "chk_", "emb_"] {
                 id_high_watermarks.insert(r.copy_string(prefix)?, r.u64()?);
             }
@@ -604,23 +855,49 @@ pub(super) fn decode_reader_with_kind_in(
                 compacted_main_checksum: r.u32()?,
             })
         }
+        // A record type with no known binary layout cannot be consumed and skipped
+        // here. The caller uses a successful decode to build or validate the
+        // committed catalog.
         _ => return Err(invalid()),
     };
+    // Every supported record layout consumes its whole frame. Accepting a valid
+    // prefix here would silently treat extra payload fields as part of the current
+    // format.
     if r.remaining != 0 {
         return Err(invalid());
     }
+    // Return the reservation with the record so nested metadata remains charged
+    // after the temporary decoder goes away. A failed trailing-length check above
+    // drops the provisional record and its retained JSON together.
     Ok((record, r.work))
 }
 
+// Writes fixed-width fields and keeps a byte count with the same field routines.
+// When no sink is supplied, validation and length accounting still follow the
+// layout used for output.
 struct Writer<'a, W> {
+    // Borrowed output sink. None selects length calculation without emitting the
+    // record body.
     output: Option<&'a mut W>,
+    // Encoded bytes accounted for in this payload, excluding its frame header.
     len: u64,
+    // Operation that supplies JSON validation and serialization resources when this
+    // writer needs them.
     context: JsonOperationContext,
+    // Optional pre-admitted JSON traversal workspace borrowed from the batch plan.
+    // Without a plan the individual field validates and reserves its own encoding
+    // resources.
     planned_json: Option<&'a JsonEncodingWorkspace>,
 }
 
 impl<W: Write> Writer<'_, W> {
+    // The in-memory checksum field can hold a legacy 64-bit value. A binary commit
+    // reserves four bytes for its CRC32C. Reject a value outside that range before
+    // it could be truncated to a different checksum.
     fn commit(&mut self, commit: &CommitPayload) -> Result<()> {
+        // The sequence endpoints identify the data range committed by this record.
+        // Its own enclosing frame and record number are encoded by storage outside
+        // this payload.
         self.u64(commit.batch_id)?;
         self.u64(commit.first_sequence_no)?;
         self.u64(commit.last_sequence_no)?;
@@ -635,6 +912,9 @@ impl<W: Write> Writer<'_, W> {
     }
 
     fn bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        // Advance the exact payload length on a sizing pass as well as a write
+        // pass. An eventual sink error aborts the encoding, so a partially written
+        // sink cannot be reported as a completed payload.
         self.advance(bytes.len())?;
         if let Some(output) = self.output.as_mut() {
             output.write_all(bytes)?;
@@ -643,6 +923,9 @@ impl<W: Write> Writer<'_, W> {
     }
 
     fn vector(&mut self, values: &[f32]) -> Result<()> {
+        // Check the component count in bytes before extending the total. The
+        // sizing pass can then avoid traversing or encoding the vector here, while
+        // the output pass writes the same little-endian f32 layout.
         self.advance(values.len().checked_mul(4).ok_or_else(invalid)?)?;
         let Some(output) = self.output.as_mut() else {
             return Ok(());
@@ -657,21 +940,35 @@ impl<W: Write> Writer<'_, W> {
         self.bytes(&value.to_le_bytes())
     }
     fn u32(&mut self, value: usize) -> Result<()> {
+        // Native counters and UTF-8 byte lengths may be wider than the field. Use
+        // a checked narrowing conversion here so a value above the wire limit
+        // cannot silently shift the next field's offset.
         self.bytes(&u32::try_from(value).map_err(|_| invalid())?.to_le_bytes())
     }
+    // Each record field implies its ID prefix on disk. Accept the expected prefix
+    // with an optional separating underscore and encode the nonzero numeric suffix.
+    // The reader recreates the standard padded spelling from that number.
     fn id(&mut self, value: &str, prefix: &str) -> Result<()> {
         let n = value
             .strip_prefix(prefix)
             .map(|s| s.strip_prefix('_').unwrap_or(s))
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|n| *n > 0)
+            // Zero is reserved and the reader rejects it as an internal ID.
+            // Keeping the same restriction when encoding prevents producing a
+            // record that succeeds at append but cannot be replayed.
             .ok_or_else(invalid)?;
         self.u64(n)
     }
     fn string(&mut self, value: &str) -> Result<()> {
+        // Prefix the UTF-8 byte count, not the number of characters. The decoder
+        // uses this value to bound precisely the bytes occupied by this string.
         self.u32(value.len())?;
         self.bytes(value.as_bytes())
     }
+    // Presence is encoded separately from the field value. An absent string has
+    // just its false tag. A present empty string has a true tag and a zero byte
+    // length, so the two cases remain distinguishable.
     fn optional_string(&mut self, value: Option<&str>) -> Result<()> {
         self.byte(u8::from(value.is_some()))?;
         if let Some(value) = value {
@@ -696,12 +993,18 @@ impl<W: Write> Writer<'_, W> {
     fn timestamp(&mut self, value: &str) -> Result<()> {
         self.u64(time::parse_rfc3339_millis(value).ok_or_else(invalid)?)
     }
+    // JSON fields store a byte length followed by a canonical object. The length
+    // must be written before the first JSON byte. Both paths below measure the same
+    // compact representation that will subsequently be sent to the sink.
     fn json(
         &mut self,
         value: &JsonValue,
         kind: JsonInputKind,
         retained: Option<&mut JsonReservation>,
     ) -> Result<()> {
+        // These fields are stored metadata or configuration objects. A scalar may
+        // be valid JSON, but the matching record decoder expects an object and
+        // would reject it on reopen.
         if value.as_object().is_none() {
             return Err(invalid());
         }
@@ -719,8 +1022,16 @@ impl<W: Write> Writer<'_, W> {
                     Ok(())
                 }
             }
+            // Count through the already admitted serializer. It can then emit
+            // exactly that representation in a second pass without retaining the
+            // complete encoded string. The count excludes the length prefix, which
+            // is written by u32.
             let mut count = Count(0);
             workspace.write(value, kind, &mut count)?;
+            // Convert the exact canonical byte length before emitting the body.
+            // The four-byte length field and the body both advance frame
+            // accounting. A measurement-only encoder follows the same path with no
+            // destination sink.
             self.u32(count.0)?;
             self.advance(count.0)?;
             if let Some(output) = self.output.as_mut() {
@@ -728,6 +1039,9 @@ impl<W: Write> Writer<'_, W> {
             }
             return Ok(());
         }
+        // Without a shared encoding plan, use credit already held for this
+        // particular tree, or a local reservation when no such owner was supplied.
+        // Compute its canonical length before touching the field prefix.
         let mut borrowed = self.context.reservation();
         let work = retained.unwrap_or(&mut borrowed);
         let bytes = value.canonical_bytes_retained_in(kind, work)?;
@@ -740,17 +1054,34 @@ impl<W: Write> Writer<'_, W> {
     }
 }
 
+// Decode within an enclosing payload whose length was supplied by the calling
+// storage layer. Variable-length fields must prove they fit this boundary before
+// allocating or reading their bytes.
 struct Reader<'a, R> {
+    // Input positioned at the next byte of this record's payload.
     source: R,
+    // Encoded payload bytes still available to the decoder. A successful record
+    // consumes all of them.
     remaining: u64,
+    // Shared operation context used to parse and reserve embedded JSON values.
     context: JsonOperationContext,
+    // Credit for JSON subtrees retained in the decoded record. Returned alongside
+    // the record when the entire payload succeeds.
     work: JsonReservation,
+    // Error category for embedded JSON. Staged input can use the source field's
+    // category, while a database read normally uses StoredJson.
     json_kind: JsonInputKind,
+    // Optional caller-owned workspace guard and phase name for native allocations,
+    // including owned strings and retained coordinates.
     strings: Option<(&'a mut WorkspaceReservation, &'static str)>,
 }
 
 impl<R: Read> Reader<'_, R> {
     fn new(source: R, remaining: u64, context: JsonOperationContext) -> Self {
+        // Start each frame with its own JSON reservation and the default
+        // classification for stored values. A caller reading different payloads
+        // can replace the classification or attach a separate native-allocation
+        // reservation.
         let work = context.reservation();
         Self {
             source,
@@ -761,10 +1092,17 @@ impl<R: Read> Reader<'_, R> {
             strings: None,
         }
     }
+    // Check the remaining frame length before asking the underlying stream for
+    // bytes. A malformed field length must never make a decoder consume bytes from
+    // the following frame. Propagate a short underlying read as an I/O error.
     fn read_into(&mut self, buffer: &mut [u8]) -> Result<()> {
         if buffer.len() as u64 > self.remaining {
             return Err(invalid());
         }
+        // Once the range check succeeds, an underlying short read is an I/O
+        // failure. Advance remaining only when the complete field was supplied. A
+        // caller abandons the frame if the source consumed a partial field and
+        // then returned an error.
         self.source.read_exact(buffer)?;
         self.remaining -= buffer.len() as u64;
         Ok(())
@@ -778,6 +1116,9 @@ impl<R: Read> Reader<'_, R> {
         Ok(self.fixed::<1>()?[0])
     }
     fn boolean(&mut self) -> Result<bool> {
+        // The same presence byte is used by optional fields and boolean flags.
+        // Restrict it to the two defined values so arbitrary bytes cannot be
+        // interpreted as a well-formed presence indicator.
         match self.byte()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -793,9 +1134,16 @@ impl<R: Read> Reader<'_, R> {
     fn count(&mut self) -> Result<usize> {
         usize::try_from(self.u64()?).map_err(|_| invalid())
     }
+    // Reconstruct the printable ID in its canonical decimal width. Values larger
+    // than the minimum padding still need every digit. Calculate the capacity
+    // before formatting so the optional native allocation guard covers the actual
+    // string.
     fn id(&mut self, prefix: &str) -> Result<String> {
         use std::fmt::Write as _;
         let value = self.u64()?;
+        // The binary ID zero is reserved. Reject it before formatting the prefix
+        // and padded decimal digits, since that spelling would not name a valid
+        // allocated object.
         if value == 0 {
             return Err(invalid());
         }
@@ -807,6 +1155,10 @@ impl<R: Read> Reader<'_, R> {
 
     fn reserve_owned_bytes(&mut self, len: usize) -> Result<()> {
         if let Some((work, phase)) = &mut self.strings {
+            // This reservation is shared by the native strings and vectors that
+            // survive decoding the frame. Add the requested capacity to the
+            // existing total. Charging just this field's size could release credit
+            // for earlier output still alive.
             let required = work
                 .reserved_bytes()
                 .checked_add(len)
@@ -816,12 +1168,18 @@ impl<R: Read> Reader<'_, R> {
         Ok(())
     }
 
+    // When native storage has been admitted, it covers exactly the requested
+    // capacity. Check the allocator's granted capacity before filling the buffer.
+    // Returning a larger allocation would leave live bytes outside the reservation.
     fn string_buffer(&mut self, len: usize) -> Result<String> {
         self.reserve_owned_bytes(len)?;
         let mut output = String::new();
         output
             .try_reserve_exact(len)
             .map_err(|_| Error::new(ErrorCode::IoError, "binary string allocation failed"))?;
+        // An allocation larger than the reserved capacity would invalidate exact
+        // native-memory accounting. Reject it before writing any decoded string
+        // content into the returned buffer.
         if output.capacity() != len {
             return Err(std::io::Error::other("binary string allocation exceeded request").into());
         }
@@ -834,6 +1192,9 @@ impl<R: Read> Reader<'_, R> {
         Ok(output)
     }
 
+    // Length counts encoded UTF-8 bytes. Check frame bounds before reserving the
+    // buffer and convert that same allocation into the final String only after the
+    // bytes have been read and validated.
     fn string(&mut self) -> Result<String> {
         let len = self.u32()? as usize;
         if len as u64 > self.remaining {
@@ -852,6 +1213,9 @@ impl<R: Read> Reader<'_, R> {
         String::from_utf8(bytes).map_err(|_| invalid())
     }
     fn text(&mut self, retain: bool) -> Result<(String, [u8; 32])> {
+        // Materialized text receives the same SHA-256 as summary mode. Calculate
+        // it before moving the string so callers can compare the two paths' output
+        // without storing a separate copy of the bytes.
         if retain {
             let text = self.string()?;
             let digest = sha256(text.as_bytes());
@@ -862,9 +1226,16 @@ impl<R: Read> Reader<'_, R> {
             return Err(invalid());
         }
         let mut hash = Sha256::default();
+        // Recovery can verify UTF-8 and hash text without retaining the field.
+        // A four-byte scalar may span two reads. Carry its incomplete prefix into
+        // the next validation window but hash only newly read bytes. An incomplete
+        // scalar at end of field is invalid.
         let mut buffer = [0; 8 * 1024 + 3];
         let mut carry = 0;
         while remaining != 0 {
+            // The spare buffer bytes hold the unfinished prefix of one UTF-8
+            // scalar. Start the next read just after that prefix. The hash still
+            // sees only the newly read portion.
             let count = remaining.min(buffer.len() - 3);
             self.read_into(&mut buffer[carry..carry + count])?;
             hash.update(&buffer[carry..carry + count]);
@@ -882,12 +1253,19 @@ impl<R: Read> Reader<'_, R> {
         }
         Ok((String::new(), hash.finish()))
     }
+    // The dimension supplies the coordinate count, with four bytes for each scalar.
+    // Check the multiplication and the payload boundary before reserving anything.
+    // Summary mode reads the same blocks and still rejects nonfinite coordinates,
+    // but retains no vector.
     fn vector(&mut self, dim: usize, retain: bool) -> Result<Vec<f32>> {
         let mut remaining = dim.checked_mul(4).ok_or_else(invalid)?;
         if remaining as u64 > self.remaining {
             return Err(invalid());
         }
         let mut vector = Vec::new();
+        // The admission amount is the encoded coordinate byte count, which is also
+        // the retained f32 storage size. Summary mode allocates no vector and
+        // still follows the same byte and finiteness checks.
         if retain {
             self.reserve_owned_bytes(remaining)?;
             vector
@@ -901,6 +1279,9 @@ impl<R: Read> Reader<'_, R> {
         }
         let mut buffer = [0; 4 * 1024];
         while remaining != 0 {
+            // The buffer and remaining length are both multiples of four. Each
+            // inner chunk therefore contains one complete little-endian
+            // coordinate, with no spill between iterations.
             let count = remaining.min(buffer.len());
             self.read_into(&mut buffer[..count])?;
             remaining -= count;
@@ -935,16 +1316,25 @@ impl<R: Read> Reader<'_, R> {
         }
         Ok(Some(self.u32()?))
     }
+    // The stored value counts milliseconds since the epoch. Formatting uses a
+    // shorter spelling for whole seconds, so the owned string can reserve the exact
+    // printed length in either case.
     fn timestamp(&mut self) -> Result<String> {
         let value = self.u64()?;
         // Public timestamps support the four-digit RFC3339 year range.
         if value > 253_402_300_799_999 {
             return Err(invalid());
         }
+        // Whole seconds use the shorter RFC3339 form. A nonzero millisecond
+        // remainder needs three fractional digits plus the decimal point. Reserve
+        // the emitted length before formatting.
         let mut output = self.string_buffer(if value % 1000 == 0 { 20 } else { 24 })?;
         time::write_unix_millis(&mut output, value).expect("writing to String is infallible");
         Ok(output)
     }
+    // Transfer the parsed object's credit into the record when returning metadata
+    // to the caller. Callers of json_processed can instead inspect temporary
+    // configuration JSON while its own guard remains alive.
     fn json(&mut self) -> Result<JsonValue> {
         let (value, work) = self.json_processed()?.into_parts();
         self.work.merge(work);
@@ -956,9 +1346,16 @@ impl<R: Read> Reader<'_, R> {
         if len > self.remaining {
             return Err(invalid());
         }
+        // Bound the canonical parser to this field alone. It must consume the
+        // complete declared range and return an object. Only then debit the
+        // enclosing reader's remaining length and advance to the next binary field.
         let mut limited = (&mut self.source).take(len);
         let value =
             crate::json::parse_canonical_reader_in(&mut limited, self.json_kind, &self.context)?;
+        // A parser may return a value before consuming the declared byte range.
+        // Check the remaining limit alongside the object shape, then advance the
+        // outer frame. Either failure means the following field boundary cannot be
+        // trusted.
         if limited.limit() != 0 || value.value.as_object().is_none() {
             return Err(invalid());
         }

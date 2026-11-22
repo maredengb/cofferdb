@@ -10,11 +10,19 @@ use std::collections::BinaryHeap;
 
 #[derive(Clone, Copy, Debug)]
 struct ScoredChunk {
+    // Numeric chunk ID in the checkpoint. Used to join postings and converted back
+    // to the public ID string for tie breaking and returned hits.
     id: u64,
+    // Indexed chunk length in tokens, retained while term postings are accumulated
+    // and reproduced for the winning term explanations.
     length: usize,
+    // Sum of raw BM25 contributions from the segment's matching term postings for
+    // this chunk.
     score: f64,
 }
 
+// Equality here describes a rank key. The stored length participates in scoring
+// earlier but has no place in the tie once two chunks have a final score and ID.
 impl PartialEq for ScoredChunk {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
@@ -28,11 +36,17 @@ impl PartialOrd for ScoredChunk {
 }
 impl Ord for ScoredChunk {
     fn cmp(&self, other: &Self) -> Ordering {
+        // A greater chunk wins. The bounded heap wraps these keys in Reverse so a
+        // new contender can be compared with the least desirable survivor at its
+        // root.
         self.score
             .partial_cmp(&other.score)
             .unwrap_or(Ordering::Equal)
             .then_with(|| {
                 // Numeric order differs from the frozen string tie-break across ID widths.
+                // Use each canonical ID spelling in its own stack buffer. Once the
+                // numeric suffix exceeds its minimum padded width, the lexically
+                // earlier ID can correspond to the larger number.
                 catalog_id_text(&mut [0; 24], b"chk_", other.id).cmp(catalog_id_text(
                     &mut [0; 24],
                     b"chk_",
@@ -42,9 +56,16 @@ impl Ord for ScoredChunk {
     }
 }
 
+// Dictionary entries can have zero postings. Like absent query terms, they consume
+// no column of the winner explanation matrix, so the default column value is
+// meaningful only after testing df.
 #[derive(Default)]
 struct TermStats {
+    // Count of chunks containing this query term according to its collection
+    // segment. Zero leaves the term out of the explanation matrix.
     df: usize,
+    // Dense column assigned only to query terms with positive document frequency.
+    // Readers test df before indexing this column.
     column: usize,
 }
 
@@ -57,6 +78,9 @@ impl TextIndex {
         options: TextSearchOptions,
         context: &JsonOperationContext,
     ) -> Result<Option<Bm25Hits>> {
+        // Unrestricted recall competes across chunks that score positively and
+        // keeps the caller's cutoff. Passing None leaves the visitor free to build
+        // a score row for every chunk in this collection.
         Self::search_selected_from_segment(
             source,
             storage,
@@ -76,6 +100,9 @@ impl TextIndex {
         ids: &[&str],
         context: &JsonOperationContext,
     ) -> Result<Option<Bm25Hits>> {
+        // Score completion is keyed by a caller-supplied set of IDs. Give every
+        // requested row room and request its explanation, including valid rows
+        // whose query terms made no contribution.
         Self::search_selected_from_segment(
             source,
             storage,
@@ -97,11 +124,17 @@ impl TextIndex {
         ids: Option<&[&str]>,
         context: &JsonOperationContext,
     ) -> Result<Option<Bm25Hits>> {
+        // Reading the segment and scoring its contents draw from the same
+        // operation budget. A zero minimum allows the reader to take only the
+        // input buffer space left under that budget.
         let mut input = context.workspace_reservation();
         input.grow_to(0, 64 * 1024, "operation_scratch")?;
         loop {
             #[cfg(test)]
             tests::record_input(input.reserved_bytes());
+            // Each attempt invokes a fresh segment visit, so any score arrays
+            // built on the failed pass have dropped before the same input is tried
+            // with a different buffer grant.
             match Self::search_selected_segment_with(
                 query,
                 options,
@@ -113,8 +146,13 @@ impl TextIndex {
                     if crate::json::is_memory_budget_error(&error)
                         && input.reserved_bytes() > 0 =>
                 {
+                    // The read buffer is optional. Release it before rerunning
+                    // scoring so mandatory query arrays can use the same credit.
                     input.retain(0)
                 }
+                // Only a memory-budget failure with a nonzero read buffer takes
+                // another pass. Once the zero-buffer attempt returns, its error or
+                // source availability goes directly to the caller.
                 result => return result,
             }
         }
@@ -137,13 +175,22 @@ impl TextIndex {
         context: &JsonOperationContext,
         mut visit: impl FnMut(&mut TextSegmentVisitor<'_>) -> Result<bool>,
     ) -> Result<Option<Bm25Hits>> {
+        // A caller asking for no rows needs neither a source visit nor query-term
+        // workspace. This successful empty result is available even when the
+        // segment itself cannot serve other requests.
         if options.limit == 0 {
             return Ok(Some(Bm25Hits::empty(context)));
         }
         let terms = crate::tokenizer::query_terms_in(query, context)?;
+        // Lexical recall needs a matching token to produce any hits. Score
+        // completion still owes a row, potentially with a zero score, for every
+        // supplied candidate ID.
         if terms.len() == 0 && ids.is_none() {
             return Ok(Some(Bm25Hits::empty(context)));
         }
+        // Keep one statistics slot per query term, including terms missing from
+        // the segment. Later passes address the slot by query vocabulary position
+        // even when only some terms receive matrix columns.
         let mut stats = ReservedVec::with_capacity(terms.len(), context, "operation_scratch")?;
         for _ in 0..terms.len() {
             stats.push(TermStats::default());
@@ -154,13 +201,22 @@ impl TextIndex {
             .map(|ids| -> Result<_> {
                 let mut numbers =
                     ReservedVec::with_capacity(ids.len(), context, "operation_scratch")?;
+                // Use the numeric IDs stored in the segment for membership checks.
+                // Their directory order can differ from the caller's formatted
+                // strings.
                 for id in ids {
                     numbers.push(catalog_id_number(id)?);
                 }
+                // Sort a private numeric copy. The caller's original slice can
+                // still serve other retrieval branches, and its textual order need
+                // not match the segment's numeric chunk order.
                 numbers.as_mut_slice().sort_unstable();
                 Ok(numbers)
             })
             .transpose()?;
+        // The segment lists chunks before postings. Even an ID lookup needs the
+        // lengths of all chunks to compute the same average length as a full search.
+        // Keep the selected rows in numeric ID order for the postings lookup.
         let mut collection_chunks = 0;
         let mut total_length = 0usize;
         let mut average = 1.0;
@@ -169,6 +225,10 @@ impl TextIndex {
             match entry {
                 TextSegmentEntry::Header { chunks } => {
                     collection_chunks = chunks;
+                    // Full recall can accumulate one score per chunk. For a
+                    // completion request the same header gives the corpus
+                    // population, but only the requested number of score slots
+                    // needs workspace.
                     scores = ReservedVec::with_capacity(
                         ids.map_or(chunks, |ids| ids.len()),
                         context,
@@ -176,6 +236,10 @@ impl TextIndex {
                     )?;
                 }
                 TextSegmentEntry::Chunk { id, length } => {
+                    // Accumulate every decoded chunk's token length before testing
+                    // membership. Dropping unrequested rows from this sum would
+                    // make a chosen chunk's score depend on the other requested
+                    // IDs.
                     total_length = total_length.checked_add(length).ok_or_else(|| {
                         Error::new(ErrorCode::FileFormatError, "text token count overflow")
                     })?;
@@ -183,6 +247,10 @@ impl TextIndex {
                         .as_ref()
                         .map_or(true, |ids| ids.as_slice().binary_search(&id).is_ok())
                     {
+                        // Seed selected chunks with zero. A candidate whose
+                        // postings never match the query is still a valid
+                        // completion row, including when the query vocabulary is
+                        // empty.
                         scores.push(ScoredChunk {
                             id,
                             length,
@@ -194,12 +262,19 @@ impl TextIndex {
                     text,
                     document_frequency,
                 } => {
+                    // Term headers follow all chunk lengths, so the collection
+                    // average is complete before the first contribution. The empty
+                    // collection uses one as its fallback normalization length.
                     let n = collection_chunks;
                     average = if n == 0 {
                         1.0
                     } else {
                         total_length as f64 / n as f64
                     };
+                    // Replace the current posting-group state on every dictionary
+                    // entry. An unrelated term must clear the preceding term's IDF
+                    // or its postings would score as matches for that earlier
+                    // term.
                     current = terms.position(text).map(|position| {
                         stats.as_mut_slice()[position].df = document_frequency;
                         let df = document_frequency as f64;
@@ -210,11 +285,19 @@ impl TextIndex {
                     chunk, frequency, ..
                 } => {
                     if let Some(idf) = current {
+                        // The chunk directory visits IDs in numeric order. Pushing
+                        // only wanted rows preserves that order, so postings can
+                        // join directly to their accumulated scores by binary
+                        // search.
                         let position = match scores
                             .as_slice()
                             .binary_search_by_key(&chunk, |entry| entry.id)
                         {
                             Ok(position) => position,
+                            // A selected-ID lookup deliberately omitted the other
+                            // chunks from the score table. Their postings still
+                            // belong to the term's collection-wide statistics. In a
+                            // full scan every posting needs a score row.
                             Err(_) if ids.is_some() => return Ok(()),
                             Err(_) => {
                                 return Err(Error::new(
@@ -223,6 +306,10 @@ impl TextIndex {
                                 ))
                             }
                         };
+                        // Use the score row's chunk length and the collection-wide
+                        // average with this term's IDF. The same inputs are kept
+                        // for explaining each winning contribution after
+                        // selection.
                         let score = &mut scores.as_mut_slice()[position];
                         score.score += contribution(frequency, score.length, average, idf);
                     }
@@ -230,46 +317,86 @@ impl TextIndex {
             }
             Ok(())
         })? {
+            // The visitor's false result describes the whole segment. Even if
+            // earlier closures filled some score rows, none of them can be
+            // returned from an incomplete source.
             return Ok(None);
         }
 
+        // A missing requested ID makes the segment unusable for score completion.
+        // Let the caller try its other source. In contrast, scoring the available
+        // rows and selecting no matches below is a successful empty result.
+        // The selected table stores one row per encountered chunk. A repeated
+        // requested ID, just like an absent one, prevents this row count from
+        // satisfying the completion request.
         if ids.is_some_and(|ids| scores.as_slice().len() != ids.len()) {
             return Ok(None);
         }
         // Empty query still reports the collection's true lengths and zero scores.
+        // A segment may contain chunks but no term headers. Derive the final
+        // average from the accumulated lengths here as well, independent of
+        // whether scoring encountered a posting group.
         if collection_chunks != 0 {
             average = total_length as f64 / collection_chunks as f64;
         }
         let chunks = collection_chunks;
+        // Completion allows zero scores into selection. Ordinary recall admits
+        // only positive scores so an unrelated chunk cannot fill an otherwise
+        // unused result slot.
         let selected =
             select_candidates_with_zeros(scores.as_slice(), options.limit, ids.is_some(), context)?;
+        // The bounded selection owns copies of its score rows. Drop the larger
+        // accumulator before reserving the lookup and winner-by-term matrix, which
+        // can compete for the same budget.
         drop(scores);
         if selected.as_slice().is_empty() {
             return Ok(Some(Bm25Hits::empty(context)));
         }
 
+        // An absent query term has no explanation entries in any winning row.
+        // Assign columns only to present terms, keeping their order from the sorted
+        // query vocabulary.
         let mut columns = 0usize;
+        // The default column value is also a legitimate first column. Document
+        // frequency determines whether a slot received a column before any lookup
+        // may use that value.
         for term in stats.as_mut_slice().iter_mut().filter(|term| term.df != 0) {
             term.column = columns;
             columns += 1;
         }
+        // Only the selected rows need term-by-term explanations. Revisit the
+        // segment for their frequencies after ranking, avoiding a table of term
+        // counts for every chunk. Score-only queries finish without that pass.
         let frequencies = if options.explanations {
             let mut lookup = ReservedVec::with_capacity(
                 selected.as_slice().len(),
                 context,
                 "operation_scratch",
             )?;
+            // Winners are in score order, while postings refer to numeric chunk
+            // IDs. Sort a separate ID-to-row mapping for lookup so filling the
+            // frequency matrix does not disturb the output ranking.
             for (position, entry) in selected.as_slice().iter().enumerate() {
                 lookup.push((entry.0.id, position));
             }
             lookup.as_mut_slice().sort_unstable_by_key(|entry| entry.0);
             #[cfg(test)]
             tests::record_matrix(selected.as_slice().len(), columns);
+            // With no present query terms the matrix can have rows and zero
+            // columns. Its empty backing array is valid because extraction checks
+            // document frequency before indexing a cell.
             let mut frequencies = frequency_matrix(selected.as_slice().len(), columns, context)?;
             let mut current = None;
+            // The explanation pass reads the segment a second time. If that visit
+            // cannot finish against a valid segment, discard the first pass's
+            // winners too. Returning them with missing frequencies would make the
+            // scores and their explanations disagree.
             if !visit(&mut |entry| {
                 match entry {
                     TextSegmentEntry::Term { text, .. } => {
+                        // The column belongs to the current term group only.
+                        // Replace it with None for an irrelevant dictionary entry
+                        // before visiting the postings that follow.
                         current = terms
                             .position(text)
                             .filter(|&position| stats.as_slice()[position].df != 0)
@@ -283,6 +410,10 @@ impl TextIndex {
                                 .as_slice()
                                 .binary_search_by_key(&chunk, |entry| entry.0)
                             {
+                                // Map the matched numeric ID back to the winner's
+                                // original row. The lookup's own binary-search
+                                // position is in ID order and cannot address the
+                                // score-ranked matrix directly.
                                 let row = lookup.as_slice()[position].1;
                                 frequencies.as_mut_slice()[row * columns + column] = frequency;
                             }
@@ -299,19 +430,32 @@ impl TextIndex {
             None
         };
 
+        // The lookup, score rows and frequency cells hold intermediate data. The
+        // returned hits retain only the selected IDs, scores and individually
+        // matched term details, with their own workspace owner.
         let mut hits = Bm25Hits::with_capacity(selected.as_slice().len(), context)?;
         for (row, entry) in selected.as_slice().iter().enumerate() {
             let chunk = &entry.0;
             let matched = terms.iter().enumerate().filter_map(|(position, term)| {
+                // A score-only result has no matrix. Its matched-term iterator
+                // stays empty while the hit below still receives the score
+                // computed by the first pass.
                 let frequencies = frequencies.as_ref()?;
                 let stats = &stats.as_slice()[position];
                 if stats.df == 0 {
                     return None;
                 }
+                // A term may be present in this collection without appearing in
+                // this particular winner. Its zero cell contributes neither an
+                // explanation entry nor an additional term score.
                 let frequency = frequencies.as_slice()[row * columns + stats.column];
                 if frequency == 0 {
                     return None;
                 }
+                // Reconstruct each matched term from the same collection
+                // population, document frequency and chunk length used for its raw
+                // score. These details remain per term even when several
+                // contribute to one hit.
                 let n = chunks as f64;
                 let df = stats.df as f64;
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
@@ -325,11 +469,16 @@ impl TextIndex {
                 })
             });
             hits.push(
+                // Decode the numeric ID to a stack buffer only for this call. The
+                // result builder takes an owned copy before the temporary buffer
+                // expires.
                 catalog_id_text(&mut [0; 24], b"chk_", chunk.id),
                 chunk.score,
                 matched,
             )?;
         }
+        // Recall returns ranked rows. Selected-ID scoring instead returns a lookup
+        // table for fusion, whose binary search expects lexical chunk-ID order.
         if ids.is_some() {
             hits.sort_by_id();
         }
@@ -352,22 +501,37 @@ fn select_candidates_with_zeros(
     include_zero: bool,
     context: &JsonOperationContext,
 ) -> Result<ReservedVec<Reverse<ScoredChunk>>> {
+    // The predicate is shared between the count and the heap pass. A zero-score
+    // candidate survives in selected-ID completion only, where an explicit zero is
+    // part of the result for a requested ID.
     let matches = || {
         scores
             .iter()
             .filter(|chunk| include_zero || chunk.score > 0.0)
             .copied()
     };
+    // Count eligible scores first so the heap reserves exactly what can survive. A
+    // selected-ID lookup can retain real zeros, whereas ordinary recall has no
+    // lexical hit to emit for them.
     let count = matches().count().min(limit);
+    // Carry the byte calculation in the ledger's wide representation. The heap
+    // takes the same number of slots that will survive ranking, without reserving
+    // one for every row in the score table.
     let bytes = count as u128 * std::mem::size_of::<ScoredChunk>() as u128;
     let mut work = context.workspace_reservation();
     work.grow_to_wide(bytes, bytes, "operation_scratch")?;
     let mut heap = BinaryHeap::new();
     heap.try_reserve_exact(count)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    // Reject an allocator overgrant before adding hits. The array that survives in
+    // the result must remain within the byte count reserved above, even if the
+    // heap stores fewer rows later.
     if heap.capacity() != count {
         return Err(std::io::Error::other("text candidate capacity exceeds admission").into());
     }
+    // Use Reverse so the least valuable retained score stays at the root. Ties are
+    // resolved by ScoredChunk ordering, so a candidate at the boundary has the
+    // same chance to survive as in a full deterministic sort.
     for chunk in matches() {
         if heap.len() < count {
             heap.push(Reverse(chunk));
@@ -375,6 +539,9 @@ fn select_candidates_with_zeros(
             *heap.peek_mut().unwrap() = Reverse(chunk);
         }
     }
+    // Return the sorted vector using the heap's allocation. The reservation must
+    // follow that allocation until the caller finishes materializing owned
+    // matches.
     Ok(ReservedVec::from_reserved(heap.into_sorted_vec(), work))
 }
 
@@ -383,12 +550,18 @@ fn frequency_matrix(
     columns: usize,
     context: &JsonOperationContext,
 ) -> Result<ReservedVec<usize>> {
+    // Size the dense frequency array with checked arithmetic before converting to
+    // a host allocation length. Each selected ID receives one cell per query term
+    // with a positive document frequency, including pairs absent from that row's
+    // postings.
     let count = rows as u128 * columns as u128;
     let bytes = count
         .checked_mul(std::mem::size_of::<usize>() as u128)
         .ok_or_else(|| std::io::Error::other("text frequency array size overflow"))?;
     let count = match usize::try_from(count) {
         Ok(count) => count,
+        // Ask the ledger about the full byte requirement before reporting an
+        // address-space error, preserving the resource error and its details.
         Err(_) => {
             context
                 .workspace_reservation()
@@ -397,6 +570,9 @@ fn frequency_matrix(
         }
     };
     let mut values = ReservedVec::with_capacity(count, context, "operation_scratch")?;
+    // Initialize the entire matrix to zero. Posting visits fill only observed
+    // pairs, so a missing term for a candidate retains its zero count without
+    // another sparse lookup.
     for _ in 0..count {
         values.push(0);
     }

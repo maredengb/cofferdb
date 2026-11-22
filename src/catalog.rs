@@ -15,7 +15,12 @@ mod models;
 mod mutation;
 pub(crate) use models::ModelState;
 
+// A read of a document's children borrows the catalog rows. Keep their ordering and
+// its workspace in the same owner so an iterator cannot outlive either.
 pub(crate) struct DocumentChunks<'a> {
+    // Each entry pairs its original position in the live membership list with the
+    // chunk. The position breaks ties between equal ordinals without requiring a
+    // second allocation for stable sorting.
     ordered: crate::json::ReservedVec<(usize, &'a Chunk)>,
 }
 
@@ -29,33 +34,94 @@ impl<'a> DocumentChunks<'a> {
     }
 }
 
+// The catalog is the in-memory view of committed records. Lookups by ID, lookups by
+// external name and parent/child membership are separate because the same chunk can
+// be replaced or hidden while old bytes still exist in the log. Apply or roll back
+// all participating maps together.
+//
+// Large text and vector payloads normally stay in primary storage. The catalog
+// keeps enough metadata to decide visibility and scoring eligibility, plus the
+// locator needed to materialize a selected payload.
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug, Default)]
 pub struct Catalog {
+    // Collection definitions by stable internal ID. A retained definition can
+    // belong to a dropped collection, so membership alone does not establish
+    // visibility.
     pub collections: BTreeMap<String, CollectionInfo>,
+    // Reverse lookup from collection name to its internal ID. Name-based reads
+    // still apply the deletion check to the row found here.
     pub collection_names: BTreeMap<String, String>,
+    // Names reserved by a previous collection drop. Removing the live definition
+    // must not make one of these names available again.
     pub reserved_collection_names: BTreeSet<String>,
+    // Document summaries keyed by stable internal ID. A tombstoned document can
+    // retain its identity and collection after its payload fields and corresponding
+    // record locator have been cleared.
     // Box large summaries so spare tree slots only reserve a pointer, not a full model.
     pub documents: BTreeMap<String, Box<Document>>,
+    // Collection-scoped external document IDs and their current internal owners.
+    // Two collections may use the same external ID.
     pub(crate) document_external_ids: ExternalIds,
+    // Latest chunk summaries by internal ID, including identity and parent fields
+    // used to explain deletions. A record locator supplies text omitted from a
+    // summary.
     pub chunks: BTreeMap<String, Box<Chunk>>,
+    // Collection-scoped external chunk names, used to resolve a user-supplied ID
+    // without searching every chunk.
     pub(crate) chunk_external_ids: ExternalIds,
+    // Internal document ID to child chunk IDs in membership order. Moving a chunk
+    // between documents must update both memberships before queries use this map.
     pub document_chunks: BTreeMap<String, Vec<String>>,
+    // Embedding summaries by internal embedding ID. Visibility also depends on
+    // which embedding the owning chunk currently selects.
     pub embeddings: BTreeMap<String, Box<Embedding>>,
+    // Active embedding ID for each chunk. An older embedding can still be present
+    // in the primary map after replacement.
     pub chunk_embeddings: BTreeMap<String, String>,
+    // Most recent retained primary record location for each stored object ID.
+    // Removing a deleted payload's locator does not discard the identity needed for
+    // diagnostics.
     pub record_refs: BTreeMap<String, RecordRef>,
+    // Greatest allocated number for each ID prefix. Persist this boundary through
+    // compaction even when the object with the highest number is gone.
     pub id_high_watermarks: BTreeMap<String, u64>,
+    // Count of business records applied, including superseded puts and tombstones.
+    // Commit frames and compaction markers are excluded.
     business_record_count: usize,
+    // Count of tombstone records in the applied history. Repeated tombstones
+    // contribute separately even when they hide the same target.
     tombstone_count: usize,
+    // Tombstone counts keyed by the targeted collection ID. These can be attributed
+    // to a collection without resolving a child row.
     collection_tombstones: BTreeMap<String, usize>,
+    // Tombstone counts by document ID. Collection-level statistics resolve the
+    // owning collection when they are read.
     document_tombstones: BTreeMap<String, usize>,
+    // Tombstone counts by chunk ID. Keep target IDs so later knowledge of a chunk's
+    // parent can attribute historical tombstones.
     chunk_tombstones: BTreeMap<String, usize>,
+    // Collection IDs hidden by a drop or a collection tombstone. Their descendants
+    // become invisible without individual deletion records.
     pub deleted_collections: BTreeSet<String>,
+    // Recorded drop time by internal collection ID, retained for the
+    // collection-drop records produced by a rewrite.
     pub collection_drop_times: BTreeMap<String, String>,
+    // Document IDs explicitly hidden. A chunk can become invisible through this set
+    // even when its own ID has no tombstone.
     pub deleted_documents: BTreeSet<String>,
+    // Chunk IDs explicitly hidden. Readers must also test the document and
+    // collection when this set does not contain the chunk.
     pub deleted_chunks: BTreeSet<String>,
+    // Batch ID of the last main-data commit reflected by this catalog. Record
+    // sequence numbers are tracked separately by the database.
     pub last_commit_id: u64,
+    // Bounded cache of model-state witnesses for collections. A mutation that
+    // changes the visible embedding set also affects whether a cached witness is
+    // valid.
     model_states: models::ModelStates,
+    // Optional owner of this catalog's memory charge. A catalog built without
+    // managed accounting may have no reservation here.
     memory: Option<mutation::CatalogMemory>,
 }
 
@@ -314,6 +380,9 @@ impl Catalog {
                 format!("collection {name} not found"),
             )
         })?;
+        // The name table resolves an identity, including identities retained after
+        // deletion. Apply the internal lookup's visibility test before returning a
+        // definition to the caller.
         self.collection_by_id(id)
     }
 
@@ -324,6 +393,9 @@ impl Catalog {
                 format!("collection {collection_id} not found"),
             )
         })?;
+        // Keep the definition available to replay and compaction even after a
+        // drop. Public lookup treats that retained row as missing and can still
+        // name the deleted collection in its diagnostic.
         if self.deleted_collections.contains(collection_id) {
             return Err(Error::new(
                 ErrorCode::CollectionNotFound,
@@ -334,6 +406,9 @@ impl Catalog {
     }
 
     pub fn check_collection_name_available(&self, name: &str) -> Result<()> {
+        // Distinguish a live name collision from a reserved deleted name. The
+        // latter survives the disappearance of live contents and has its own public
+        // error.
         if self
             .collection_names
             .get(name)
@@ -345,6 +420,9 @@ impl Catalog {
                 format!("collection {name} already exists"),
             ));
         }
+        // Consult both representations of a retired name. A rewritten catalog may
+        // carry an explicit reservation, while the name-to-ID entry plus a hidden
+        // definition also proves the name cannot be reused.
         if self.reserved_collection_names.contains(name)
             || self
                 .collection_names
@@ -367,6 +445,9 @@ impl Catalog {
                 format!("document {document_id} not found"),
             )
         })?;
+        // The primary ID map spans collections and retains historical rows. Use
+        // the same not-found code for a foreign ID and a hidden document, so this
+        // collection-scoped lookup cannot return either.
         if document.collection_id != collection_id || !self.is_document_live(document_id) {
             return Err(Error::new(
                 ErrorCode::DocumentNotFound,
@@ -381,6 +462,9 @@ impl Catalog {
         collection_id: &str,
         external_id: &str,
     ) -> Result<&Document> {
+        // External aliases are scoped to a collection and may point to a different
+        // internal ID after replacement. Resolve the alias first and use the
+        // normal document lookup to check that its current target is visible.
         let id = self
             .document_external_ids
             .get(collection_id, external_id)
@@ -400,6 +484,9 @@ impl Catalog {
                 format!("chunk {chunk_id} not found"),
             )
         })?;
+        // A chunk with no tombstone of its own can disappear when its parent
+        // document or collection is deleted. Use the hierarchy's liveness
+        // predicate even after the global ID lookup succeeds.
         if chunk.collection_id != collection_id || !self.is_chunk_live(chunk_id) {
             return Err(Error::new(
                 ErrorCode::ChunkNotFound,
@@ -414,6 +501,9 @@ impl Catalog {
         collection_id: &str,
         chunk_external_id: &str,
     ) -> Result<&Chunk> {
+        // The external key is scoped by collection. The alias selects an internal
+        // chunk ID, but the selected row may still be hidden by deletion of the
+        // chunk, its document, or the collection.
         let id = self
             .chunk_external_ids
             .get(collection_id, chunk_external_id)
@@ -423,6 +513,9 @@ impl Catalog {
                     format!("chunk_external_id {chunk_external_id} not found"),
                 )
             })?;
+        // Delegate the final visibility and collection checks to the internal-ID
+        // path. External and internal lookups should never disagree about whether
+        // the resolved chunk can be read.
         self.chunk_by_id(collection_id, id)
     }
 
@@ -432,10 +525,16 @@ impl Catalog {
         document_id: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<DocumentChunks<'_>> {
+        // Validate that the parent is both visible and in the requested collection
+        // before admitting the result array. Counting against the same immutable
+        // catalog then gives the exact number of live children to collect.
         self.document_by_id_ref(collection_id, document_id)?;
         let count = self.live_document_chunks(document_id).count();
         let mut ordered =
             crate::json::ReservedVec::with_capacity(count, context, "operation_scratch")?;
+        // Store references to the live summaries in the admitted array. Reading
+        // full chunk text or metadata is a separate operation after ordering, so a
+        // document with many children need not materialize them all here.
         for (position, chunk) in self.live_document_chunks(document_id).enumerate() {
             ordered.push((position, chunk));
         }
@@ -451,11 +550,17 @@ impl Catalog {
         collection_id: &str,
         document_id: &str,
     ) -> Result<usize> {
+        // A missing or hidden parent must produce the same error as the
+        // ordered-list path. Once the parent is checked, counting needs neither an
+        // ordering array nor the children's payloads.
         self.document_by_id_ref(collection_id, document_id)?;
         Ok(self.live_document_chunks(document_id).count())
     }
 
     pub(crate) fn live_document_chunks(&self, document_id: &str) -> impl Iterator<Item = &Chunk> {
+        // The membership list can retain IDs hidden by a parent tombstone. Yield
+        // only live rows and allow an absent list to act as an empty iterator for
+        // a parent whose identity the caller has already checked.
         self.document_chunks
             .get(document_id)
             .into_iter()
@@ -466,6 +571,9 @@ impl Catalog {
     }
 
     pub fn embedding_for_chunk(&self, chunk_id: &str) -> Option<&Embedding> {
+        // This follows the chunk's current embedding link without establishing
+        // chunk visibility. Callers working from an arbitrary internal ID must
+        // first establish that the chunk is eligible for their operation.
         self.chunk_embeddings
             .get(chunk_id)
             .and_then(|id| self.embeddings.get(id))
@@ -473,17 +581,30 @@ impl Catalog {
     }
 
     pub fn record_ref_for_chunk(&self, chunk_id: &str) -> Option<&RecordRef> {
+        // A locator refers to this catalog's storage file and can be absent on an
+        // in-memory row. Its presence supplies a source for materializing a
+        // payload, not a separate decision about visibility.
         self.record_refs.get(chunk_id)
     }
 
     pub fn record_ref_for_embedding(&self, embedding_id: &str) -> Option<&RecordRef> {
+        // Lookup is keyed by the selected embedding's own ID. A chunk and its
+        // embedding come from different primary records, so the chunk's payload
+        // offset cannot be reused when loading the vector.
         self.record_refs.get(embedding_id)
     }
 
+    // The snapshot borrows the same catalog throughout a scan. It does not
+    // allocate a second copy of the membership indexes or hold an independent
+    // database connection.
     pub fn visible_snapshot(&self) -> VisibleSnapshot<'_> {
         VisibleSnapshot { catalog: self }
     }
 
+    // Presence in a map records an identity, including ones hidden by deletion.
+    // Visibility also depends on every parent: deleting a document hides its
+    // chunks without a separate tombstone for each one. Use the live predicates
+    // when enumerating search or export input, or those chunks can reappear.
     pub fn is_collection_live(&self, collection_id: &str) -> bool {
         self.collections.contains_key(collection_id)
             && !self.deleted_collections.contains(collection_id)
@@ -493,6 +614,9 @@ impl Catalog {
         let Some(document) = self.documents.get(document_id) else {
             return false;
         };
+        // A document remains hidden when its collection is dropped even if the
+        // document itself never received a tombstone. Search and export must agree
+        // with scoped point lookups on this inherited state.
         self.is_collection_live(&document.collection_id)
             && !self.deleted_documents.contains(document_id)
     }
@@ -501,6 +625,9 @@ impl Catalog {
         let Some(chunk) = self.chunks.get(chunk_id) else {
             return false;
         };
+        // Checking the parent document also carries the collection check through
+        // to the chunk. A document replacement leaves its old children linked to
+        // the old internal ID even when the new parent has the same external name.
         self.is_document_live(&chunk.document_id) && !self.deleted_chunks.contains(chunk_id)
     }
 
@@ -517,6 +644,9 @@ impl Catalog {
             .filter(|document| self.is_document_live(&document.document_id))
     }
 
+    // Cloning the filtered iterator gives another traversal of the same borrowed
+    // view. Callers can count or size work before a later pass without copying all
+    // chunk summaries.
     pub fn live_chunks(&self) -> impl Iterator<Item = &Chunk> + Clone {
         self.chunks
             .values()
@@ -524,10 +654,15 @@ impl Catalog {
             .filter(|chunk| self.is_chunk_live(&chunk.chunk_id))
     }
 
+    // Replacement can leave an older embedding in the primary map. Only the embedding
+    // currently selected by a live chunk participates in searches and model checks.
     pub fn live_embeddings(&self) -> impl Iterator<Item = &Embedding> + Clone {
         self.embeddings
             .values()
             .map(Box::as_ref)
+            // Filter on the internal embedding ID selected by the chunk as well as
+            // on the chunk's visibility. Counting the embedding map directly would
+            // include superseded vectors after a replacement.
             .filter(|embedding| {
                 self.is_chunk_live(&embedding.chunk_id)
                     && self
@@ -539,6 +674,10 @@ impl Catalog {
     }
 
     pub fn next_id(&self, prefix: &str, offset: u64) -> Result<String> {
+        // The public formatter and the budgeted formatter below must generate
+        // identical IDs for the same prefix and offset. Parent references in a
+        // staged batch are sometimes computed separately from their corresponding
+        // puts.
         let next = self.next_id_number(prefix, offset)?;
         Ok(format!("{prefix}{next:016}"))
     }
@@ -550,6 +689,9 @@ impl Catalog {
         context: &crate::json::JsonOperationContext,
     ) -> Result<crate::json::ReservedString> {
         let next = self.next_id_number(prefix, offset)?;
+        // Sixteen decimal digits are the minimum display width. Values above that
+        // width are still valid, so include the full digit count when reserving
+        // bytes to format a large watermark.
         let digits = (next.ilog10() as usize + 1).max(16);
         crate::json::ReservedString::build_exact(
             prefix.len() + digits,
@@ -559,10 +701,17 @@ impl Catalog {
         )
     }
 
+    // Allocate from the watermark plus one, then apply the caller's in-batch
+    // offset. Neither lookup reserves the number in isolation. The publishing
+    // transaction must advance the watermark when the corresponding record is
+    // applied.
     fn next_id_number(&self, prefix: &str, offset: u64) -> Result<u64> {
         self.id_high_watermarks
             .get(prefix)
             .copied()
+            // The first ID in an unused namespace is one. Both the advance from
+            // the saved watermark and the subsequent batch offset must be checked,
+            // since wrapping either can reuse a committed ID.
             .unwrap_or(0)
             .checked_add(1)
             .and_then(|base| base.checked_add(offset))
@@ -595,19 +744,34 @@ impl Catalog {
         cache_budget_mb: usize,
         index: &IndexStats,
     ) -> DatabaseStats {
+        // These counts use the same live iterators as reads. The physical file
+        // size includes commit history and index bytes, so it need not track the
+        // visible object counts after a drop or replacement.
         DatabaseStats {
             collection_count: self.live_collections().count(),
             document_count: self.live_documents().count(),
             chunk_count: self.live_chunks().count(),
             embedding_count: self.live_embeddings().count(),
+            // Tombstones count historical records instead of currently hidden
+            // objects. A single parent deletion can hide many live descendants
+            // without creating one tombstone for each descendant.
             tombstone_count: self.tombstone_count,
             file_size,
             index_size_bytes: index.index_size_bytes,
             live_bytes: self.estimated_live_bytes(),
+            // Dead bytes are estimated from tombstone count. The catalog keeps no
+            // per-tombstone measured reclaimable extent, and rewriting the live
+            // rows determines the space actually recovered.
             dead_bytes_estimate: self.tombstone_count as u64 * 128,
             active_profile: profile,
             cache_budget_mb,
+            // Use the catalog's last applied primary batch as the commit identity.
+            // Replacing or rebuilding the derived index can change the file and
+            // index sizes without advancing this value.
             last_commit_id: self.last_commit_id,
+            // The pending estimate also includes an allowance for index bytes. The
+            // caller supplies the active file's index statistics and may override
+            // the background setting from the connection configuration.
             pending_compaction_bytes: self.tombstone_count as u64 * 128
                 + index.index_size_bytes / 10,
             format_version: crate::storage::FORMAT_VERSION,
@@ -623,8 +787,14 @@ impl Catalog {
         vector_count: usize,
         copy_name: impl FnOnce(&str) -> Result<String>,
     ) -> Result<CollectionStats> {
+        // Resolve the collection before accumulating counters. A dropped or
+        // unknown ID cannot masquerade as an empty live collection, and a failed
+        // allocation for the returned name leaves this catalog untouched.
         let collection = self.collection_by_id(collection_id)?;
         let name = copy_name(&collection.name)?;
+        // Count through the visibility iterators rather than the ownership maps. A
+        // document retirement can hide its chunks and their embeddings even when
+        // their own entries have not separately been tombstoned.
         let document_count = self
             .live_documents()
             .filter(|doc| doc.collection_id == collection_id)
@@ -633,11 +803,17 @@ impl Catalog {
             .live_chunks()
             .filter(|chunk| chunk.collection_id == collection_id)
             .count();
+        // This count comes from current visible embeddings in the catalog. The
+        // vector_count parameter is supplied by the caller alongside other index
+        // measurements and is carried separately in the public summary.
         let embedding_count = self
             .live_embeddings()
             .filter(|embedding| embedding.collection_id == collection_id)
             .count();
         let tombstone_count = self.tombstone_count_for_collection(collection_id);
+        // Set the profile and catalog-derived counts here. The connection supplies
+        // the collection's text-segment indicator, whole-index size, cache budget,
+        // and background-compaction setting after this returns.
         Ok(CollectionStats {
             tokenizer: collection.tokenizer.clone(),
             collection: name,
@@ -650,6 +826,9 @@ impl Catalog {
             vector_count,
             index_size_bytes: 0,
             live_bytes: self.estimated_live_bytes_for_collection(collection_id),
+            // Use a size estimate per tombstone for planning. This is not measured
+            // dead space: logical deletions can cover descendants and an actual
+            // rewrite also changes record framing and index overhead.
             dead_bytes_estimate: tombstone_count as u64 * 128,
             resource_profile: profile,
             cache_budget_mb: 0,
@@ -666,6 +845,10 @@ impl Catalog {
 
     fn tombstone_count_for_collection(&self, collection_id: &str) -> usize {
         // Resolve membership at read time, including targets created after their tombstone.
+        // Collection tombstones directly name their owner. Document and chunk
+        // tombstones instead need to consult the retained summaries below. A
+        // reference to an ID whose owner is still unknown contributes only to the
+        // database-wide count.
         self.collection_tombstones
             .get(collection_id)
             .copied()
@@ -710,7 +893,15 @@ impl Catalog {
         }
     }
 
+    // These figures estimate the payload bytes represented by visible chunks and
+    // embeddings. Use actual recorded payload lengths when available. In-memory
+    // rows have no wire span, so their text, metadata or components contribute an
+    // estimate instead.
     pub(crate) fn estimated_live_bytes_for_collection(&self, collection_id: &str) -> u64 {
+        // Count payload wire bytes where there is a primary-record locator. The
+        // sum excludes frame headers, document payloads and index bytes, so it is
+        // a measure of the live chunk and vector payloads rather than a predicted
+        // file length.
         let text_bytes = self
             .live_chunks()
             .filter(|chunk| chunk.collection_id == collection_id)
@@ -722,6 +913,9 @@ impl Catalog {
                     })
             })
             .sum::<u64>();
+        // Read only live embedding locators. An embedding may be superseded by
+        // another for the same chunk without a separate delete marker. Including
+        // both would inflate the live payload estimate.
         let vector_bytes = self
             .live_embeddings()
             .filter(|embedding| embedding.collection_id == collection_id)
@@ -741,22 +935,38 @@ impl Catalog {
     }
 }
 
+// A borrowed view over the catalog used by scans and index rebuilding. All
+// iterators derive liveness from this catalog for the duration of the borrow; the
+// view does not copy primary data.
 #[derive(Clone, Copy)]
 pub struct VisibleSnapshot<'a> {
+    // Catalog whose visibility rules, object relationships and primary locators
+    // this snapshot exposes.
     catalog: &'a Catalog,
 }
 
 pub struct VisibleChunk<'a> {
+    // Summary selected by the visibility iterator. Its IDs and metadata identify
+    // the chunk even if its text must be read separately.
     pub chunk: &'a Chunk,
+    // On-disk location for deferred materialization, when available. A caller using
+    // an in-memory chunk can read its stored text instead.
     pub record_ref: Option<&'a RecordRef>,
 }
 
 pub struct VisibleEmbedding<'a> {
+    // Embedding selected by its live chunk, carrying the model and dimension needed
+    // to interpret the vector.
     pub embedding: &'a Embedding,
+    // Optional primary payload location. A visible in-memory embedding can supply
+    // its components without a file read.
     pub record_ref: Option<&'a RecordRef>,
 }
 
 impl<'a> VisibleSnapshot<'a> {
+    // This borrowed iterator is the index builders' view of current chunks. Return
+    // the catalog summary paired with its primary locator so the caller can defer
+    // reading large text while retaining the visibility decision.
     pub fn live_chunks(&self) -> impl Iterator<Item = VisibleChunk<'a>> + 'a {
         let catalog = self.catalog;
         catalog
@@ -774,6 +984,9 @@ impl<'a> VisibleSnapshot<'a> {
         catalog
             .embeddings
             .values()
+            // An embedding must still be the one named by its chunk. Testing only
+            // the chunk's liveness would admit a replaced embedding alongside its
+            // successor.
             .filter(move |embedding| {
                 catalog.is_chunk_live(&embedding.chunk_id)
                     && catalog
@@ -782,6 +995,9 @@ impl<'a> VisibleSnapshot<'a> {
                         .map(|id| id == &embedding.embedding_id)
                         .unwrap_or(false)
             })
+            // Return the selected embedding together with its optional locator.
+            // Locators address the same file view as the catalog, while an
+            // in-memory row can provide the vector directly.
             .map(move |embedding| VisibleEmbedding {
                 embedding,
                 record_ref: catalog.record_ref_for_embedding(&embedding.embedding_id),

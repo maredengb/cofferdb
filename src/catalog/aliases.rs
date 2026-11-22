@@ -2,14 +2,22 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExternalIds {
+    // First key is the collection's internal ID. Within that collection an external
+    // ID resolves to the internal ID that currently owns it. Replacing an alias
+    // must not remove a later association to another owner.
     pub(super) collections: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl ExternalIds {
     pub(crate) fn get(&self, collection: &str, external: &str) -> Option<&String> {
+        // Normal reads look up only the explicitly selected collection. The
+        // resulting ID identifies an alias owner; the catalog still decides
+        // whether that object and its parents are visible.
         self.collections.get(collection)?.get(external)
     }
 
+    // Diagnostics can use this fallback to identify a chunk in another collection. External
+    // IDs are collection-scoped, so ties resolve in collection-key order.
     pub(crate) fn find_external(&self, external: &str) -> Option<&String> {
         self.collections.values().find_map(|ids| ids.get(external))
     }

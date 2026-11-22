@@ -8,6 +8,9 @@ use pyo3::types::{PyBool, PyDict, PyList};
 // Use fallible CPython constructors: several convenience constructors panic
 // on a null allocation result instead of returning the pending MemoryError.
 pub(crate) fn string<'py>(py: Python<'py>, value: &str) -> PyResult<Bound<'py, PyAny>> {
+    // Both passes use Unicode scalar indices. A non-ASCII Rust str may use several
+    // UTF-8 bytes for one character; its byte length is not the number of slots
+    // required by PyUnicode_New.
     let (count, highest) = string_layout(value);
     // SAFETY: the GIL is held; the core bound makes count fit Py_ssize_t. This
     // creates the final Unicode width once, without a UTF-8 decoder's widening
@@ -15,6 +18,9 @@ pub(crate) fn string<'py>(py: Python<'py>, value: &str) -> PyResult<Bound<'py, P
     let output = unsafe {
         Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyUnicode_New(count as isize, highest))
     }?;
+    // The largest scalar measured above selects the storage width for the entire
+    // object. Replaying the same immutable Rust text lets each write use its
+    // character index without an intermediate Python bytes object.
     for (index, character) in value.chars().enumerate() {
         // SAFETY: this uniquely owned exact Unicode is not exposed, index is
         // in bounds, and each scalar is at most the admitted maximum codepoint.
@@ -22,6 +28,9 @@ pub(crate) fn string<'py>(py: Python<'py>, value: &str) -> PyResult<Bound<'py, P
             pyo3::ffi::PyUnicode_WriteChar(output.as_ptr(), index as isize, u32::from(character))
         } < 0
         {
+            // Preserve the exception already set by the failed write. Dropping the
+            // local Bound releases the partially initialized string before it can
+            // reach the caller.
             return Err(PyErr::fetch(py));
         }
     }
@@ -41,6 +50,9 @@ pub(crate) fn lookup<'py>(
     object: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
+    // Return Ok(None) for a missing field. Failures constructing the key or
+    // performing the lookup remain Python exceptions, so schema validation can
+    // report absence only after a successful lookup.
     object.get_item(string(object.py(), key)?)
 }
 
@@ -51,11 +63,15 @@ pub(crate) fn dictionary(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 }
 
 pub(crate) fn list(py: Python<'_>, length: usize) -> PyResult<Bound<'_, PyList>> {
-    // SAFETY: the core bound makes length fit Py_ssize_t. No partially filled
-    // list is exposed; every slot receives an owned None reference immediately.
+    // SAFETY: the GIL is held and the core bound makes length fit Py_ssize_t.
+    // PyList_New returns a new reference or NULL. Initialize its empty slots
+    // with owned None references before handing the list to Python code.
     let value =
         unsafe { Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyList_New(length as isize)) }?;
     let value = value.cast_into::<PyList>().map_err(PyErr::from)?;
+    // Fill each slot with an owned None before returning the list to the tree
+    // constructor. Interpreter inspection can safely encounter slots that the
+    // traversal has yet to replace.
     for index in 0..length {
         value.set_item(index, py.None())?;
     }
@@ -67,8 +83,12 @@ fn integer(py: Python<'_>, value: i64) -> PyResult<Bound<'_, PyAny>> {
     unsafe { Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyLong_FromLongLong(value)) }
 }
 
+// Commit identifiers and sequence numbers can exceed i64::MAX. Use CPython's
+// unsigned constructor so projecting a confirmed write does not reinterpret its
+// identifier as negative.
 pub(crate) fn unsigned(py: Python<'_>, value: u64) -> PyResult<Bound<'_, PyAny>> {
-    // SAFETY: the GIL is held; failure is returned as the pending Python error.
+    // SAFETY: with the GIL held, CPython returns a new integer reference or
+    // NULL with an error. The Bound constructor handles both outcomes.
     unsafe { Bound::from_owned_ptr_or_err(py, pyo3::ffi::PyLong_FromUnsignedLongLong(value)) }
 }
 
@@ -79,8 +99,15 @@ pub(crate) fn float(py: Python<'_>, value: f64) -> PyResult<Bound<'_, PyAny>> {
 
 #[derive(Debug)]
 pub(crate) enum Failure {
+    // Core reservation or traversal errors retain their engine diagnosis for the
+    // result-conversion layer.
     Engine(cofferdb::Error),
+    // Keep the actual host exception so conversion can preserve MemoryError and
+    // chain other Python failures.
     Python(PyErr),
+    // A PID change during construction invalidates the in-flight operation in this
+    // process, even if the partially built Python object itself is still reachable
+    // here.
     Forked,
 }
 impl From<cofferdb::Error> for Failure {
@@ -96,6 +123,9 @@ impl From<PyErr> for Failure {
 type Result<T> = std::result::Result<T, Failure>;
 
 fn check_process(pid: u32) -> Result<()> {
+    // The saved PID belongs to the operation that produced the native tree.
+    // Compare it again at allocation and delivery boundaries so a child cannot
+    // finish a result on behalf of the parent.
     if pid != std::process::id() {
         return Err(Failure::Forked);
     }
@@ -109,13 +139,23 @@ fn estimate(output: &Output) -> Result<u128> {
         Array(std::slice::Iter<'a, JsonValue>),
         Object(std::collections::btree_map::Iter<'a, String, JsonValue>),
     }
+    // Walk the borrowed native tree with an operation-charged stack of iterators.
+    // Only live ancestor positions need traversal workspace, even though every
+    // value reached contributes to the eventual Python result.
     let mut stack: Stack<Children<'_>> = output.stack()?;
     let mut pending = Some(output.value());
+    // The result retains every completed child, so container and Unicode sizes
+    // accumulate. String conversion writes into the final-width object. Any
+    // per-string scratch would peak at one conversion because the traversal visits
+    // one child at a time.
     let mut retained = 0u128;
     let mut transient = 0u128;
     loop {
         if let Some(value) = pending.take() {
             match value {
+                // None and bool reuse CPython singleton objects. An enclosing list
+                // or dictionary still needs its own slots for references to them;
+                // those slots are covered by the container allowance.
                 JsonValue::Null | JsonValue::Bool(_) => (),
                 JsonValue::Number(_) => retained += 64,
                 JsonValue::String(value) => {
@@ -123,10 +163,17 @@ fn estimate(output: &Output) -> Result<u128> {
                     retained += bytes;
                     transient = transient.max(temporary);
                 }
+                // Account for the list object and its element slots before
+                // visiting children. Traversal charges each child's Python
+                // representation separately, so nesting cannot hide the cost of a
+                // large subtree.
                 JsonValue::Array(values) => {
                     retained += 128 + 16 * values.len() as u128;
                     stack.push(Children::Array(values.iter()))?;
                 }
+                // Dictionary entries require room for both a key and a value. This
+                // allowance covers table storage; the Unicode storage for each
+                // actual key is added as its entry is visited.
                 JsonValue::Object(values) => {
                     retained += 256 + 96 * values.len() as u128;
                     stack.push(Children::Object(values.iter()))?;
@@ -139,12 +186,18 @@ fn estimate(output: &Output) -> Result<u128> {
         pending = match children {
             Children::Array(values) => values.next(),
             Children::Object(values) => values.next().map(|(key, value)| {
+                // Keys do not occur as JsonValue children. Account for their
+                // final-width Python text here so long or non-ASCII property names
+                // cannot bypass host admission.
                 let (bytes, temporary) = string_estimate(key);
                 retained += bytes;
                 transient = transient.max(temporary);
                 value
             }),
         };
+        // Exhaustion finishes only the current iterator. Keep its parent's
+        // iterator on the stack to resume at the next sibling; an empty stack
+        // means the root's entire representation was measured.
         if pending.is_none() {
             stack.pop();
         }
@@ -154,6 +207,9 @@ fn estimate(output: &Output) -> Result<u128> {
 
 fn string_estimate(value: &str) -> (u128, u128) {
     let (count, highest) = string_layout(value);
+    // CPython uses one code-unit width for the whole compact Unicode string. A
+    // single code point above U+FFFF therefore increases the storage estimate for
+    // every character in that string.
     let width = if highest <= 0xff {
         1
     } else if highest <= 0xffff {
@@ -161,10 +217,16 @@ fn string_estimate(value: &str) -> (u128, u128) {
     } else {
         4
     };
+    // Include an object allowance in addition to the final character buffer. The
+    // direct final-width writer uses no separately sized intermediate string,
+    // hence the zero transient component.
     (128 + count as u128 * width, 0)
 }
 
 fn string_layout(value: &str) -> (usize, u32) {
+    // Count Unicode scalar values, independently of their Rust UTF-8 byte lengths.
+    // The estimator and the CPython allocator both use this count and maximum code
+    // point so their layout decisions agree.
     let mut count = 0usize;
     let mut highest = 0u32;
     for character in value.chars() {
@@ -176,13 +238,25 @@ fn string_layout(value: &str) -> (usize, u32) {
 
 enum Frame<'a, 'py> {
     Array {
+        // Iterator over the borrowed native array with each child's eventual list
+        // index.
         source: std::iter::Enumerate<std::slice::Iter<'a, JsonValue>>,
+        // Destination index saved when the current child was scheduled, used after
+        // any nested frames have completed.
         position: usize,
+        // Private Python list whose slots are filled as native children become
+        // ready.
         value: Bound<'py, PyList>,
     },
     Object {
+        // Iterator over native object members. Keys stay borrowed from the live
+        // Output during traversal.
         source: std::collections::btree_map::Iter<'a, String, JsonValue>,
+        // Native key saved for the in-flight child and consumed when the value is
+        // installed in the Python dictionary.
         key: Option<&'a str>,
+        // Private Python dictionary accumulating completed key/value pairs, exposed
+        // only once the frame finishes.
         value: Bound<'py, PyDict>,
     },
 }
@@ -198,6 +272,9 @@ impl<'a, 'py> Frame<'a, 'py> {
             Self::Object {
                 value: object, key, ..
             } => object.set_item(
+                // Create the Python key only when attaching its completed child.
+                // The native key was borrowed from Output and remains valid across
+                // conversion of a nested value.
                 string(value.py(), key.take().expect("pending projected key"))?,
                 value,
             ),
@@ -208,6 +285,9 @@ impl<'a, 'py> Frame<'a, 'py> {
             Self::Array {
                 source, position, ..
             } => {
+                // Save the destination slot before yielding the child. Conversion
+                // may push and pop additional frames before control returns to
+                // fill this same Python list.
                 let (index, value) = source.next()?;
                 *position = index;
                 Some(value)
@@ -219,6 +299,9 @@ impl<'a, 'py> Frame<'a, 'py> {
             }
         }
     }
+    // Expose the completed container as a Python object by transferring its
+    // existing reference. The parent can then treat a finished container and a
+    // scalar uniformly.
     fn finish(self) -> Bound<'py, PyAny> {
         match self {
             Self::Array { value, .. } => value.into_any(),
@@ -227,25 +310,45 @@ impl<'a, 'py> Frame<'a, 'py> {
     }
 }
 
+// Frames keep Python containers private while their children are being
+// materialized. Traversing one branch at a time makes nesting consume the
+// operation's explicit stack. A conversion failure drops the incomplete
+// root before the caller can observe it.
+// Build the host tree while borrowing an admitted native projection. The frame
+// stack stores only active ancestors, so each completed value has one place to
+// attach.
 fn tree<'py>(py: Python<'py>, output: &Output, pid: u32) -> Result<Bound<'py, PyAny>> {
     let mut stack: Stack<Frame<'_, 'py>> = output.stack()?;
     let mut pending = Some(output.value());
     let mut ready = None;
     loop {
+        // Check the creating process before touching the retained output on each
+        // traversal step. Python allocations and callbacks can reach this boundary
+        // in a different process.
         check_process(pid)?;
         if let Some(value) = pending.take() {
             ready = match value {
                 JsonValue::Null => Some(py.None().into_bound(py)),
                 JsonValue::Bool(value) => Some(PyBool::new(py, *value).to_owned().into_any()),
+                // Return Python ints only within the binary64 safe-integer
+                // range. Beyond it, consecutive integers share a representation.
                 JsonValue::Number(value)
                     if value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0 =>
                 {
                     Some(integer(py, *value as i64)?)
                 }
+                // Keep fractional or larger binary64 values as Python floats.
+                // Making a large float look like an exact arbitrary-precision
+                // integer would change what the caller can infer about it.
                 JsonValue::Number(value) => Some(float(py, *value)?),
                 JsonValue::String(value) => Some(string(py, value)?),
+                // Allocate the complete list length up front. A frame fills the
+                // slots in order before the list is returned to the caller.
                 JsonValue::Array(value) => {
                     let array = list(py, value.len())?;
+                    // Recheck the PID after Python allocation and before adding
+                    // Rust traversal workspace. The allocation can invoke
+                    // interpreter callbacks.
                     check_process(pid)?;
                     stack.push(Frame::Array {
                         source: value.iter().enumerate(),
@@ -254,6 +357,9 @@ fn tree<'py>(py: Python<'py>, output: &Output, pid: u32) -> Result<Bound<'py, Py
                     })?;
                     None
                 }
+                // Allocate a dictionary and iterate borrowed native key/value
+                // pairs. Keep each key with its frame until the corresponding
+                // converted child is ready to attach.
                 JsonValue::Object(value) => {
                     let object = dictionary(py)?;
                     check_process(pid)?;
@@ -266,6 +372,9 @@ fn tree<'py>(py: Python<'py>, output: &Output, pid: u32) -> Result<Bound<'py, Py
                 }
             };
         }
+        // A ready child belongs to the top frame, whose key or array position was
+        // saved by next(). Attach it before advancing the iterator. With no
+        // enclosing frame the ready value is the completed root.
         if let Some(value) = ready.take() {
             if let Some(frame) = stack.last_mut() {
                 frame.accept(value)?;
@@ -273,8 +382,14 @@ fn tree<'py>(py: Python<'py>, output: &Output, pid: u32) -> Result<Bound<'py, Py
                 return Ok(value);
             }
         }
+        // Check the process again after attaching the child. Insertion can run
+        // Python allocation and must not resume inherited Rust traversal in a fork
+        // child.
         check_process(pid)?;
         if let Some(frame) = stack.last_mut() {
+            // Advance just the innermost native iterator while its Python
+            // container remains private. On exhaustion, turn the frame into the
+            // next ready child.
             if let Some(value) = frame.next() {
                 pending = Some(value);
             } else {
@@ -285,8 +400,12 @@ fn tree<'py>(py: Python<'py>, output: &Output, pid: u32) -> Result<Bound<'py, Py
 }
 
 pub(crate) struct Materialized {
+    // Completed host object. Keep it owned until final signal and process checks or
+    // conversion to a Python exception.
     pub(crate) value: Py<PyAny>,
-    output: Output,
+    // Retains the host allocation estimate through delivery even after the native
+    // tree has been cleared.
+    pub(crate) output: Output,
 }
 
 impl Materialized {
@@ -297,14 +416,28 @@ impl Materialized {
         extra_host_bytes: usize,
     ) -> Result<Self> {
         check_process(pid)?;
+        // Both representations are live while building the Python tree. Admit
+        // the host copy before allocating it, then release the native payload
+        // while retaining host credit through result or exception delivery.
+        // Include caller-supplied extra host bytes in the same wide admission
+        // estimate. This covers additional wrapper allocations that coexist with
+        // the projected tree.
         let bytes = estimate(&output)? + extra_host_bytes as u128;
         output.reserve_host(bytes)?;
+        // Detach the Python reference from the lifetime of this attached borrow
+        // without copying the object. It remains owned until final delivery.
         let value = tree(py, &output, pid)?.unbind();
+        // Recheck the original process before clearing the retained native tree. A
+        // fork child must not release the parent's database and budget owners
+        // through this handoff.
         check_process(pid)?;
         output.clear_native();
         Ok(Self { value, output })
     }
 
+    // Deliver the completed Python value through the common signal and PID
+    // boundary. Retain the host estimate until that step returns or chooses an
+    // error.
     pub(crate) fn finish(
         self,
         py: Python<'_>,
@@ -317,6 +450,9 @@ impl Materialized {
         result
     }
 
+    // Use the built dictionary to construct the engine exception. Its output lease
+    // remains live through exception construction, just as for a successful host
+    // value.
     pub(crate) fn exception(self, py: Python<'_>) -> PyResult<PyErr> {
         let fields = self.value.bind(py).cast::<PyDict>()?;
         let result = crate::errors::engine(py, fields);

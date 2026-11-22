@@ -6,6 +6,16 @@ artifact as unreleased until it is identified in the matching release record.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) for
 available artifacts, checksums and validation results for specific environments.
 
+## CofferDB 0.2.0
+
+- [Python programming guide](python.md)
+- [Rust programming guide](rust.md)
+- [Command-line manual](cli.md)
+- [Import a folder of text](ingestion.md)
+- [Build and read the offline API reference](reference.md)
+
+## Earlier versions
+
 | Version | Guide | Executable example | Intended reference |
 | --- | --- | --- | --- |
 | Rust 0.1.0 | [Supplemental programming guide](rust-v0.1.0.md) | [Common Rust lifecycle](../examples/programming_guide.rs), also verified against the published 0.1.0 source | 0.1.0 rustdoc in the matching offline reference archive |
@@ -20,14 +30,11 @@ available artifacts, checksums and validation results for specific environments.
 | Python 0.1.2 | [Programming guide](python-v0.1.2.md) | [Offline code retrieval](../examples/code_retrieval.py) | Check the matching release for wheel availability |
 | Python 0.1.1 | [Programming guide](python-v0.1.1.md); installation and behavior details are in `bindings/python/README.md` in the complete source tree | [Offline code retrieval](../examples/code_retrieval.py); the direct batch example is in `bindings/python/examples/quickstart.py` in the complete source tree | Installed-package Sphinx reference in the matching offline archive |
 
-The [0.1.1 reference build guide](reference.md) describes the sources, symbol indexes,
+The [0.1.1 reference build guide](reference-v0.1.1.md) describes the sources, symbol indexes,
 version checks and intended offline archive layout. Generated reference artifacts
 are separate from the source files and are not provided by this source tree. If
 a matching archive is published, keep it with its wheel and checksums. Do not
 substitute a mutable `main` checkout for a released API.
-
-See the [Rust 0.1.5 guide](rust-v0.1.5.md) for the Rust API and the
-[Text ingestion guide](ingestion-v0.1.2.md) for the CLI workflow.
 
 The Rust 0.1.0 guide is supplemental documentation delivered with this source
 tree. It does not change that release's tag, package or platform declaration.

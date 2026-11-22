@@ -6,56 +6,131 @@ use crate::temporary::{ExternalKeyLookup, ExternalUniqueKeys};
 
 #[derive(Debug, Default)]
 pub(crate) struct ImportBatchMetrics {
+    // Largest number of chunk-put records in a single committed import batch.
+    // Document and embedding records do not increase this maximum.
     pub(crate) max_batch_chunks: usize,
+    // Number of primary batches committed during this import. A checkpoint cycle
+    // may cover more than one batch.
     pub(crate) committed_batches: usize,
+    // Number of checkpoint update cycles measured for this import under the chosen
+    // index-build mode.
     pub(crate) checkpoint_cycles: usize,
+    // Update cycles that ended with a usable persistent checkpoint. Track these
+    // separately from attempts that ended with a rebuild-needed index.
     pub(crate) checkpoint_ready_cycles: usize,
+    // Whether the final observed index suffix is a persistent checkpoint after
+    // processing the import.
     pub(crate) final_checkpoint_ready: bool,
+    // Elapsed time accumulated for the measured primary commit work across import
+    // batches.
     pub(crate) commit_time: std::time::Duration,
+    // Elapsed time accumulated for the measured index update work, including a
+    // deferred update after the primary commits.
     pub(crate) checkpoint_time: std::time::Duration,
 }
 
 pub(crate) struct ManifestImportOptions {
+    // Tokenizer to apply to a newly created collection or compare with the existing
+    // collection's tokenizer.
     pub tokenizer: crate::TokenizerConfig,
+    // Collection name resolved from the manifest. External document and chunk IDs
+    // are interpreted within its scope.
     pub collection_name: String,
+    // Component count required of input embeddings, checked against any existing
+    // collection definition.
     pub embedding_dim: usize,
+    // Metric that interprets index and query vector scores for the target
+    // collection.
     pub distance_metric: DistanceMetric,
+    // Optional model declaration to reconcile with the target collection and model
+    // names carried by input embeddings.
     pub embedding_model: Option<String>,
+    // Optional input assertion about normalized vectors. Absence leaves
+    // reconciliation to the collection and manifest defaults.
     pub vectors_normalized: Option<bool>,
+    // Document artifact path used to identify the source in row and reference
+    // errors.
     pub document_path: PathBuf,
+    // Chunk artifact path used when reporting chunk-schema or cross-document
+    // reference errors.
     pub chunk_path: PathBuf,
+    // Optional embedding artifact path. A text-only manifest can have no embedding
+    // source.
     pub embedding_path: Option<PathBuf>,
+    // Conflict policy for existing collection-scoped external IDs. The chosen
+    // action affects both the planned records and the import summary.
     pub on_conflict: OnConflict,
+    // When to update the full index checkpoint relative to primary commits.
+    // Deferring the update does not merge those commits into one batch.
     pub index_build_mode: ImportIndexBuildMode,
 }
 
 pub(crate) struct ImportDocument {
+    // Caller-supplied document ID used for duplicate detection and for resolving
+    // the parent of a chunk in the same collection.
     pub external_id: String,
+    // Optional presentation title copied into the document record, independent of
+    // its identity.
     pub title: Option<String>,
+    // Optional source URI preserved with the document. Resolving a chunk reference
+    // uses external_id instead.
     pub source_uri: Option<String>,
+    // Business metadata for this document. Its allocation stays charged while the
+    // row is planned and encoded.
     pub metadata: JsonValue,
 }
 
+// Each input carries the source's line number separately from its eventual storage
+// sequence. Validation can therefore point to the original record when an earlier
+// row is skipped, replaced, or expanded into a tombstone and a put.
 pub(crate) enum ImportRow {
     Document {
+        // Decoded document data used for identity and conflict checks before
+        // planning a primary record.
         input: ImportDocument,
+        // Physical document JSONL line, kept for diagnostics even if earlier rows
+        // are skipped.
         line: usize,
     },
     Chunk {
+        // External ID of the parent in the target collection. Planning resolves it
+        // before building the chunk's internal document reference.
         document_external_id: String,
+        // Decoded chunk fields, including the ordinal, text and optional source
+        // span used when constructing the stored chunk.
         chunk: ChunkInput,
+        // Physical chunk JSONL line used to identify a bad parent, duplicate ID or
+        // other row-specific failure.
         line: usize,
+        // An explicit span overrides a different or malformed span in the metadata.
+        // Preserve this flag so the import can report the warning.
         source_span_metadata_conflict: bool,
     },
     Embedding {
+        // Decoded embedding including its target chunk, model and vector. Planning
+        // checks these against the collection and visible inputs.
         input: EmbeddingInput,
+        // Physical embedding JSONL line retained for keyed validation and model
+        // errors.
         line: usize,
     },
 }
 
+// Rows arrive in document, chunk, then embedding order. Keep each external
+// key with its source line and planned insertion number. Positive numbers are
+// one-based so a later child can refer to its parent before the parent has
+// been committed; zero denotes an input with no new insertion planned.
+// Finishing the sort checks for duplicates across runs. A lookup finishes
+// the sort first if this input is still collecting keys.
 struct ImportReferences {
+    // Writable external sorter while IDs are collected. Finalization consumes it,
+    // so a lookup cannot resume appending keys.
     sorting: Option<ExternalUniqueKeys>,
+    // Searchable, validated key-to-line/value table after the external sort
+    // finishes. Failed finalization leaves no usable table.
     lookup: Option<ExternalKeyLookup>,
+    // Path of the input artifact associated with these IDs, attached to sort and
+    // lookup errors.
     path: PathBuf,
 }
 
@@ -67,12 +142,20 @@ impl ImportReferences {
         context: &JsonOperationContext,
         message: &'static str,
     ) -> Result<Self> {
+        // One table is built per source kind. Document and chunk streams can
+        // repeat a spelling in different namespaces. Their temporary runs
+        // nevertheless share the same database disk budget as the records being
+        // staged.
         Ok(Self {
             sorting: Some(ExternalUniqueKeys::new_growing(
                 &std::env::temp_dir(),
                 database.temporary_disk_budget(),
                 batch_target,
                 context,
+                // The sorter detects repeated keys in the input itself, even when
+                // one would be skipped by the target collection's conflict policy.
+                // Report the duplicate in the source namespace selected by this
+                // sorter.
                 ErrorCode::DuplicateExternalId,
                 message,
             )?),
@@ -82,18 +165,28 @@ impl ImportReferences {
     }
 
     fn insert(&mut self, key: &str, line: usize, planned: u64) -> Result<()> {
+        // The first child lookup consumes the parent's sorter and freezes the
+        // lookup table. Accepting another parent now would bypass duplicate
+        // detection in the finished table and could make a previously missing
+        // parent appear after its child was checked.
         let sorting = self.sorting.as_mut().ok_or_else(|| {
             Error::new(
                 ErrorCode::FileFormatError,
                 "import reference rows must precede their lookup phase",
             )
         })?;
+        // Store the key bytes together with the original line and planned
+        // insertion number. A duplicate diagnostic needs the source position even
+        // when conflict handling chose to skip storing the row.
         sorting
             .push_value(&[key.as_bytes()], line as u64, planned)
             .map_err(|error| error.with_detail("path", self.path.display()))
     }
 
     fn finish(&mut self) -> Result<()> {
+        // Take the sorter before finalization, which can fail while merging runs
+        // or constructing the lookup. The old runs are owned by that operation and
+        // cannot safely be resumed after an error.
         if let Some(sorting) = self.sorting.take() {
             self.lookup = Some(
                 sorting
@@ -101,6 +194,9 @@ impl ImportReferences {
                     .map_err(|error| error.with_detail("path", self.path.display()))?,
             );
         }
+        // Successful finalization is idempotent. If an earlier attempt consumed
+        // the sorter without installing a lookup, preserve the failure state
+        // rather than returning an empty table and accepting bad references.
         if self.lookup.is_none() {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
@@ -111,6 +207,9 @@ impl ImportReferences {
     }
 
     fn get(&mut self, key: &str) -> Result<Option<(u64, u64)>> {
+        // The first child that needs a parent forces all of that parent's runs to
+        // merge. This also catches repeated parent keys in different runs before a
+        // child can use the line and planned ID from either occurrence.
         self.finish()?;
         self.lookup
             .as_mut()
@@ -120,12 +219,19 @@ impl ImportReferences {
                     "cannot reuse failed import reference lookup",
                 )
             })?
+            // A successful search may still find no row; that absence is an
+            // input-reference decision for the caller. Failing to read the
+            // temporary table must instead report the source path and propagate
+            // the failure.
             .get(key.as_bytes())
             .map_err(|error| error.with_detail("path", self.path.display()))
     }
 }
 
 impl Database {
+    // A manifest identifies its destination by name. Passing no direct collection
+    // ID lets the shared planner create the declared collection when it is missing
+    // and enforces references to rows supplied by this manifest.
     pub(crate) fn import_preprocessed_rows(
         &self,
         options: ManifestImportOptions,
@@ -144,6 +250,9 @@ impl Database {
         warnings: &mut crate::import::warnings::ImportWarnings,
         visit: impl FnOnce(&mut dyn FnMut(ImportRow, RecordReservation) -> Result<()>) -> Result<()>,
     ) -> Result<InsertSummary> {
+        // A direct binding batch names an existing collection by ID. Snapshot its
+        // settings for the common planner and retain the string credit while those
+        // settings form the options below.
         let (payload, _options_work) = self.lock()?.read_reclaiming(|inner| {
             copy_collection_in(inner.catalog.collection_by_id(collection_id)?, &context)
         })?;
@@ -154,13 +263,27 @@ impl Database {
             embedding_dim: collection.embedding_dim,
             distance_metric: collection.distance_metric,
             embedding_model: collection.embedding_model,
+            // An existing collection makes its normalization setting explicit,
+            // including false. Passing None here would invite the manifest default
+            // to take part in a direct write whose target already has a
+            // definition.
             vectors_normalized: Some(collection.vectors_normalized),
+            // These paths label errors arising from in-memory document, chunk and
+            // embedding rows. This entry point consumes the supplied visitor and
+            // does not open files with these names.
             document_path: PathBuf::from("documents"),
             chunk_path: PathBuf::from("chunks"),
             embedding_path: Some(PathBuf::from("embeddings")),
             on_conflict,
+            // The direct entry point requests the inline checkpoint policy. It
+            // returns only the insertion summary; the shared planner also records
+            // checkpoint-cycle measurements for callers that expose import
+            // metrics.
             index_build_mode: ImportIndexBuildMode::InlineFullCheckpoint,
         };
+        // Pass the internal ID alongside the copied settings. The planner
+        // re-resolves that ID under its write-side lock and can attach rows to an
+        // existing visible parent without requiring it to appear in this request.
         self.import_preprocessed_rows_in(options, Some(collection_id), context, warnings, visit)
             .map(|(summary, _)| summary)
     }
@@ -173,24 +296,45 @@ impl Database {
         warnings: &mut crate::import::warnings::ImportWarnings,
         visit: impl FnOnce(&mut dyn FnMut(ImportRow, RecordReservation) -> Result<()>) -> Result<()>,
     ) -> Result<(InsertSummary, ImportBatchMetrics)> {
+        // Keep the write-side guard across input traversal, planning and
+        // appending. A plan stores offsets from the catalog's ID high-water marks.
+        // An interleaved write could turn a later child reference into an ID
+        // belonging to a different parent.
         let mut inner = self.lock()?;
         let millis = time::unix_millis_now();
+        // Format one timestamp for all the proposed puts and tombstones. The
+        // formatted value stays available while processing later rows, including
+        // when the manifest is eventually split into several commits.
         let now = inner.read_reclaiming(|_| {
             ReservedString::build(&context, "batch_prepare", |out| {
                 time::write_unix_millis(out, millis)
             })
         })?;
         let mut collection_work = RecordReservation::from(context.reservation());
+        // Resolve the destination once under the write-side lock. A direct call
+        // identifies an existing collection by ID; a manifest can also plan a
+        // collection creation. Neither path should consult a newer catalog halfway
+        // through assigning IDs to children.
         let (collection, work) = inner.read_reclaiming(|inner| match direct_collection {
             Some(id) => copy_collection_in(inner.catalog.collection_by_id(id)?, &context),
             None => import_collection(&inner.catalog, &options, &context, now.as_ref()),
         })?;
         collection_work.merge(work);
+        // Carry a single model admission state across all embedding rows. For an
+        // existing collection it starts from the visible catalog. For a planned
+        // collection it starts from the prospective declaration.
         let mut models = inner
             .read_reclaiming(|inner| ModelAdmission::new(&inner.catalog, &collection, &context))?;
+        // Keep a target-validation error pending while reading the source. Source
+        // duplicates and invalid input can still be identified at their own lines,
+        // but a failed target check prevents any planned record from reaching the
+        // database.
         let mut preflight_error =
             validate_collection_target(&inner.catalog, &collection, &options).err();
         let disk = self.temporary_disk_budget();
+        // The builder stages encoded data and its record locations in temporary
+        // files. Its cleanup and disk credit stay local until finish succeeds.
+        // Staging is safe before every cross-row check has run.
         let mut records = {
             let Inner {
                 text_index,
@@ -213,6 +357,9 @@ impl Database {
                 },
             )?
         };
+        // An absent manifest destination contributes a collection-create record at
+        // the head of the proposed stream. A conflict discovered later can discard
+        // this record with the rest of the staging files.
         if preflight_error.is_none()
             && !inner
                 .catalog
@@ -231,12 +378,22 @@ impl Database {
         let mut direct_ordinal_work = RecordReservation::from(context.reservation());
         let mut direct_ordinals =
             crate::json::ReservedVec::with_capacity(0, &context, "operation_scratch")?;
+        // Create the external sorters for ordinals and embedding targets only if a
+        // row of that kind arrives. A document-only import still needs its source
+        // identities but no empty runs for these other key spaces.
         let mut ordinal_keys: Option<ExternalUniqueKeys> = None;
         let mut ordinal_error = None;
         let mut embedding_keys: Option<ExternalUniqueKeys> = None;
+        // The cache allowance selects a preferred run size for the reference
+        // tables. The row strings, temporary files and optional read buffers
+        // remain subject to their own actual admission checks.
         let reference_batch_target = (inner.active_cache_budget_mb().saturating_mul(1_048_576)
             / 128)
             .clamp(64 * 1024, 1_048_576);
+        // These lookups describe the source rows we have seen, including skipped
+        // rows. The catalog describes the target before this import. Keeping the two
+        // apart lets us report duplicate input even when the target already contains
+        // that key.
         let mut documents = ImportReferences::new(
             self,
             &options.document_path,
@@ -251,6 +408,9 @@ impl Database {
             &context,
             "chunk_external_id appears more than once in the same import batch",
         )?;
+        // The producer is single-pass. Retry individual read or allocation
+        // closures only. Reentering the visitor after a source key or a
+        // replacement tombstone was staged would process that row twice.
         visit(&mut |row, mut row_work| {
             match row {
                 ImportRow::Document { input: row, line } => {
@@ -261,11 +421,23 @@ impl Database {
                         metadata: row.metadata,
                         chunks: Vec::new(),
                     };
+                    // The row already owns validated metadata. Apply the
+                    // document's structural rules without reserving a second copy
+                    // of that JSON. Nested chunks arrive separately through this
+                    // visitor.
                     input.validate_preprocessed(&context)?;
+                    // Remember the source key even after a target conflict. A
+                    // duplicate later in the input has its own source location and
+                    // must still be detected. Zero here does not promise that the
+                    // document exists in the database.
                     if preflight_error.is_some() {
                         documents.insert(&input.external_id, line, 0)?;
                         return Ok(());
                     }
+                    // Only a visible document with the same external ID in this
+                    // collection is a target conflict. The source-key table
+                    // independently remembers earlier input rows, even when their
+                    // target records were skipped.
                     let existing = inner
                         .catalog
                         .document_external_ids
@@ -274,6 +446,10 @@ impl Database {
                     if existing.is_some() {
                         match options.on_conflict {
                             OnConflict::Error => {
+                                // Record the source line before deferring the
+                                // duplicate-target error. If a second input row
+                                // repeats this name, the source uniqueness check
+                                // still has both line numbers.
                                 documents.insert(&input.external_id, line, 0)?;
                                 preflight_error = Some(crate::import::with_jsonl_location(
                                     existing_id("document external_id", &input.external_id),
@@ -284,10 +460,18 @@ impl Database {
                             }
                             OnConflict::Skip => {
                                 summary.documents_skipped += 1;
+                                // A skipped document receives no planned insertion
+                                // number. Its source children can recognize the
+                                // explicit skip, even though a document with that
+                                // external ID exists in the catalog.
                                 documents.insert(&input.external_id, line, 0)?;
                                 return Ok(());
                             }
                             OnConflict::Replace => {
+                                // Stage the tombstone before the new document.
+                                // Children arriving later must be linked to the new
+                                // planned ID, even if their manifest names the same
+                                // external document as before.
                                 let (record, mut work) = inner.read_reclaiming(|inner| {
                                     let document = inner.catalog.document_by_external_id(
                                         &collection.collection_id,
@@ -305,6 +489,10 @@ impl Database {
                             }
                         }
                     }
+                    // Prepare all copied identifiers and timestamps in a
+                    // recoverable workspace before appending the put. The
+                    // operation can retry those copies without duplicating the
+                    // replacement tombstone already staged.
                     let (fields_work, [document_id, collection_id, created_at, updated_at]) = inner
                         .read_reclaiming(|inner| {
                             let mut work = RecordReservation::from(context.reservation());
@@ -319,6 +507,10 @@ impl Database {
                             )?;
                             Ok((work, [document_id, collection_id, created_at, updated_at]))
                         })?;
+                    // Store the one-based insertion number with the document's
+                    // external ID. The generated primary ID used a zero-based
+                    // offset. Later chunks subtract one before deriving the same
+                    // ID.
                     documents.insert(
                         &input.external_id,
                         line,
@@ -337,6 +529,10 @@ impl Database {
                         }),
                         &mut row_work.json,
                     )?;
+                    // The temporary storage now owns an encoding of the document.
+                    // Copies used only to assemble its fields can release their
+                    // workspace, and the next accepted document may consume the
+                    // following insertion number.
                     drop(fields_work);
                     summary.documents_inserted += 1;
                 }
@@ -346,6 +542,10 @@ impl Database {
                     line,
                     source_span_metadata_conflict,
                 } => {
+                    // Preserve the source-span warning even when the conflict
+                    // policy later skips this row. Its coordinates were resolved
+                    // during input conversion and the warning refers to those
+                    // source values.
                     if source_span_metadata_conflict {
                         inner.read_reclaiming(|_| {
                             warnings
@@ -353,6 +553,10 @@ impl Database {
                         })?;
                     }
                     chunk.validate_preprocessed()?;
+                    // The ordinal is unique within the source document,
+                    // independently of the chunk's external ID. Detect collisions
+                    // across the whole source before comparing the proposed ordinals
+                    // with surviving chunks in the target.
                     if ordinal_keys.is_none() && ordinal_error.is_none() {
                         ordinal_keys = Some(ExternalUniqueKeys::new_growing(
                             &std::env::temp_dir(),
@@ -363,6 +567,10 @@ impl Database {
                             "chunk ordinal must be unique within a document",
                         )?);
                     }
+                    // The external key contains the source document ID and
+                    // ordinal. Its line number is diagnostic data. A chunk with a
+                    // different external ID can still collide on its position
+                    // within that document.
                     if let Some(keys) = ordinal_keys.as_mut() {
                         match keys.push(
                             &[
@@ -371,6 +579,10 @@ impl Database {
                             ],
                             line as u64,
                         ) {
+                            // Save a reported ordinal collision and drop its
+                            // sorter. Subsequent rows can still supply duplicate
+                            // external-ID evidence. A disk or allocation error
+                            // from the sorter instead aborts the visitor.
                             Err(error) if error.code() == ErrorCode::InvalidJsonlSchema => {
                                 ordinal_error =
                                     Some(error.with_detail("path", options.chunk_path.display()));
@@ -379,10 +591,18 @@ impl Database {
                             result => result?,
                         }
                     }
+                    // After an ordinal or preflight failure, remember later chunk
+                    // keys with no planned insertion number. This preserves source
+                    // uniqueness checks without constructing records for an import
+                    // already known to fail.
                     if preflight_error.is_some() || ordinal_error.is_some() {
                         chunks.insert(&chunk.chunk_external_id, line, 0)?;
                         return Ok(());
                     }
+                    // For a manifest, the parent must appear in its document input.
+                    // Direct insertion can add a chunk to an existing document
+                    // without sending a document row. Keep that case separate from a
+                    // parent row explicitly skipped by the conflict policy.
                     let planned_document = match documents.get(&document_external_id)? {
                         Some((_, planned)) => Some(planned),
                         None if direct_collection.is_some() => {
@@ -396,6 +616,10 @@ impl Database {
                             }
                             None
                         }
+                        // A manifest cannot use a target-catalog document to fill
+                        // a missing source parent. Record the child key so another
+                        // occurrence can still be reported against its own input
+                        // line.
                         None => {
                             chunks.insert(&chunk.chunk_external_id, line, 0)?;
                             preflight_error = Some(crate::import::with_jsonl_location(
@@ -407,12 +631,20 @@ impl Database {
                             return Ok(());
                         }
                     };
+                    // A skipped source parent suppresses the put for this chunk as
+                    // well. Its external ID remains in the source lookup so
+                    // embedding planning can distinguish an explicit skip from an
+                    // absent source row.
                     if planned_document == Some(0) {
                         chunks.insert(&chunk.chunk_external_id, line, 0)?;
                         summary.chunks_skipped += 1;
                         return Ok(());
                     }
                     let existing = inner
+                        // Resolve chunk conflicts across the entire target
+                        // collection, irrespective of which source document owns
+                        // the incoming chunk. Replacing it can therefore move an
+                        // external chunk ID to another parent.
                         .catalog
                         .chunk_external_ids
                         .get(&collection.collection_id, &chunk.chunk_external_id)
@@ -441,11 +673,18 @@ impl Database {
                                     )?;
                                     replacement("chunk", &chunk.chunk_id, now.as_ref(), &context)
                                 })?;
+                                // Stage the old chunk's tombstone before the new
+                                // put. The new row will receive its own internal
+                                // chunk ID and any later embedding for the source
+                                // chunk must use that new ID.
                                 records.push_retained(record, &mut work.json)?;
                                 summary.chunks_replaced += 1;
                             }
                         }
                     }
+                    // Derive the accepted row's coordinates, token-count hint and
+                    // content hash from its own data. A skipped row does not need
+                    // these generated fields merely to act as a source key.
                     let source_span = chunk.resolved_source_span()?;
                     let token_count =
                         inner.read_reclaiming(|_| token_count_hint_in(&chunk.text, &context))?;
@@ -459,6 +698,10 @@ impl Database {
                             .next_id_in("chk_", summary.chunks_inserted as u64, &context)?
                             .into_parts();
                         work.merge_workspace(id_work);
+                        // A positive plan number identifies an earlier document
+                        // insertion in this batch; it has no catalog row yet. Derive
+                        // its ID from the same pre-import high watermark used for
+                        // the DocumentPut.
                         let document_id = match planned_document {
                             Some(number) => {
                                 let (id, id_work) = inner
@@ -468,6 +711,10 @@ impl Database {
                                 work.merge_workspace(id_work);
                                 id
                             }
+                            // Only direct input can reach this branch. Its parent
+                            // was found in the existing catalog, so the child must
+                            // copy the parent's actual ID rather than derive one
+                            // from a source insertion number.
                             None => {
                                 let document = inner.catalog.document_by_external_id(
                                     &collection.collection_id,
@@ -476,6 +723,9 @@ impl Database {
                                 work.copy_string(&document.document_id, &context)?
                             }
                         };
+                        // Hash the exact UTF-8 bytes that will be written as chunk
+                        // text. The tokenizer supplies the separate count hint and
+                        // does not transform the bytes used for this digest.
                         let (text_hash, hash_work) =
                             ReservedString::build_exact(64, &context, "batch_prepare", |out| {
                                 crate::hash::write_digest_hex(
@@ -492,6 +742,10 @@ impl Database {
                             [chunk_id, document_id, collection_id, text_hash, created_at],
                         ))
                     })?;
+                    // For direct input, save the resolved internal parent, ordinal
+                    // and source line before moving the chunk into the staged
+                    // record. The later check needs all three to report an
+                    // incoming row that overlaps a surviving catalog chunk.
                     if direct_collection.is_some() {
                         inner.read_reclaiming(|_| {
                             let mut work = RecordReservation::from(context.reservation());
@@ -501,6 +755,10 @@ impl Database {
                             Ok(())
                         })?;
                     }
+                    // Each accepted chunk gets a positive source plan number even
+                    // when it replaces an earlier target. Embedding rows then
+                    // resolve that number against the same locked high-water mark
+                    // used for this put.
                     chunks.insert(
                         &chunk.chunk_external_id,
                         line,
@@ -527,6 +785,10 @@ impl Database {
                     summary.chunks_inserted += 1;
                 }
                 ImportRow::Embedding { input, line } => {
+                    // Rows arrive in document, chunk, embedding order. At this point
+                    // all possible source parents are known. Finish their uniqueness
+                    // checks before using their planned IDs to resolve embedding
+                    // targets.
                     documents.finish()?;
                     chunks.finish()?;
                     finish_ordinal_keys(
@@ -534,6 +796,10 @@ impl Database {
                         &options.chunk_path,
                         &mut ordinal_error,
                     )?;
+                    // Embedding uniqueness is checked on the incoming chunk
+                    // external ID, independently of the model name and existing
+                    // target policy. It includes input rows that will eventually
+                    // be skipped.
                     if embedding_keys.is_none() {
                         embedding_keys = Some(ExternalUniqueKeys::new_growing(
                             &std::env::temp_dir(), self.temporary_disk_budget(), reference_batch_target,
@@ -546,6 +812,10 @@ impl Database {
                         .as_mut()
                         .unwrap()
                         .push(&[input.chunk_external_id.as_bytes()], line as u64)?;
+                    // Validate the vector's structure before honoring a pending
+                    // target error. A dimension mismatch against the collection is
+                    // considered separately and carries the artifact path when the
+                    // caller supplied one.
                     input.validate_structure()?;
                     if preflight_error.is_some() || ordinal_error.is_some() {
                         return Ok(());
@@ -557,6 +827,10 @@ impl Database {
                         });
                         return Ok(());
                     }
+                    // Resolve an embedding through the source chunk table first.
+                    // Only direct input may use a surviving catalog chunk omitted
+                    // from the source. In that case check the planned fate of its
+                    // parent as well.
                     let (_, planned) = match chunks.get(&input.chunk_external_id)? {
                         Some(reference) => reference,
                         None if direct_collection.is_some() => {
@@ -570,6 +844,11 @@ impl Database {
                                     return Ok(());
                                 }
                             };
+                            // The chunk exists in the current catalog, but replacing
+                            // its document in this import hides that old chunk.
+                            // Without a new chunk row, an embedding aimed at the old
+                            // external ID would be invisible immediately after the
+                            // write.
                             let document = inner.catalog.document_by_id_ref(
                                 &collection.collection_id,
                                 &chunk.document_id,
@@ -584,6 +863,10 @@ impl Database {
                                 ));
                                 return Ok(());
                             }
+                            // Using zero here deliberately shares the later
+                            // resolution path with a skipped source chunk. The
+                            // existing chunk ID and any live embedding must be
+                            // looked up from the catalog under the same lock.
                             (0, 0)
                         }
                         None => {
@@ -596,6 +879,10 @@ impl Database {
                             return Ok(());
                         }
                     };
+                    // A positive plan refers to the new chunk. Zero requires looking
+                    // again at the visible target: a skipped existing chunk can
+                    // receive an embedding, whereas a chunk skipped along with its
+                    // parent may have no target at all.
                     let fields = inner.read_reclaiming(|inner| {
                         let mut work = RecordReservation::from(context.reservation());
                         let chunk_id = match planned {
@@ -604,6 +891,10 @@ impl Database {
                                 &input.chunk_external_id,
                             ) {
                                 Ok(chunk) => {
+                                    // A skipped source chunk may still be the
+                                    // destination of a new embedding. Skip the
+                                    // embedding itself only when that target already
+                                    // has one and the selected conflict policy is Skip.
                                     if options.on_conflict == OnConflict::Skip
                                         && inner
                                             .catalog
@@ -625,6 +916,10 @@ impl Database {
                                 id
                             }
                         };
+                        // A positive source plan resolves to a fresh chunk ID,
+                        // even if its external ID previously had an embedding.
+                        // Consult the selected internal chunk before counting or
+                        // rejecting an embedding replacement.
                         let replaced = inner.catalog.embedding_for_chunk(&chunk_id).is_some();
                         if replaced {
                             match options.on_conflict {
@@ -638,6 +933,10 @@ impl Database {
                                 OnConflict::Replace => {}
                             }
                         }
+                        // Compute the new embedding ID from the number of accepted
+                        // puts. A model mismatch discovered below will discard
+                        // this provisional ID and the prepared fields without
+                        // staging an embedding.
                         let (embedding_id, id_work) = inner
                             .catalog
                             .next_id_in("emb_", summary.embeddings_inserted as u64, &context)?
@@ -651,6 +950,10 @@ impl Database {
                             replaced,
                         )))
                     });
+                    // Missing targets and conflicting existing embeddings are
+                    // deferred logical input failures. Failures to allocate or
+                    // read the fields return immediately so a resource error
+                    // cannot masquerade as a skipped embedding.
                     let fields = match fields {
                         Err(error)
                             if matches!(
@@ -666,6 +969,10 @@ impl Database {
                         }
                         result => result?,
                     };
+                    // An intentionally skipped embedding produces no field tuple.
+                    // Count it once and leave the model binding untouched. Every
+                    // accepted write, including a replacement, goes through the
+                    // model check below.
                     let Some((
                         fields_work,
                         [embedding_id, chunk_id, collection_id, created_at],
@@ -675,6 +982,10 @@ impl Database {
                         summary.embeddings_skipped += 1;
                         return Ok(());
                     };
+                    // Only embeddings that will be written participate in model
+                    // binding. Skipping an existing embedding must not bind its
+                    // incoming model or make later rows fail against a model that
+                    // was never stored.
                     match inner.read_reclaiming(|_| {
                         models.validate_write(
                             &input.model_name,
@@ -691,6 +1002,9 @@ impl Database {
                         }
                         result => result?,
                     }
+                    // Moving the vector into the staged put avoids another full
+                    // vector copy in this layer. Once staging succeeds, its input
+                    // and temporary field reservations may leave the visitor.
                     records.push_retained(
                         RecordPayload::EmbeddingPut(Embedding {
                             embedding_id,
@@ -705,6 +1019,9 @@ impl Database {
                         &mut row_work.json,
                     )?;
                     drop(fields_work);
+                    // A replacement also counts as a newly inserted embedding
+                    // record. These two counters describe recorded operations and
+                    // can overlap on the same input.
                     summary.embeddings_replaced += usize::from(replaced);
                     summary.embeddings_inserted += 1;
                 }
@@ -712,9 +1029,18 @@ impl Database {
             Ok(())
         })?;
         // All validation and conflict planning uses this same locked target snapshot.
+        // Complete source-key checks before reporting a deferred target conflict. Once
+        // these checks succeed, a staged manifest may be committed in multiple batches.
+        // An empty embeddings file never enters the embedding arm. Finalize
+        // document and chunk keys here as well, so duplicates split across
+        // external runs are still detected in a text-only import.
         documents.finish()?;
         chunks.finish()?;
         drop(documents);
+        // Resolve all remaining source-key errors before issuing a deferred target
+        // error. The ordinal sorter has a distinct schema error and the
+        // corresponding source row can be reported even when no new record was
+        // planned.
         finish_reference_keys(&mut embedding_keys, options.embedding_path.as_deref())?;
         finish_ordinal_keys(&mut ordinal_keys, &options.chunk_path, &mut ordinal_error)?;
         if let Some(error) = ordinal_error {
@@ -723,6 +1049,9 @@ impl Database {
         if let Some(error) = preflight_error {
             return Err(error);
         }
+        // Sort proposed direct ordinals by their resolved internal parent and then
+        // by ordinal. The source line travels with each key so a catalog conflict
+        // can be attributed without replaying the input.
         direct_ordinals
             .as_mut_slice()
             .sort_unstable_by(|left, right| (&left.0, left.1).cmp(&(&right.0, right.1)));
@@ -734,7 +1063,14 @@ impl Database {
             while end < ordinals.len() && ordinals[end].0 == *document_id {
                 end += 1;
             }
+            // Compare proposed ordinals with the chunks that will survive this
+            // import. For example, two replacements may exchange positions. Testing
+            // the first row against the untouched catalog would report a collision
+            // that the second replacement removes.
             let proposed = &ordinals[start..end];
+            // Each parent group is already in ordinal order. Probe it for each
+            // live existing chunk, then check whether the old chunk's external
+            // identity will be replaced in this same plan.
             for old in inner.catalog.live_document_chunks(document_id) {
                 let Ok(position) = proposed.binary_search_by_key(&old.ordinal, |key| key.1) else {
                     continue;
@@ -744,6 +1080,10 @@ impl Database {
                     // The old identity is removed by a replacement in this batch.
                     continue;
                 }
+                // Report the incoming line that proposes the occupied ordinal. A
+                // pre-existing chunk has no row in this source artifact and its
+                // internal ID is insufficient for the caller to locate the
+                // offending input.
                 return Err(crate::import::with_jsonl_location(
                     Error::new(
                         ErrorCode::InvalidJsonlSchema,
@@ -756,9 +1096,16 @@ impl Database {
             }
             start = end;
         }
+        // The append path works from the staged record stream. Release the ordinal
+        // array, its owned parent IDs and the chunk lookup before preparing commit
+        // batches so their memory and temporary-file credit become available.
         drop(direct_ordinals);
         drop(direct_ordinal_work);
         drop(chunks);
+        // Finishing preparation makes the staged records available for append; no
+        // database commit has happened yet. The direct operation requires one batch.
+        // A manifest can span commits, so an append failure there may leave earlier
+        // batches visible.
         let records = records.finish()?;
         let batches = if direct_collection.is_some() {
             inner.append_direct_batch(records, &context)?
@@ -770,7 +1117,13 @@ impl Database {
 }
 
 fn finish_reference_keys(keys: &mut Option<ExternalUniqueKeys>, path: Option<&Path>) -> Result<()> {
+    // The first embedding row can finish the chunk ordinal set, and end of input
+    // also finishes it for a manifest with no embeddings. Taking the set makes
+    // both paths safe to call and releases its spill files on either outcome.
     if let Some(keys) = keys.take() {
+        // A duplicate found while merging runs is reported after the source row
+        // has gone out of scope. Carry the manifest path back to that error when
+        // the caller knows which input supplied the keys.
         keys.finish().map_err(|error| match path {
             Some(path) => error.with_detail("path", path.display()),
             None => error,
@@ -784,8 +1137,16 @@ fn finish_ordinal_keys(
     path: &Path,
     pending: &mut Option<Error>,
 ) -> Result<()> {
+    // Completion reads the sorted runs as well as the in-memory keys. A row can
+    // appear unique during parsing and still collide with a row already flushed to
+    // a different run. Retain that deferred collision separately from failures to
+    // read or merge those runs.
     let result = finish_reference_keys(keys, Some(path));
     match result {
+        // Keep a duplicate document/ordinal pair pending while later rows are
+        // checked for malformed input and duplicate embedding keys. A spill read
+        // or workspace failure ends the scan immediately because the remaining
+        // uniqueness check cannot be trusted.
         Err(error) if error.code() == ErrorCode::InvalidJsonlSchema => {
             *pending = Some(error);
             Ok(())
@@ -799,9 +1160,15 @@ fn validate_collection_target(
     collection: &CollectionInfo,
     options: &ManifestImportOptions,
 ) -> Result<()> {
+    // A newly planned descriptor already contains the manifest settings. Its
+    // remaining catalog constraint is the name. Existing IDs must instead preserve
+    // the interpretation of every row already stored under that collection.
     if !catalog.collections.contains_key(&collection.collection_id) {
         return catalog.check_collection_name_available(&collection.name);
     }
+    // Tokenizer identity is part of the collection definition. Reusing the
+    // destination with another tokenizer would mix chunks whose term counts were
+    // produced under different rules, even if every other manifest setting agrees.
     if collection.tokenizer != options.tokenizer {
         return Err(Error::new(
             ErrorCode::InvalidJsonlSchema,
@@ -809,6 +1176,9 @@ fn validate_collection_target(
         )
         .with_detail("field", "tokenizer"));
     }
+    // For a dimension mismatch, the stored dimension is the expected value even if
+    // the manifest contains no vector rows. This check compares collection
+    // definitions before row-level validation can choose a different error.
     if collection.embedding_dim != options.embedding_dim {
         return Err(Error::new(
             ErrorCode::InvalidEmbeddingDimension,
@@ -817,12 +1187,18 @@ fn validate_collection_target(
         .with_detail("expected", collection.embedding_dim)
         .with_detail("actual", options.embedding_dim));
     }
+    // The metric also affects the interpretation of already stored vectors. An
+    // import can extend this collection, but cannot change its scoring semantics
+    // by supplying a different metric in a new manifest.
     if collection.distance_metric != options.distance_metric {
         return Err(Error::new(
             ErrorCode::UnsupportedMetric,
             "manifest distance_metric does not match collection",
         ));
     }
+    // Normalization is an optional assertion about how the vectors were supplied.
+    // Omitting it accepts the live flag. Supplying false is meaningful and must
+    // still be compared with a true flag on the target.
     if options
         .vectors_normalized
         .is_some_and(|value| value != collection.vectors_normalized)
@@ -833,8 +1209,14 @@ fn validate_collection_target(
         )
         .with_detail("field", "vectors_normalized"));
     }
+    // Only two explicit model names can conflict at this point. An unpinned target
+    // can admit a model from input, and an omitted manifest name provides no new
+    // model restriction for an already pinned collection.
     if let (Some(expected), Some(actual)) = (&collection.embedding_model, &options.embedding_model)
     {
+        // This comparison only sees the explicit configuration. The visible
+        // embeddings can impose a further model constraint, which the row
+        // admission path derives from the live catalog.
         if expected != actual {
             return Err(Error::new(
                 ErrorCode::EmbeddingModelMismatch,
@@ -853,10 +1235,24 @@ fn import_collection(
     context: &JsonOperationContext,
     timestamp: &str,
 ) -> Result<(CollectionInfo, RecordReservation)> {
+    // A manifest identifies the destination by name. On a match, retain the
+    // existing collection's actual settings and internal ID. The caller checks the
+    // manifest against these settings before staging any new records.
+    // A collection descriptor can escape this function before any write has
+    // occurred. The planner still has to validate the destination and stage a
+    // collection-create record when the ID does not already exist.
     match catalog.collection_by_name(&options.collection_name) {
         Ok(collection) => copy_collection_in(collection, context),
         Err(error) if error.code() == ErrorCode::CollectionNotFound => {
+            // Only CollectionNotFound permits planning a new collection. Preserve
+            // other lookup failures. Construct its owned descriptor under a
+            // reservation that can later accompany the descriptor out of this
+            // function.
             let mut work = RecordReservation::from(context.reservation());
+            // Reserve the owned strings together so a failed copy cannot leave a
+            // descriptor with only some of its allocations accounted for. The
+            // placeholder for an absent model is discarded when the optional
+            // configuration field is built.
             let [name, embedding_model, created_at] = work.copy_strings(
                 [
                     &options.collection_name,
@@ -865,6 +1261,10 @@ fn import_collection(
                 ],
                 context,
             )?;
+            // For a new collection, an omitted normalization declaration uses the
+            // default false and the vector index is exact. Preserve an omitted
+            // model as None so the first accepted embedding can establish the
+            // collection's model.
             let config = CollectionConfig {
                 tokenizer: options.tokenizer.clone(),
                 name,
@@ -874,6 +1274,9 @@ fn import_collection(
                 vectors_normalized: options.vectors_normalized.unwrap_or(false),
                 vector_index: VectorIndexConfig::Exact,
             };
+            // Only the name and model enter the validation object. Creation time
+            // belongs to the eventual collection descriptor, so its capacity stays
+            // with the original workspace reservation throughout validation.
             let string_bytes = config.name.capacity()
                 + config.embedding_model.as_ref().map_or(0, String::capacity);
             // Reuse these strings during schema validation, then restore their typed lifetime.
@@ -883,10 +1286,18 @@ fn import_collection(
                     .unwrap()
                     .take_json(string_bytes, crate::json::JsonInputKind::CollectionConfig)?,
             );
+            // Keep the validation result pending until the borrowed string credit
+            // has been transferred back from JSON to workspace. Either the returned
+            // collection or the failure path must retire these allocations under
+            // the correct owner.
             let validation = config.validate_retained_in(&work.json);
             let strings = work.json.take_workspace(string_bytes);
             work.merge_workspace(strings);
             drop(validation?);
+            // Allocate the prospective internal ID from the locked catalog only
+            // after validating the definition. A successful return supplies a plan
+            // and its credit. The caller decides whether to append a
+            // CollectionCreate record in the import batch.
             let (collection_id, id_work) = catalog.next_id_in("col_", 0, context)?.into_parts();
             work.merge_workspace(id_work);
             Ok((
@@ -914,7 +1325,14 @@ fn replacement(
     timestamp: &str,
     context: &JsonOperationContext,
 ) -> Result<(RecordPayload, RecordReservation)> {
+    // The caller first resolves the live object by its external key, then passes
+    // its internal ID here. Staging a tombstone for that ID before the replacement
+    // lets replay retire the same object even if the new row reuses the external
+    // key.
     let mut work = RecordReservation::from(context.reservation());
+    // Use the timestamp supplied by the planner so replacement records share the
+    // operation's time value. Keep the copied target ID and other strings under
+    // the reservation that accompanies this record into staging.
     let [target_type, target_id, deleted_at, reason] =
         work.copy_strings([kind, id, timestamp, "replace"], context)?;
     Ok((
@@ -929,6 +1347,9 @@ fn replacement(
 }
 
 fn existing_id(kind: &str, id: &str) -> Error {
+    // Both an existing external ID and a second embedding for a live chunk use the
+    // public conflict code. Keep the particular key in the message so callers can
+    // distinguish the manifest rows that require correction.
     Error::new(
         ErrorCode::DuplicateExternalId,
         format!("{kind} {id} already exists"),

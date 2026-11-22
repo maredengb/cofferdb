@@ -412,6 +412,7 @@ fn collection_and_why_not_preparation_reclaim_at_the_actual_call_sites() {
             let wrapper_bytes = 3 + name.len() + 7 + 16 + 21;
             db.lock().unwrap().before_why_not_ranks = Some(Box::new(move || {
                 let hook_db = Database {
+                    owner_pid: std::process::id(),
                     inner: hook_inner.upgrade().unwrap(),
                     json_work: hook_json,
                     temporary_work: hook_disk,
@@ -458,7 +459,7 @@ fn collection_and_why_not_preparation_reclaim_at_the_actual_call_sites() {
             let (diagnosis, work) = db
                 .why_not_debug_with_metadata_boost_in(
                     name,
-                    "absent",
+                    crate::db::DiagnosisTarget::Legacy("absent"),
                     Some("the and".into()),
                     None,
                     input.clone(),
@@ -468,6 +469,7 @@ fn collection_and_why_not_preparation_reclaim_at_the_actual_call_sites() {
                     1,
                     None,
                     Some(context.clone()),
+                    |_| Ok(()),
                 )
                 .unwrap();
             assert_eq!(diagnosis.result, expected.as_ref().unwrap().result);

@@ -76,6 +76,9 @@ class LifecycleTests(unittest.TestCase):
         child = os.fork()
         if child == 0:
             try:
+                for method, args in (("compact", ()), ("snapshot", (self.path + ".fork",)), ("rebuild_index", ())):
+                    with self.assertRaises(ForkedHandleError):
+                        getattr(database, method)(*args)
                 for operation in (database.stats, database.close):
                     try:
                         operation()

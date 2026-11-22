@@ -1,4 +1,36 @@
-# Source and offline reference builds (0.1.1)
+# Build and read the CofferDB 0.2.0 offline API reference
+
+**Following a link from a 0.1.x guide?** Open the [archived 0.1.1 build instructions](reference-v0.1.1.md) for the original procedure and archive layout.
+
+The offline reference is a set of searchable HTML pages. It lists Rust types
+and methods and Python classes, signatures, result fields and exceptions. If
+you already have the matching reference archive, extract it and open
+`index.html` in a browser. Keep the directory together. Use the
+[CLI](cli.md), [Python](python.md) or [Rust](rust.md) manual for worked examples.
+
+On a Rust item page, open a field, enum variant or method to see how to use it.
+In the Python reference, **Actual Python symbol inventory** shows the installed
+signatures, typed parameters, dictionary keys and exception attributes. For
+example, look up `CompactReport.index_rebuild` to interpret the index outcome
+after file replacement. With the wheel installed, `help(cofferdb.Database.compact)`
+also shows the calling and recovery instructions after `import cofferdb`.
+
+The steps below are for someone building the 0.2.0 pages from source.
+
+## Run the API examples
+
+From the source root, with the locked Rust dependencies available, run
+`cargo test --locked --offline --doc`. In a Python environment with the matching
+wheel installed, run the following to execute the package example against that wheel:
+
+```console
+python -m unittest discover -s bindings/python/tests -p test_types.py
+```
+
+The examples create temporary databases and verify the restored content after
+the writer closes.
+
+## Choose matching inputs
 
 The complete source tree contains the engine, Python binding, locked inputs,
 notices, guides and executable examples. The Rust source crate omits the Python
@@ -6,8 +38,7 @@ binding; obtain the complete matching source tree for the workflows below. The
 root `pyproject.toml` is the canonical
 Python packaging entry; it points to `bindings/python/Cargo.toml`. Run maturin
 from this root so the complete project layout and README paths are retained.
-Treat 0.1.1 material and reference archives as unreleased until their exact
-source identity and checksums are identified in the matching release record.
+For a downloadable archive, check the [release record](https://github.com/maredengb/cofferdb/releases) for your installed version and verify its checksum.
 
 ## Prepare source without carrying repository history
 
@@ -73,7 +104,8 @@ its packaged type hints. Rustdoc uses each Rust version's own source.
 
 Obtain a clean Rust 0.1.0 checkout at the public `v0.1.0` tag to build the supplemental
 old-version reference. It is not generated from newer source. From the prepared
-0.1.1 root, with its wheel installed in this environment:
+0.2.0 root, with a wheel built from that same prepared source installed in
+this environment:
 
 ```console
 python tools/build_reference.py /a/new/reference-output --rust-v010-source /path/to/clean-0.1.0-checkout
@@ -82,7 +114,7 @@ python tools/build_reference.py /a/new/reference-output --rust-v010-source /path
 The tool rejects a mismatched installed package/source identity, changed input
 files, unpinned documentation tools or the wrong legacy source. It generates:
 
-- `cofferdb-0.1.1-reference/index.html`, linking the rendered guides, both Rust
+- `cofferdb-0.2.0-reference/index.html`, linking the rendered guides, both Rust
   references, the Python reference and generated public symbol inventories.
 - Rust indexes of types, functions, methods, fields, variants and return
   structures from normal public rustdoc, excluding doc-hidden implementation
@@ -98,5 +130,5 @@ environment is needed to read it. Keep the whole directory so relative source,
 navigation, search and style assets remain available offline. Static local file
 targets are checked; external upstream/standard-library links, JavaScript-created
 links and arbitrary fragments are outside that check. The reference archive is
-not proof of six-platform installation, compatibility, retrieval quality,
+not proof of installation on a particular platform, compatibility, retrieval quality,
 performance or full release acceptance.

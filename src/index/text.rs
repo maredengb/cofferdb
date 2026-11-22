@@ -21,31 +21,58 @@ mod streamed;
 pub(crate) use candidates::{Bm25Hits, TextCandidates};
 pub(crate) use stats::TextStatsSummary;
 
+// Persistent segments represent this identity by a numeric tokenizer ID, checked
+// before postings are decoded.
 pub const DEFAULT_TOKENIZER_NAME: &str = "default_en";
 pub const DEFAULT_TOKENIZER_VERSION: &str = "0.1";
+// These scoring constants also go into a persistent segment's header. A change
+// affects both the rank computed from a resident index and which stored segment
+// parameters a reader may accept.
 pub const BM25_K1: f64 = 1.2;
 pub const BM25_B: f64 = 0.75;
 
 #[derive(Default)]
 pub struct TextIndex {
+    // One list per normalized term, shared across collections. Sort each list by
+    // collection ID then chunk ID so both collection ranges and individual postings
+    // can be located without copying them.
     postings: BTreeMap<String, Vec<Posting>>,
+    /// Indexed length per internal chunk ID, measured in tokenizer tokens. Empty
+    /// chunks count as length one for BM25 length normalization.
     pub chunk_lengths: BTreeMap<String, usize>,
+    /// Indexed chunk counts per collection, including chunks with no term postings.
+    /// BM25 uses this population for inverse document frequency.
     pub total_chunks_by_collection: BTreeMap<String, CollectionCounts>,
+    /// Mean of the indexed chunk lengths in each nonempty collection. Each chunk
+    /// contributes at least one token of length for scoring purposes.
     pub avg_len_by_collection: BTreeMap<String, f64>,
+    // Owns the memory reservation for these resident maps and their payloads. A
+    // default index has no resident owner, and dropping the cache releases that
+    // credit.
     cache: Option<cache::TextCacheOwner>,
 }
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone, Debug))]
 pub(crate) struct CollectionCounts {
+    // Number of indexed chunks in this collection, independent of whether any one
+    // term matches them.
     chunks: usize,
+    // Shared collection ID retained for the postings and their cache accounting. A
+    // collection with no postings needs no allocation for this ID.
     owner: Option<Arc<str>>,
 }
 
 #[cfg_attr(test, derive(Debug))]
 pub(crate) enum TextCacheBuild {
+    // The full visitor-built index and its resident allocation credit can be
+    // installed together.
     Complete(TextIndex),
+    // The source remains usable when the optional cache could not fit. The caller
+    // can still stream its postings.
     Miss,
+    // The segment visitor could not supply a usable source. Reading the same data
+    // as a valid cache miss would lose that distinction.
     Invalid,
 }
 
@@ -91,25 +118,44 @@ impl std::fmt::Debug for TextIndex {
 
 #[derive(Clone, Debug)]
 pub struct Posting {
+    /// Shared identity of the collection containing this posting. All its terms can
+    /// refer to the same allocation.
     pub collection_id: Arc<str>,
+    /// Internal ID of the matching chunk, used to order postings within a
+    /// collection.
     pub chunk_id: String,
+    /// Number of occurrences of this term in the chunk, regardless of how often the
+    /// term appears in the query.
     pub term_frequency: usize,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Bm25Hit {
+    /// Owned internal chunk ID, used as the tie breaker and to join with vector
+    /// candidates.
     pub chunk_id: String,
+    /// Sum of the matching terms' raw BM25 contributions before fusion
+    /// normalization.
     pub score: f64,
+    /// Per-term evidence retained when requested. Scores-only searches can leave
+    /// this empty for a positive-scoring hit.
     pub matched_terms: Vec<MatchedTerm>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct TextSearchOptions {
+    /// Maximum number of lexical hits to retain before the search applies its
+    /// common metadata filter.
     pub limit: usize,
+    /// Whether to retain term-level evidence for winners. Exact diagnostic ranking
+    /// can request scores alone.
     pub explanations: bool,
 }
 
 impl TextSearchOptions {
+    // Keep evidence on the bounded winners when a caller may build hit
+    // explanations. The same limit participates in lexical recall whether or not
+    // individual term contributions are retained.
     pub fn with_explanations(limit: usize) -> Self {
         Self {
             limit,
@@ -117,6 +163,9 @@ impl TextSearchOptions {
         }
     }
 
+    // Full diagnostic rankings can omit per-term evidence. They still use the same
+    // posting frequencies and length normalization, so a request for scores alone
+    // does not change how ranks are computed.
     pub fn scores_only(limit: usize) -> Self {
         Self {
             limit,
@@ -127,32 +176,58 @@ impl TextSearchOptions {
 
 #[derive(Clone, Debug)]
 pub struct MatchedTerm<T = String> {
+    /// Number of chunks containing the term in this collection. BM25 treats a chunk
+    /// as its unit of retrieval.
     pub document_frequency: usize,
+    /// Indexed length of this chunk in tokenizer tokens, used in the term-frequency
+    /// normalization.
     pub chunk_length: usize,
+    /// Collection-wide average indexed chunk length used for this scoring pass, in
+    /// the same units as the hit's length.
     pub avg_chunk_length: f64,
+    /// Normalized term text. Scoring can borrow it from the query and the returned
+    /// explanation owns its own copy.
     pub term: T,
+    /// Term frequency in this chunk, independent of how many other chunks matched
+    /// the term.
     pub frequency: usize,
+    /// This term's contribution to the chunk's unweighted raw lexical score.
     pub bm25_contribution: f64,
 }
 
 struct RankedChunk<'a> {
+    // Borrow the ID from the postings while the bounded heap is selecting winners.
+    // An owned copy is needed only for a hit that survives.
     chunk_id: &'a str,
+    // Complete raw lexical score for this chunk, accumulated in query-term order
+    // before it enters the heap.
     score: f64,
 }
 
 struct QueryTerm<'a> {
+    // Normalized text borrowed from the sorted, deduplicated query terms.
     term: &'a str,
+    // Nonempty collection-local slice sorted by chunk ID. The merge advances
+    // through this slice one posting at a time.
     postings: &'a [Posting],
+    // Inverse document frequency computed once from the collection size and this
+    // term's posting count.
     idf: f64,
 }
 
 fn posting_order(left: &Posting, right: &Posting) -> Ordering {
+    // Use collection first to keep each local posting run contiguous. Within that
+    // run, chunk order lets the term merge consume matching IDs without another
+    // per-query sort.
     left.collection_id
         .cmp(&right.collection_id)
         .then_with(|| left.chunk_id.cmp(&right.chunk_id))
 }
 
 fn scoped_postings<'a>(postings: &'a [Posting], collection_id: &str) -> &'a [Posting] {
+    // Two partition points delimit the exact collection run. For an absent
+    // collection they coincide, yielding an empty slice even when neighboring
+    // collections use the term.
     let start = postings.partition_point(|posting| posting.collection_id.as_ref() < collection_id);
     let end = postings.partition_point(|posting| posting.collection_id.as_ref() <= collection_id);
     &postings[start..end]
@@ -171,6 +246,9 @@ impl PartialOrd for RankedChunk<'_> {
 }
 impl Ord for RankedChunk<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
+        // A larger RankedChunk is the preferred hit. The search wraps it in Reverse
+        // so the least desirable retained entry stays at the root. At an equal
+        // score the lexically smaller internal ID wins.
         self.score
             .partial_cmp(&other.score)
             .unwrap_or(Ordering::Equal)
@@ -179,6 +257,9 @@ impl Ord for RankedChunk<'_> {
 }
 
 fn contribution(frequency: usize, length: usize, avg_len: f64, idf: f64) -> f64 {
+    // Length normalization compares a chunk with its own collection average. Every
+    // scoring path that explains individual terms uses the same constants and
+    // arithmetic, so its contributions reproduce the raw score.
     let tf = frequency as f64;
     idf * (tf * (BM25_K1 + 1.0))
         / (tf + BM25_K1 * (1.0 - BM25_B + BM25_B * length as f64 / avg_len))
@@ -352,12 +433,18 @@ impl TextIndex {
     }
 
     fn sort_postings(&mut self) {
+        // Sort each term's list once by collection and chunk. Both the
+        // collection-range lookup and the subsequent binary search for a winning
+        // chunk depend on that ordering.
         for postings in self.postings.values_mut() {
             postings.sort_unstable_by(posting_order);
         }
     }
 
     fn collection_postings(&self, collection_id: &str, term: &str) -> &[Posting] {
+        // Return an empty slice when the term has no global posting list. The same
+        // result can arise when a list exists only in other collections and its
+        // scoped range is empty.
         let Some(postings) = self.postings.get(term) else {
             return &[];
         };
@@ -372,6 +459,9 @@ impl TextIndex {
         context: &JsonOperationContext,
     ) -> Result<Bm25Hits> {
         let limit = options.limit;
+        // An empty window needs neither query tokenization nor scoring workspace.
+        // With a positive window an empty collection can also end the request
+        // before any IDF calculation.
         if limit == 0 {
             return Ok(Bm25Hits::empty(context));
         }
@@ -379,6 +469,9 @@ impl TextIndex {
         if n == 0.0 {
             return Ok(Bm25Hits::empty(context));
         }
+        // Keep the divisor positive before scoring. Both the cached population and
+        // its average are collection-local, including the minimum indexed length
+        // used for empty chunks.
         let avg_len = self
             .avg_len_by_collection
             .get(collection_id)
@@ -386,18 +479,31 @@ impl TextIndex {
             .unwrap_or(1.0)
             .max(1.0);
         let terms = crate::tokenizer::query_terms_in(query, context)?;
+        // Document frequency is scoped to the collection. A term used heavily in
+        // another collection must not reduce its weight here, even though both
+        // collections share a postings map.
         let count = terms
             .iter()
             .filter(|term| !self.collection_postings(collection_id, term).is_empty())
             .count();
+        // Allocate plans only for query terms with postings in this collection.
+        // Besides bounding scratch for sparse queries, this lets the merge safely
+        // take the first posting of every plan.
         let mut plans = ReservedVec::with_capacity(count, context, "operation_scratch")?;
         for term in terms.iter() {
             let postings = self.collection_postings(collection_id, term);
+            // A posting represents one chunk for this term, even when the term
+            // occurs several times in that chunk. Use list length for document
+            // frequency and the posting's own frequency for its score
+            // contribution.
             let df = postings.len();
             if df == 0 {
                 continue;
             }
             let idf = ((n - df as f64 + 0.5) / (df as f64 + 0.5) + 1.0).ln();
+            // Borrow both the query term and this collection's posting slice in
+            // the plan. All per-chunk and explanation passes can reuse the same
+            // IDF without copying postings or counting other collections.
             plans.push(QueryTerm {
                 term,
                 postings,
@@ -407,15 +513,28 @@ impl TextIndex {
 
         // Merge by chunk, then lexical term order to preserve floating-point sums.
         let plans = plans.as_slice();
+        // Each cursor holds a chunk ID, term position and posting position. For
+        // tied chunk IDs the term position follows the sorted query terms, so all
+        // paths accumulate floating-point contributions in the same order.
         let mut pending = ReservedVec::with_capacity(plans.len(), context, "operation_scratch")?;
         for (plan, term) in plans.iter().enumerate() {
             pending.push(Reverse((term.postings[0].chunk_id.as_str(), plan, 0)));
         }
+        // Build the BinaryHeap from the already admitted cursor array. Keep its
+        // workspace guard alive separately while replacing cursors, since
+        // consuming ReservedVec does not make the backing allocation free.
         let (pending, pending_work) = pending.into_parts();
         let mut pending = BinaryHeap::from(pending);
         let mut candidate_work = context.workspace_reservation();
         let mut candidates: BinaryHeap<Reverse<RankedChunk<'_>>> = BinaryHeap::new();
+        // Each active term contributes its next posting to the heap. Once all
+        // postings for one chunk have been consumed, its score is final and can
+        // compete for the bounded result heap. No score table for every matching
+        // chunk is needed.
         while let Some(&Reverse((chunk_id, _, _))) = pending.peek() {
+            // Count one document visit for the whole run of equal chunk IDs. Count
+            // individual posting visits in the inner loop so chunks matching
+            // several terms do not inflate the document count.
             context.search_cost_add(crate::search_cost::Counter::TextDocumentVisits, 1);
             let len = self.chunk_lengths.get(chunk_id).copied().unwrap_or(1);
             let mut score = 0.0;
@@ -427,32 +546,57 @@ impl TextIndex {
                 let term = &plans[plan];
                 context.search_cost_add(crate::search_cost::Counter::TextPostingVisits, 1);
                 score += contribution(term.postings[offset].term_frequency, len, avg_len, term.idf);
+                // Advance only the plan that supplied this posting. An exhausted
+                // plan contributes no further cursors, which keeps the heap
+                // bounded by the number of matched query terms.
                 if let Some(next) = term.postings.get(offset + 1) {
                     pending.push(Reverse((next.chunk_id.as_str(), plan, offset + 1)));
                 }
             }
+            // The score is final when the merge advances to a different chunk. Keep
+            // at most limit borrowed candidates, comparing the tie-breaking ID as
+            // well as the score before evicting a winner.
             let candidate = RankedChunk { chunk_id, score };
             if candidates.len() < limit {
+                // Admit output-heap slots as candidates actually arrive. Once the
+                // limit is reached, replacing the worst entry reuses an existing
+                // slot even if many more chunks match.
                 reserve_heap_slot(&mut candidates, &mut candidate_work, limit)?;
                 candidates.push(Reverse(candidate));
             } else if candidates.peek().is_some_and(|worst| candidate > worst.0) {
                 *candidates.peek_mut().unwrap() = Reverse(candidate);
             }
         }
+        // Release the merge heap and its credit before reserving owned results. The
+        // term plans must stay alive because winners still need their posting lists
+        // for the explanation lookup.
         drop(pending);
         drop(pending_work);
         try_shrink_heap(&mut candidates, &mut candidate_work)?;
+        // Look up term frequencies for the retained winners only. Evicted candidates
+        // have no output row and need no per-term explanation storage.
         let mut hits = Bm25Hits::with_capacity(candidates.len(), context)?;
+        // Reverse ordering in the heap produces best-first output here, with
+        // internal ID breaking ties. This final pass turns borrowed winners into
+        // owned hits in that public order.
         for Reverse(candidate) in candidates.into_sorted_vec() {
             let len = self
                 .chunk_lengths
                 .get(candidate.chunk_id)
                 .copied()
                 .unwrap_or(1);
+            // A scores-only request skips the per-term lookups entirely. With
+            // explanations, look up each selected chunk in the same postings used
+            // to score it so term counts and lengths refer to the same collection
+            // population.
             let matched_terms = plans
                 .iter()
                 .take(if options.explanations { plans.len() } else { 0 })
                 .filter_map(|term| {
+                    // Search each term's scoped chunk-ordered list for the
+                    // retained winner. A missing posting contributes neither a
+                    // term explanation nor a frequency, even when other terms
+                    // produced a positive score.
                     let offset = term
                         .postings
                         .binary_search_by(|posting| {
@@ -460,6 +604,10 @@ impl TextIndex {
                         })
                         .ok()?;
                     let posting = &term.postings[offset];
+                    // Explanation generation is a second use of the winning
+                    // postings and is counted as such. Recompute each displayed
+                    // term contribution from the same chunk length, corpus
+                    // statistics and term frequency used for ranking.
                     context.search_cost_add(crate::search_cost::Counter::TextPostingVisits, 1);
                     Some(MatchedTerm {
                         document_frequency: term.postings.len(),
@@ -490,6 +638,9 @@ impl TextIndex {
         context: &JsonOperationContext,
     ) -> Result<Bm25Hits> {
         let terms = crate::tokenizer::query_terms_in(query, context)?;
+        // Use the same corpus size and average chunk length as ordinary recall.
+        // Recomputing them from the candidate IDs alone would make completed
+        // scores depend on which route admitted a chunk.
         let n = self.collection_chunk_count(collection_id) as f64;
         let avg_len = self
             .avg_len_by_collection
@@ -497,9 +648,16 @@ impl TextIndex {
             .copied()
             .unwrap_or(1.0)
             .max(1.0);
+        // Reserve space for one output per requested ID, including zero-match
+        // rows. A completion result must describe each admitted ID even when none
+        // of the query's terms occur in it.
         let mut hits = Bm25Hits::with_capacity(ids.len(), context)?;
         for &id in ids {
             context.search_cost_add(crate::search_cost::Counter::TextDocumentVisits, 1);
+            // Completion is asked about a chunk already admitted by another route.
+            // A missing length means the index cannot describe that chunk. Treat
+            // that as corruption rather than inventing a document length for its
+            // score.
             let len = self.chunk_lengths.get(id).copied().ok_or_else(|| {
                 crate::Error::new(
                     crate::ErrorCode::IndexCorruption,
@@ -507,6 +665,10 @@ impl TextIndex {
                 )
             })?;
             let matched = terms.iter().filter_map(|term| {
+                // Binary-search only the collection's postings for this term.
+                // Document frequency below is the size of that scoped list, so
+                // another collection's use of the same term cannot change its
+                // weight.
                 let postings = self.collection_postings(collection_id, term);
                 let offset = postings
                     .binary_search_by(|posting| posting.chunk_id.as_str().cmp(id))
@@ -528,6 +690,10 @@ impl TextIndex {
                     ),
                 })
             });
+            // The iterator borrows the query terms and postings. One traversal
+            // obtains the score in lexical order, and replaying it lets the result
+            // owner reserve and copy the match details without an intermediate term
+            // array.
             let score = matched
                 .clone()
                 .fold(0.0, |sum, term| sum + term.bm25_contribution);

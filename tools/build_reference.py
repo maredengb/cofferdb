@@ -35,13 +35,13 @@ from prepare_source import checked_relative, digest, read_source
 class Elements(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.ids = set()
         self.links = []
+        self.redirect = False
 
     def handle_starttag(self, tag, attributes):
+        if tag == "meta" and dict(attributes).get("http-equiv", "").lower() == "refresh":
+            self.redirect = True
         for key, value in attributes:
-            if value is not None and key == "id":
-                self.ids.add(value)
             if value is not None and key in {"href", "src"}:
                 self.links.append(value)
 
@@ -90,51 +90,171 @@ def run(arguments, cwd, logs, name, environment=None):
         subprocess.run(arguments, cwd=cwd, env=env, stdout=stdout, stderr=stderr, check=True)
 
 
-def rust_reference(source, target, destination, cargo, logs, name):
+class RustMembers(Elements):
+    """Read rustdoc's field, variant, inherent impl and trait-declaration sections."""
+
+    def __init__(self):
+        super().__init__()
+        self.section = ""
+        self.members = {}
+
+    def handle_starttag(self, tag, attributes):
+        super().handle_starttag(tag, attributes)
+        attrs = dict(attributes)
+        anchor = attrs.get("id", "")
+        classes = attrs.get("class", "").split()
+        if tag == "h2" and "section-header" in classes:
+            self.section = anchor
+            return
+        if not anchor or "trait-impl" in classes:
+            return
+        parts = anchor.split(".")
+        kind, components = parts[0], parts[1:]
+        if self.section == "variants":
+            if tag == "span" and len(parts) == 4 and kind == "variant" and parts[2] == "field":
+                kind, components = "variantfield", [parts[1], parts[3]]
+            elif not (tag == "section" and len(parts) == 2 and kind == "variant" and kind in classes):
+                return
+        elif self.section == "fields":
+            if not (tag == "span" and len(parts) == 2 and kind == "structfield" and kind in classes):
+                return
+        elif self.section in (
+            "implementations", "required-methods", "provided-methods",
+            "required-associated-types", "provided-associated-types",
+            "required-associated-consts", "provided-associated-consts",
+        ):
+            if tag != "section" or len(parts) != 2 or kind not in (
+                "method", "tymethod", "associatedtype", "associatedconstant"
+            ):
+                return
+        else:
+            # Standard traits, blanket implementations and dereferenced types have
+            # rustdoc member anchors of their own. They do not belong to this declaration.
+            return
+        # A numeric suffix disambiguates an HTML fragment, never a Rust identifier.
+        names = [re.sub(r"-[0-9]+$", "", part) for part in components]
+        if all(part.isidentifier() or part.isdecimal() for part in names):
+            self.members[anchor] = kind, "::".join(names)
+
+
+def rust_symbols(crate):
+    """Index actual public module pages. Private module paths contain only redirects."""
+    symbols = []
+    item_page = re.compile(r"(struct|enum|union|type|fn|trait|traitalias|constant|static|macro|attr|derive)\.(.+)\.html")
+    for index in sorted(crate.rglob("index.html")):
+        module = index.parent
+        owner = "::".join((crate.name, *module.relative_to(crate).parts))
+        module_page = Elements()
+        module_page.feed(index.read_text(encoding="utf-8"))
+        if module_page.redirect:
+            continue
+        symbols.append({"name": owner, "kind": "crate" if module == crate else "mod",
+                        "page": index.relative_to(crate.parent).as_posix()})
+        for path in sorted(module.glob("*.html")):
+            match = item_page.fullmatch(path.name)
+            if not match:
+                continue
+            parser = RustMembers()
+            rendered = path.read_text(encoding="utf-8")
+            parser.feed(rendered)
+            # Re-exports may also leave compatibility redirects in public modules.
+            if parser.redirect:
+                continue
+            name = owner + "::" + match[2]
+            page = path.relative_to(crate.parent).as_posix()
+            symbols.append({"name": name, "kind": match[1], "page": page})
+            for anchor, (kind, member) in sorted(parser.members.items()):
+                symbols.append({"name": name + "::" + member, "kind": kind,
+                                "page": f"{page}#{anchor}"})
+    if not symbols:
+        raise ValueError("rustdoc produced no crate reference")
+    return symbols
+
+
+def link_offline_guide(reference, guide, title, marker):
+    """Add a local, version-matched guide link to a generated API page."""
+    rendered = reference.read_text(encoding="utf-8")
+    if marker not in rendered:
+        raise ValueError(f"missing guide navigation insertion point in {reference.name}")
+    href = html.escape(os.path.relpath(guide, reference.parent).replace(os.sep, "/"))
+    navigation = f"<p><a href='{href}'>{html.escape(title)}</a></p>"
+    replacement = navigation + marker if marker == "</main>" else marker + navigation
+    reference.write_text(rendered.replace(marker, replacement, 1), encoding="utf-8")
+
+
+def rust_reference(source, target, destination, cargo, logs, name, *, require_docs=False):
     version = tomllib.loads((source / "Cargo.toml").read_text())["package"]["version"]
-    env = {"CARGO_TARGET_DIR": str(target),
-           "CARGO_ENCODED_RUSTDOCFLAGS": "\x1f".join(["-Dwarnings", f"--remap-path-prefix={source}=source"])}
+    flags = ["-Dwarnings", f"--remap-path-prefix={source}=source"]
+    if require_docs:
+        flags.append("-Dmissing_docs")
+    env = {"CARGO_TARGET_DIR": str(target), "CARGO_ENCODED_RUSTDOCFLAGS": "\x1f".join(flags)}
     run([cargo, "doc", "--locked", "--offline", "--no-deps", "--lib", "--manifest-path",
          str(source / "Cargo.toml")], logs, logs, name, env)
     shutil.copytree(target / "doc", destination)
     crate = destination / "cofferdb"
     if any((crate / item).exists() for item in ("binding", "cli")):
         raise ValueError("doc-hidden implementation modules appeared in the public reference")
-    symbols = []
-    for path in sorted(crate.glob("*.html")):
-        match = re.fullmatch(r"(struct|enum|type|fn|trait|constant)\.(.+)\.html", path.name)
-        if not match:
-            continue
-        owner = f"cofferdb::{match[2]}"
-        symbols.append({"name": owner, "kind": match[1], "page": f"cofferdb/{path.name}"})
-        parser = Elements()
-        parser.feed(path.read_text(encoding="utf-8"))
-        for anchor in sorted(parser.ids):
-            if anchor.startswith(("method.", "structfield.", "variant.", "associatedconstant.", "associatedtype.")):
-                symbols.append({"name": owner + "::" + anchor.split(".", 1)[1],
-                                "kind": anchor.split(".", 1)[0],
-                                "page": f"cofferdb/{path.name}#{anchor}"})
-    if not symbols:
-        raise ValueError("rustdoc produced no supported symbols")
+    symbols = rust_symbols(crate)
+    guide = destination.parent / "source/docs/rust.html"
+    if require_docs:
+        pages = {item["page"] for item in symbols if "#" not in item["page"]}
+        for path in sorted(pages):
+            link_offline_guide(destination / path, guide, "Rust programming guide", "</main>")
     (destination / "index.html").write_text(
         page(f"CofferDB Rust {version}", f"<h1>CofferDB Rust {html.escape(version)}</h1>"
              "<p><a href='cofferdb/index.html'>Crate API reference</a></p>"
              "<p><a href='public-symbols.json'>Public symbol inventory</a></p>"), encoding="utf-8")
+    if require_docs:
+        link_offline_guide(destination / "index.html", guide, "Rust programming guide", "</h1>")
     result = {"version": version, "symbols": symbols,
-              "scope": "Rendered public rustdoc items, including derived/trait methods; doc-hidden items excluded"}
+              "scope": "Public rustdoc items, fields, variants, inherent members and trait declarations; trait implementations and doc-hidden items excluded"}
     (destination / "public-symbols.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 
 def python_symbols(inventory):
-    content = ["<h1>Installed Python public symbols</h1><p>Generated from the actual installed "
-               "package and its packaged type stub. Type hints do not perform runtime coercion.</p><ul>"]
+    esc = html.escape
+    version = esc(inventory["sdk_version"])
+    content = ["<h1>Installed Python public symbols</h1><p>Generated from the installed wheel and its "
+               f"packaged type declarations. Browse the <a href='python-{version}/api.html'>native API</a>, "
+               f"<a href='python-{version}/data.html'>data types</a> and "
+               "<a href='source/docs/python.html'>Python guide</a> "
+               "for complete workflows.</p><ul>"]
     for name in inventory["symbols"]:
-        content.append(f"<li><a href='#{html.escape(name)}'>{html.escape(name)}</a></li>")
+        content.append(f"<li><a href='#{esc(name)}'>{esc(name)}</a></li>")
     content.append("</ul>")
+
+    def description(value):
+        return f"<div style='white-space:pre-wrap'>{esc(value)}</div>"
+
+    def callable_doc(name, value):
+        content.append(f"<pre>{esc(name + value['declared_signature'])}</pre>")
+        content.append(description(value["doc"]))
+
     for name, value in inventory["symbols"].items():
-        content.append(f"<section id='{html.escape(name)}'><h2>{html.escape(name)}</h2>")
-        content.append("<pre>" + html.escape(json.dumps(value, ensure_ascii=False, indent=2)) + "</pre></section>")
+        content.append(f"<section id='{esc(name)}'><h2>{esc(name)}</h2>")
+        if value["kind"] == "native_function":
+            callable_doc(name, value)
+        else:
+            content.append(description(value["doc"]))
+        if value["kind"] == "type_alias":
+            content.append(f"<pre>{esc(value['definition'])}</pre>")
+        if value["kind"] == "version":
+            content.append(f"<p>Value: <code>{esc(value['value'])}</code></p>")
+        for member, method in value.get("methods", {}).items():
+            full_name = f"{name}.{member}"
+            content.append(f"<h3 id='{esc(full_name)}'>{esc(full_name)}</h3>")
+            callable_doc(full_name, method)
+        fields = value.get("fields", value.get("declared_attributes", {}))
+        if fields:
+            content.append("<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody>")
+            docs = value.get("field_docs", value.get("attribute_docs", {}))
+            for key, annotation in fields.items():
+                optional = " (optional key)" if key in value.get("optional", ()) else ""
+                content.append(f"<tr id='{esc(name)}.{esc(key)}'><td><code>{esc(key)}</code>{optional}</td>"
+                               f"<td><code>{esc(annotation)}</code></td><td>{esc(docs[key])}</td></tr>")
+            content.append("</tbody></table>")
+        content.append("</section>")
     return page("CofferDB Python symbols", "\n".join(content))
 
 
@@ -230,10 +350,14 @@ def build(source, legacy, output, cargo, legacy_commit):
         destination = copied / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(read_source(source, relative))
-    current = rust_reference(source, output / "rust-current-target", public / f"rust-{version}", cargo, logs, "rust-current")
+    current = rust_reference(source, output / "rust-current-target", public / f"rust-{version}", cargo, logs,
+                             "rust-current", require_docs=True)
     previous = rust_reference(legacy, output / "rust-legacy-target", public / "rust-0.1.0", cargo, logs, "rust-legacy")
     run([sys.executable, "-m", "sphinx", "-n", "-W", "-b", "html", "-d", str(output / "sphinx-doctrees"),
          str(source / "bindings/python/docs"), str(public / f"python-{version}")], logs, logs, "sphinx")
+    for topic in ("index", "api", "data", "contracts"):
+        link_offline_guide(public / f"python-{version}" / f"{topic}.html",
+                           public / "source/docs/python.html", "Python programming guide", "</h1>")
     run([sys.executable, str(source / "bindings/python/tools/api_inventory.py"),
          str(public / "python-public-symbols.json")], logs, logs, "python-inventory")
     inventory = json.loads((public / "python-public-symbols.json").read_text())

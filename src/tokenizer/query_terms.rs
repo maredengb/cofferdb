@@ -12,7 +12,11 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 pub(crate) struct QueryTerms<'a> {
+    // Unique normalized query tokens in lexical order, mapped to their dense
+    // positions in per-term scoring arrays.
     terms: BTreeMap<Cow<'a, str>, usize>,
+    // Owns the estimated map nodes and the buffers of tokens requiring
+    // normalization. Keys that borrow the input query need no string allocation.
     work: WorkspaceReservation,
 }
 
@@ -21,10 +25,16 @@ impl QueryTerms<'_> {
         self.terms.len()
     }
 
+    // Iterate over borrowed key spellings so scoring can replay the sorted
+    // vocabulary when copying explanations. Callers can clone the iterator without
+    // cloning the tree or the strings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &str> + Clone {
         self.terms.keys().map(Cow::as_ref)
     }
 
+    // Segment visitors supply normalized term text by reference. A missing key
+    // simply marks that posting group irrelevant to this query. A present key
+    // indexes the same slot as iter() order.
     pub(crate) fn position(&self, term: &str) -> Option<usize> {
         self.terms.get(term).copied()
     }
@@ -34,23 +44,41 @@ pub(crate) fn query_terms_in<'a>(
     query: &'a str,
     context: &JsonOperationContext,
 ) -> Result<QueryTerms<'a>> {
+    // Borrow unchanged tokens from the query and keep the operation's grant with
+    // tokens whose bytes had to be lowercased. Both kinds can serve as keys in the
+    // same ordered vocabulary.
     let mut result = QueryTerms {
         terms: BTreeMap::new(),
         work: context.workspace_reservation(),
     };
+    // A code symbol can contribute both its full spelling and its underscore or
+    // case-separated pieces. Skip an identical whole-symbol piece here.
+    // Repetitions across symbols are removed by the map.
     for raw in symbols(query).flat_map(|symbol| {
         std::iter::once(symbol).chain(symbol_parts(symbol).filter(move |part| *part != symbol))
     }) {
         // Small queries can discard repeated ASCII casing without making a copy.
+        // A linear scan can avoid allocating a lowercase duplicate for small
+        // vocabularies. Crossing this size threshold changes the fast path only,
+        // never which normalized keys are retained.
         if raw.is_ascii()
             && result.len() <= 16
             && result.iter().any(|term| term.eq_ignore_ascii_case(raw))
         {
             continue;
         }
+        // Normalization may remove a stop word entirely. Continue before charging
+        // a tree node or assigning a vocabulary position to a token the index
+        // would omit.
         let token = match normalize(raw, context) {
             Ok(Some(token)) => token,
             Ok(None) => continue,
+            // A budget refusal while lowercasing an ASCII token is harmless only if
+            // a case-insensitive scan proves its normalized key is already present.
+            // A genuinely new key must propagate the refusal.
+            // The fallback scan has no small-map cutoff. It is paid only on an
+            // ASCII normalization budget error, when proving an existing key can
+            // let a valid query finish without another allocation.
             Err(error)
                 if raw.is_ascii()
                     && is_memory_budget_error(&error)
@@ -60,17 +88,31 @@ pub(crate) fn query_terms_in<'a>(
             }
             Err(error) => return Err(error),
         };
+        // Different raw spellings can normalize to the same key even after the
+        // ASCII shortcut. Dropping the temporary token at this point also returns
+        // any grant it held for a lowercase copy.
         if result.terms.contains_key(token.value.as_ref()) {
             continue;
         }
+        // Admit the map's node growth while the temporary token still owns any
+        // lowercase buffer. Move that buffer's credit only after the key has
+        // entered the map.
+        // The owner's total can include previously retained strings as well as map
+        // nodes. Add just the difference between consecutive tree estimates,
+        // keeping all earlier string credit intact.
         let previous = btree_workspace::<Cow<'_, str>, usize>(result.len());
         let next = btree_workspace::<Cow<'_, str>, usize>(result.len() + 1);
         let needed = result.work.reserved_bytes() + next - previous;
         result.work.grow_to(needed, needed, "operation_scratch")?;
         let Token { value, work } = token;
+        // The initial map value is a placeholder. A key inserted later can sort
+        // before this one, so its final per-term scoring index cannot be assigned
+        // in discovery order.
         result.terms.insert(value, 0);
         result.work.merge(work);
     }
+    // Assign positions only after deduplication. Scoring indexes per-term
+    // arrays in the same lexical order as iter(), independent of query order.
     for (position, (_, slot)) in result.terms.iter_mut().enumerate() {
         *slot = position;
     }

@@ -7,19 +7,42 @@ use super::{
 use crate::{Error, ErrorCode, Result};
 
 pub(crate) struct JsonLines<R> {
+    // Buffered source. An unconsumed slice can be used again after releasing
+    // optional memory.
     reader: BufReader<R>,
+    // Raw bytes retained for the current physical line, which can span several
+    // fills of the input buffer.
     line: Vec<u8>,
+    // Operation shared by reading, per-line decoding and reclamation. Parsed
+    // results can hold their own charges when iteration resumes.
     context: JsonOperationContext,
+    // Schema applied independently to every nonblank record, including the input
+    // kind used for limit errors.
     schema: JsonSchema,
+    // One-based physical line being processed once reading begins. Blank lines
+    // advance it even though they yield no record.
     line_number: usize,
+    // Cumulative source bytes accounted for over the stream, including delimiters
+    // and skipped blank lines.
     bytes_read: u64,
+    // Maximum raw bytes accepted from this input across all lines. An individual
+    // JSON unit also has its own size limit.
     byte_limit: u64,
+    // Terminal state reached at EOF or on an error. A later next call must not
+    // resume partway through a failed input.
     done: bool,
+    // Charge for the BufReader allocation, held for the reader's lifetime
+    // independently of the current line.
     _input_work: JsonReservation,
+    // Charge for the separate line buffer, whose reusable capacity can outlast a
+    // short line.
     line_work: JsonReservation,
 }
 
 impl<R: Read> JsonLines<R> {
+    // Consuming this adapter returns the underlying reader at its own read
+    // position. BufReader may have read ahead, so it cannot be used to resume at
+    // the last yielded JSONL boundary simply by taking the reader early.
     pub(crate) fn into_inner(self) -> R {
         self.reader.into_inner()
     }
@@ -30,6 +53,9 @@ impl<R: Read> JsonLines<R> {
         context: &JsonOperationContext,
         byte_limit: u64,
     ) -> Result<Self> {
+        // Both constructors use the same buffer and record limits. This form has
+        // no caller-owned cache to release, so an initial memory refusal is
+        // returned directly.
         Self::new_reclaiming(source, schema, context, byte_limit, || false)
     }
 
@@ -41,6 +67,9 @@ impl<R: Read> JsonLines<R> {
         reclaim: impl FnOnce() -> bool,
     ) -> Result<Self> {
         let mut input_work = context.reservation();
+        // Admit the entire input buffer before building BufReader or reading from
+        // the source. Only this reservation is retried after reclamation, leaving
+        // a one-shot reader at its original position on failure.
         retry_after_memory_reclaim(|| input_work.grow(8192, schema.kind()), reclaim)
             .map_err(|error| error.with_detail("line", 1))?;
         Ok(Self {
@@ -48,8 +77,14 @@ impl<R: Read> JsonLines<R> {
             context: context.clone(),
             schema,
             _input_work: input_work,
+            // Start the physical-line reservation separately from the input-buffer
+            // charge. A long record can require both allocations at once even when
+            // most records fit in one input fill.
             line_work: context.reservation(),
             line: Vec::new(),
+            // Zero is the pre-read sentinel. The reader advances the physical line
+            // number before parsing or skipping a line, so its first diagnostic
+            // and first yielded row are one-based.
             line_number: 0,
             bytes_read: 0,
             byte_limit,
@@ -62,11 +97,19 @@ impl<R: Read> JsonLines<R> {
         reclaim: &mut impl FnMut() -> bool,
     ) -> Result<Option<(usize, ProcessedJson)>> {
         loop {
+            // Number physical lines, including blank lines. Error details and
+            // successful records use the same one-based numbering even when blank
+            // lines were skipped.
             self.line_number = self.line_number.checked_add(1).ok_or_else(|| {
                 Error::new(ErrorCode::InvalidJsonlSchema, "JSONL line count overflow")
             })?;
+            // Clear the contents while keeping the charged capacity. Later lines
+            // can reuse the buffer; a larger line must admit the additional
+            // capacity before appending bytes.
             self.line.clear();
             loop {
+                // Retry an interrupted buffer fill before counting or consuming
+                // input. Other I/O errors end the iterator through the caller.
                 let bytes = match self.reader.fill_buf() {
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     result => result?,
@@ -74,6 +117,9 @@ impl<R: Read> JsonLines<R> {
                 if bytes.is_empty() {
                     break;
                 }
+                // A buffer can hold several records or only a fragment of one
+                // record. Copy through the first newline when present and leave
+                // the following bytes in the reader.
                 let count = bytes
                     .iter()
                     .position(|byte| *byte == b'\n')
@@ -90,6 +136,8 @@ impl<R: Read> JsonLines<R> {
                         .with_detail("reason", "import_budget_exceeded")
                         .with_detail("limit_bytes", self.byte_limit)
                     })?;
+                // Count raw input, including newlines and skipped blank records. Consume
+                // the reader only after admission so a reclaim retry sees the same bytes.
                 let complete = bytes[count - 1] == b'\n';
                 retry_after_memory_reclaim(
                     || {
@@ -104,22 +152,35 @@ impl<R: Read> JsonLines<R> {
                     break;
                 }
             }
+            // An empty accumulator at EOF means there is no next record. A
+            // nonempty accumulator may hold the final line of a file without a
+            // trailing newline.
             if self.line.is_empty() {
                 return Ok(None);
             }
+            // Validate UTF-8 after assembling the entire physical line. A
+            // character may straddle two reader buffers.
             let line = std::str::from_utf8(&self.line).map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "stream did not contain valid UTF-8",
                 )
             })?;
+            // The UTF-8 and raw byte checks apply to blank lines too. Skip them
+            // only after those checks so malformed input cannot disappear during
+            // whitespace handling.
             if line.trim().is_empty() {
                 continue;
             }
+            // Retry the parse against this same buffered line. Reading the next line
+            // during reclamation would skip the record that encountered the memory
+            // limit.
             let value = retry_after_memory_reclaim(
                 || parse_with_schema_in(line, self.schema, &self.context),
                 &mut *reclaim,
             )?;
+            // Transfer the parsed value together with its reservation. The reader
+            // keeps its own separate reservation for the reusable line buffer.
             return Ok(Some((self.line_number, value)));
         }
     }
@@ -132,7 +193,13 @@ impl<R: Read> JsonLines<R> {
             return None;
         }
         let result = self.read_next(&mut reclaim);
+        // End iteration on the first error. A failed read may have consumed part of
+        // a record; a subsequent call cannot reliably establish the next record
+        // boundary.
         self.done = matches!(&result, Ok(None) | Err(_));
+        // Report the line associated with the error on the call that encounters
+        // it. The done flag makes subsequent calls return None without attempting
+        // to read again.
         result
             .map_err(|error| error.with_detail("line", self.line_number))
             .transpose()

@@ -1,6 +1,6 @@
 [package]
 name = "cofferdb"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
@@ -26,3 +26,9 @@ path = "src/main.rs"
 [[example]]
 name = "workload-driver"
 path = "tools/workload_rust/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[dependencies]
+encoding_rs = "=0.8.35"

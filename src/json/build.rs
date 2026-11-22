@@ -7,12 +7,21 @@ use super::{
 use crate::Result;
 
 pub(crate) struct JsonBuilder<'a> {
+    // Destination JSON reservation when building a budgeted value. Helpers share a
+    // mutable charge through the builder while constructing sibling fields.
     work: Option<RefCell<&'a mut JsonReservation>>,
+    // Optional source of already charged owned strings. Transfer capacity from here
+    // when a DTO string moves into the output.
     owned_strings: Option<RefCell<&'a mut WorkspaceReservation>>,
+    // Classification to use if this builder cannot admit an allocation for its
+    // output.
     kind: JsonInputKind,
 }
 
 impl<'a> JsonBuilder<'a> {
+    // This constructor accounts for newly built JSON without claiming any source
+    // strings were precharged. A caller moving budgeted DTO strings uses the
+    // variant below so ownership can change without paying twice.
     pub(crate) fn budgeted(work: &'a mut JsonReservation, kind: JsonInputKind) -> Self {
         Self {
             work: Some(RefCell::new(work)),
@@ -26,6 +35,9 @@ impl<'a> JsonBuilder<'a> {
         strings: Option<&'a mut WorkspaceReservation>,
         kind: JsonInputKind,
     ) -> Self {
+        // Keep a single mutable destination charge for sibling fields. Short
+        // RefCell borrows inside each operation let nested builders finish
+        // producing child values before the enclosing object is assembled.
         Self {
             work: Some(RefCell::new(work)),
             owned_strings: strings.map(RefCell::new),
@@ -45,6 +57,9 @@ impl<'a> JsonBuilder<'a> {
 
     pub(crate) fn string(&self, value: &str) -> Result<JsonValue> {
         let value = match &self.work {
+            // The output must own its text independently of the borrowed input. On
+            // the budgeted path, admit the copy before publishing the String in
+            // the new JSON value.
             Some(work) => work.borrow_mut().copy_string(value, self.kind)?,
             None => value.to_owned(),
         };
@@ -53,6 +68,9 @@ impl<'a> JsonBuilder<'a> {
 
     pub(crate) fn display(&self, value: impl std::fmt::Display) -> Result<JsonValue> {
         let value = match &self.work {
+            // Format directly into the reservation's string writer. Calling
+            // to_string and copying the resulting allocation afterward would leave
+            // a temporary buffer outside the operation's admission.
             Some(work) => work
                 .borrow_mut()
                 .format_string(self.kind, |output| write!(output, "{value}"))?,
@@ -64,18 +82,30 @@ impl<'a> JsonBuilder<'a> {
     // Library DTO wrappers are not new business roots; their values were already validated.
     pub(crate) fn copy_validated_value(&self, value: &JsonValue) -> Result<JsonValue> {
         match &self.work {
+            // A field copied from a validated DTO can carry an envelope-specific
+            // shape. Use the validated-copy path so wrapping that field does not
+            // reclassify its contents as a new schema root.
             Some(work) => work.borrow_mut().copy_validated_value(value, self.kind),
             None => Ok(value.clone()),
         }
     }
 
     pub(crate) fn owned_string(&self, value: String) -> Result<JsonValue> {
+        // Object keys and string values use the same ownership transition. An
+        // already charged allocation must end up in the tree's account whichever
+        // role its text takes.
         self.owned_key(value).map(JsonValue::String)
     }
 
     pub(crate) fn owned_key(&self, value: String) -> Result<String> {
         if let Some(work) = &self.work {
+            // An owned key keeps its existing allocation. When it came from a
+            // charged source, transfer that capacity into the JSON tree; otherwise
+            // charge it here as it enters the result.
             match &self.owned_strings {
+                // Transfer the String's capacity, including spare bytes. The
+                // eventual tree owner will retain the full allocation even when
+                // its logical text is shorter.
                 Some(strings) => work.borrow_mut().merge(
                     strings
                         .borrow_mut()
@@ -87,6 +117,9 @@ impl<'a> JsonBuilder<'a> {
         Ok(value)
     }
 
+    // Optional DTO fields encode absence as JSON null. A present empty string is
+    // still a real JSON string and keeps its normal copy or ownership-transfer
+    // behavior.
     pub(crate) fn optional_string(&self, value: Option<String>) -> Result<JsonValue> {
         value
             .map(|value| self.owned_string(value))
@@ -105,10 +138,16 @@ impl<'a> JsonBuilder<'a> {
         let Some(value) = value else {
             return Ok(JsonValue::Null);
         };
+        // JSON numbers here are binary64. Use decimal text above the safe integer
+        // range so adjacent u64 counters remain distinguishable in the serialized
+        // output.
         if value <= 9_007_199_254_740_991 {
             return Ok(JsonValue::Number(value as f64));
         }
         use std::io::Write;
+        // Twenty ASCII digits suffice for every u64. Format in a fixed stack
+        // buffer and pass only the initialized prefix to the ordinary string
+        // builder so a large counter incurs just one owned string.
         let mut bytes = [0; 20];
         let mut output = std::io::Cursor::new(bytes.as_mut_slice());
         write!(output, "{value}").expect("u64 decimal fits in 20 bytes");
@@ -120,6 +159,9 @@ impl<'a> JsonBuilder<'a> {
         &self,
         fields: [(&str, JsonValue); N],
     ) -> Result<JsonValue> {
+        // The field array already owns its values, but its keys are borrowed.
+        // Before any insertion, split off a reservation for the estimated map
+        // nodes and every string key that this object must copy.
         let keys_work = self
             .work
             .as_ref()
@@ -130,13 +172,22 @@ impl<'a> JsonBuilder<'a> {
             .transpose()?;
         let mut object = BTreeMap::new();
         for (key, value) in fields {
+            // A budgeted key has been charged to exact byte length by the
+            // preceding pass. Its copying helper verifies actual capacity. A
+            // host-owned object has no operation reservation to reconcile.
             let key = if keys_work.is_some() {
                 super::work::copy_precharged_string(key)?
             } else {
                 key.to_owned()
             };
+            // BTreeMap insertion replaces an earlier value with the same key.
+            // Fixed-schema callers should keep field names distinct so each
+            // prepared value survives in the returned object.
             object.insert(key, value);
         }
+        // Keep key and node credit local until every field has been installed. A
+        // fallible key copy can then discard the unfinished map and its
+        // provisional charge together.
         if let Some(keys_work) = keys_work {
             self.work.as_ref().unwrap().borrow_mut().merge(keys_work);
         }
@@ -148,16 +199,28 @@ impl<'a> JsonBuilder<'a> {
         values: impl ExactSizeIterator<Item = Result<JsonValue>>,
     ) -> Result<JsonValue> {
         let mut array = Vec::new();
+        // Use the iterator's known length to admit the result slots before
+        // materializing its elements. The contained trees have separate
+        // allocations from the JsonValue handles in these slots.
         match &self.work {
             Some(work) => work
                 .borrow_mut()
                 .reserve_vec(&mut array, values.len(), self.kind)?,
             None => array.reserve(values.len()),
         }
+        // A lazy iterator can call this same builder to construct a nested value.
+        // Hold no mutable reservation borrow while asking the iterator for its
+        // next item.
         for value in values {
+            // Check space for the actual push even after the initial length
+            // estimate. A budgeted array must never rely on Vec::push to grow
+            // outside the admission path.
             if let Some(work) = &self.work {
                 work.borrow_mut().reserve_vec(&mut array, 1, self.kind)?;
             }
+            // The iterator yields Results, so an element may fail to construct
+            // after earlier elements were accepted. Propagate that error while the
+            // Vec is still local to this builder call.
             array.push(value?);
         }
         Ok(JsonValue::Array(array))
@@ -169,13 +232,22 @@ impl<'a> JsonBuilder<'a> {
         key: &str,
         value: impl FnOnce() -> Result<JsonValue>,
     ) -> Result<()> {
+        // When the field already exists, leave it intact and skip the value
+        // callback entirely. Callers can supply expensive diagnostics or optional
+        // manifest fields without paying to overwrite an existing entry.
         if object.contains_key(key) {
             return Ok(());
         }
+        // Evaluate the callback before borrowing the builder's reservation for the
+        // key. The callback can use the same builder to allocate a nested value or
+        // return an error while the map is still unchanged.
         let value = value()?;
         let key = match &self.work {
             Some(work) => {
                 let mut work = work.borrow_mut();
+                // An existing object has already paid for its earlier nodes. Admit
+                // only the change in the map estimate and the new owned key before
+                // inserting this additional field.
                 work.grow(
                     object_workspace(object.len() + 1) - object_workspace(object.len()),
                     self.kind,
@@ -184,6 +256,9 @@ impl<'a> JsonBuilder<'a> {
             }
             None => key.to_owned(),
         };
+        // All fallible preparation occurs before mutating the supplied map. In
+        // particular, failure to copy the field name leaves an existing
+        // caller-owned object without a half-installed entry.
         object.insert(key, value);
         Ok(())
     }
@@ -193,11 +268,16 @@ impl<'a> JsonBuilder<'a> {
         &self,
         entries: impl ExactSizeIterator<Item = Result<(String, JsonValue)>>,
     ) -> Result<JsonValue> {
+        // This entry point receives owned keys and values whose payloads the
+        // caller admitted. Reserve only the map's node estimate before consuming
+        // the iterator.
         if let Some(work) = &self.work {
             work.borrow_mut()
                 .reserve_object_nodes(entries.len(), self.kind)?;
         }
         let mut object = BTreeMap::new();
+        // Move each key together with its value into the ordered map. A failing
+        // entry drops the unfinished map without publishing a partial JSON object.
         for entry in entries {
             let (key, value) = entry?;
             object.insert(key, value);

@@ -6,11 +6,18 @@ use crate::Result;
 
 // Array capacity and all warning strings remain owned until the summary is handed off.
 pub(crate) struct ImportWarnings {
+    // Collected warning rows and the charge for the backing array. Reallocation
+    // must continue to account for all retained entries.
     values: ReservedVec<ImportWarning>,
+    // Separate workspace for the strings and other owned payload of collected
+    // warnings. Moving the array does not pay for their contents.
     payload: WorkspaceReservation,
 }
 
 impl ImportWarnings {
+    // Use the same code, field, artifact kind and message order as other import
+    // warnings. This entry accompanies a valid explicit span when the legacy
+    // metadata span differs or is malformed.
     pub(crate) const SOURCE_SPAN_CONFLICT: [&'static str; 4] = [
         "source_span_metadata_conflict",
         "source_span",
@@ -26,7 +33,13 @@ impl ImportWarnings {
     }
 
     pub(crate) fn push(&mut self, fields: [&str; 4]) -> Result<()> {
+        // Keep the new warning's string reservation local through every fallible
+        // step. A failed string copy or array growth drops just the unfinished
+        // warning and its credit.
         let mut work = self.payload.context().workspace_reservation();
+        // Sum UTF-8 byte lengths in the ledger's wide type. The precharged copy
+        // routine checks that each resulting String owns exactly the capacity
+        // covered by its share.
         let bytes = fields.iter().map(|value| value.len() as u128).sum();
         work.grow_to_wide(bytes, bytes, "operation_scratch")?;
         let [code, field, artifact_kind, message] = [
@@ -35,6 +48,10 @@ impl ImportWarnings {
             copy_precharged_string(fields[2])?,
             copy_precharged_string(fields[3])?,
         ];
+        // Array admission can still fail after all four strings have been
+        // allocated. Move the strings into their slot before merging the local
+        // reservation so a rejected row never inflates the retained payload
+        // charge.
         self.values.try_push(ImportWarning {
             code,
             field,
@@ -46,6 +63,9 @@ impl ImportWarnings {
     }
 
     pub(crate) fn into_parts(self) -> (Vec<ImportWarning>, WorkspaceReservation) {
+        // The summary takes a raw vector whose capacity can exceed its length.
+        // Transfer the slot reservation and the string payload as one owner so
+        // both survive row processing.
         let (values, mut work) = self.values.into_parts();
         work.merge(self.payload);
         (values, work)

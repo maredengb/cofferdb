@@ -1,6 +1,9 @@
-# CofferDB Python 0.1.5
+# CofferDB Python 0.2.0
 
-This source contains the in-process binding for CofferDB 0.1.5.
+This source contains the in-process binding for CofferDB 0.2.0. Use
+`cofferdb.check(path)` for read-only file and index diagnostics. It returns
+a `CheckReport` with findings, or raises `CofferError` if the scan could
+not complete. The extension works independently of the CLI.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) to find
 available artifacts, their checksums and package-specific validation results.
 The native extension statically links the Rust engine from the same source tree.
@@ -18,7 +21,7 @@ Use a clean virtual environment with `python -m pip` 25.3. Prepare that
 installer version before transferring the environment to an offline machine.
 
 ```console
-python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.1.5-<matching-tags>.whl
+python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.2.0-<matching-tags>.whl
 ```
 
 The wheel contains the native engine. Using it requires no Rust toolchain,
@@ -192,7 +195,7 @@ actually linked Rust crate version. The package includes public
 These are type hints, not runtime coercion or schema bypasses. The native API
 does not expose every Rust maintenance operation.
 
-The [programming guide](../../docs/python-v0.1.5.md) and
+The [Python programming guide](../../docs/python.md) and
 [source-backed executable](../../examples/code_retrieval.py) cover the complete
 retrieval workflow. The [reference source](docs/index.rst) documents the exported API. Generated
 offline reference archives must be built against the matching installed wheel.

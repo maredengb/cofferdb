@@ -8,14 +8,26 @@ use crate::storage::{IndexSegmentSource, Storage, TextSegmentEntry, TextSegmentV
 use crate::temporary::{ExternalTermFrequencies, TemporaryDiskBudget};
 use std::sync::Arc;
 
+// The database-wide vocabulary cannot be recovered by summing the collection
+// counts. A term can occur in several collections or appear in a dictionary with
+// an empty posting list.
 #[derive(Debug)]
 pub(crate) struct TextStatsSummary {
+    // Count of distinct term strings across all live collections' segment
+    // dictionaries, including terms with empty posting lists.
     terms: usize,
+    // True if any visited dictionary lists a term with zero postings. Cache
+    // replacement uses this fact when restoring empty dictionary entries.
     zero_frequency_terms: bool,
+    // Operation-owned array sorted by numeric collection ID. Each entry counts only
+    // the distinct terms with postings in that collection.
     collections: ReservedVec<(u64, usize)>,
 }
 
 impl TextStatsSummary {
+    // Publish the summary only if every live collection could be visited. A
+    // missing source makes even the partial global term count unusable, while
+    // failures in decoding or the external accumulator propagate to the caller.
     pub(crate) fn from_source(
         source: &IndexSegmentSource,
         storage: &Storage,
@@ -23,18 +35,33 @@ impl TextStatsSummary {
         disk: &Arc<TemporaryDiskBudget>,
         context: &JsonOperationContext,
     ) -> Result<Option<Self>> {
+        // Keep the operation-owned system temp path across attempts. The external
+        // accumulator can spill intermediate term keys there while charging its
+        // temporary files to the supplied disk budget.
         let directory = crate::temporary::TemporaryPath::system_temp_in(context)?;
         let mut input = context.workspace_reservation();
         input.grow_to(0, 64 * 1024, "operation_scratch")?;
+        // The optional read buffer and mandatory statistics work share the same
+        // operation budget. A retry without the buffer can still read a valid
+        // source when the buffered pass runs out of memory.
         loop {
+            // A retry starts with a fresh term accumulator and collection-count
+            // vector. The failed read has already dropped both, so terms seen
+            // before a budget error cannot be counted twice.
             let result = Self::read_source(source, storage, catalog, &directory, disk, &input);
             match result {
                 Err(error)
                     if crate::json::is_memory_budget_error(&error)
                         && input.reserved_bytes() > 0 =>
                 {
+                    // Release only the read reservation. The next attempt may
+                    // still require space for its collection array, temporary path
+                    // and accumulator even when decoding runs without a buffer.
                     input.retain(0);
                 }
+                // A missing segment and a temporary-disk error bypass the buffer
+                // retry. Releasing memory cannot supply the absent source or
+                // enlarge the disk budget.
                 result => return result,
             }
         }
@@ -48,6 +75,9 @@ impl TextStatsSummary {
         disk: &Arc<TemporaryDiskBudget>,
         input: &crate::json::WorkspaceReservation,
     ) -> Result<Option<Self>> {
+        // All collection visits borrow the same read allowance. Pass its operation
+        // context into the accumulator so decoding and global deduplication share
+        // the same workspace budget.
         Self::from_visitors(catalog, directory, disk, input.context(), |id, visit| {
             source.visit_text(storage, id, input, visit)
         })
@@ -60,6 +90,9 @@ impl TextStatsSummary {
         context: &JsonOperationContext,
         mut read: impl FnMut(&str, &mut TextSegmentVisitor<'_>) -> Result<bool>,
     ) -> Result<Option<Self>> {
+        // Keep one compact count per live collection. The dictionary itself can be
+        // much larger, so use an external sorter for the global vocabulary rather
+        // than holding every term in the returned summary.
         let mut collections = ReservedVec::with_capacity(
             catalog.live_collections().count(),
             context,
@@ -67,6 +100,9 @@ impl TextStatsSummary {
         )?;
         let mut frequencies = ExternalTermFrequencies::new(directory, disk.clone(), context);
         let mut zero_frequency_terms = false;
+        // Reset the local count on each live collection. The sorter stays open
+        // across those visits so identical term bytes from several collections
+        // collapse to one global vocabulary key.
         for collection in catalog.live_collections() {
             let mut count = 0usize;
             if !read(&collection.collection_id, &mut |entry| {
@@ -75,6 +111,8 @@ impl TextStatsSummary {
                     document_frequency,
                 } = entry
                 {
+                    // The global count is a union of dictionary keys, including empty
+                    // posting lists. Each collection counts only terms with postings.
                     frequencies.push(&[text.as_bytes()], 1)?;
                     if document_frequency != 0 {
                         count = count.checked_add(1).ok_or_else(stats_overflow)?;
@@ -84,18 +122,34 @@ impl TextStatsSummary {
                 }
                 Ok(())
             })? {
+                // A visitor returning false leaves an unusable checkpoint source.
+                // The sorter can already hold provisional dictionary keys, so
+                // discard this entire operation and let the caller choose another
+                // path.
                 return Ok(None);
             }
+            // Attach the count only after validating that collection's body.
+            // Record the numeric ID that the readers and scanners use on the wire
+            // instead of retaining another copy of the formatted catalog ID.
             collections.push((catalog_id_number(&collection.collection_id)?, count));
         }
+        // Sort once for the later per-collection binary search. Repeated numeric
+        // IDs would make the lookup ambiguous, so report a format error before
+        // publishing the summary.
         let counts = collections.as_mut_slice();
         counts.sort_unstable_by_key(|&(id, _)| id);
+        // If two collection spellings encode the same numeric ID, no deterministic
+        // binary search can tell them apart. Reject the ambiguous summary before
+        // using it to qualify a resident cache.
         if counts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(Error::new(
                 ErrorCode::FileFormatError,
                 "duplicate collection in text statistics",
             ));
         }
+        // The external frequency accumulator groups identical term bytes across
+        // collections. Count each emitted key once regardless of the accumulated
+        // frequency.
         let mut terms = 0usize;
         frequencies.finish_batch(|_, _| {
             terms = terms.checked_add(1).ok_or_else(stats_overflow)?;
@@ -159,6 +213,8 @@ impl TextStatsSummary {
         self.zero_frequency_terms
     }
 
+    // An unparseable numeric suffix or an absent numeric ID yields zero. Public
+    // collection statistics separately resolve the actual catalog collection.
     pub(crate) fn term_count_in_collection(&self, collection_id: &str) -> usize {
         let Ok(id) = catalog_id_number(collection_id) else {
             return 0;

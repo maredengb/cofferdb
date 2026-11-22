@@ -305,6 +305,67 @@ fn benchmark_cli_preserves_all_embedding_modes_and_judged_empty_results() {
 }
 
 #[test]
+fn text_only_benchmark_rejects_a_corpus_model_before_creating_outputs() {
+    let fixture = Fixture::new("text-only-corpus-model", "none");
+    let manifest_path = fixture.0.join("dataset_manifest.json");
+    let mut manifest = parse_json(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let mut original_entries = fs::read_dir(&fixture.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    original_entries.sort();
+
+    for model in [JsonValue::String("m".into()), JsonValue::Bool(false)] {
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .insert("embedding_model".into(), model);
+        fs::write(&manifest_path, manifest.to_compact_string()).unwrap();
+
+        let output = fixture.command(false).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let envelope = parse_json(std::str::from_utf8(&output.stderr).unwrap()).unwrap();
+        let error = envelope.get("error").unwrap();
+        assert_eq!(
+            error.get("code").and_then(JsonValue::as_str),
+            Some("benchmark_artifact_mode_conflict")
+        );
+        let detail = error.get("detail").unwrap();
+        assert_eq!(
+            detail.get("field").and_then(JsonValue::as_str),
+            Some("embedding_model")
+        );
+        assert_eq!(
+            detail
+                .get("query_embedding_source")
+                .and_then(JsonValue::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            detail.get("manifest_path").and_then(JsonValue::as_str),
+            Some("dataset_manifest.json")
+        );
+        let mut entries = fs::read_dir(&fixture.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, original_entries);
+    }
+
+    manifest
+        .as_object_mut()
+        .unwrap()
+        .insert("embedding_model".into(), JsonValue::Null);
+    fs::write(&manifest_path, manifest.to_compact_string()).unwrap();
+    let result = fixture.run(false);
+    let dataset = result.get("dataset").unwrap();
+    assert_eq!(dataset.get("embedding_model"), Some(&JsonValue::Null));
+    assert_eq!(dataset.get("embeddings_sha256"), Some(&JsonValue::Null));
+}
+
+#[test]
 fn benchmark_cli_rejects_unsupported_profiles_with_otherwise_valid_inputs() {
     for valid in ["expanded", "balanced", "constrained"] {
         let fixture = Fixture::new(&format!("profile-{valid}"), "none");

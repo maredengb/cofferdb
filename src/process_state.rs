@@ -8,11 +8,21 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 struct Generation<T> {
+    // PID that initialized this value. A child compares it before it could touch
+    // synchronization state left locked by a thread in the parent.
     pid: u32,
+    // Fully initialized registry for that process generation. Published instances
+    // have static lifetime so concurrent readers can hold references without a lock
+    // on the pointer.
     value: T,
 }
 
+// The path-lock and inode registries each use their own static instance. The
+// atomic pointer publishes a complete registry without taking a mutex that first
+// use in a fork child could inherit.
 pub(crate) struct ProcessLocal<T: Send + Sync + 'static> {
+    // Null before first use. Once initialized, points at the last published
+    // generation and may be replaced in a fork child.
     generation: AtomicPtr<Generation<T>>,
 }
 
@@ -23,12 +33,18 @@ impl<T: Default + Send + Sync + 'static> ProcessLocal<T> {
         }
     }
 
+    // Read the PID at lookup time. A child inherits the bits of the parent's
+    // static, so caching the PID when the static is created would select the wrong
+    // registry.
     pub(crate) fn get(&'static self) -> &'static T {
         self.get_for_pid(std::process::id())
     }
 
     fn get_for_pid(&'static self, pid: u32) -> &'static T {
         loop {
+            // An acquire load pairs with the successful publisher's release.
+            // Checking the immutable PID before borrowing the value lets the child
+            // bypass its parent's registry, even while the parent had it locked.
             let observed = self.generation.load(Ordering::Acquire);
             if !observed.is_null() {
                 // SAFETY: published objects are fully initialized before the
@@ -38,10 +54,16 @@ impl<T: Default + Send + Sync + 'static> ProcessLocal<T> {
                     return &generation.value;
                 }
             }
+            // Build the replacement privately. Another thread can do the same
+            // work, but no thread ever has to wait for an in-progress constructor
+            // that may have vanished across fork.
             let prepared = Box::into_raw(Box::new(Generation {
                 pid,
                 value: T::default(),
             }));
+            // Publish only if the pointer still matches the observation that
+            // prompted initialization. Concurrent first callers cannot overwrite a
+            // winner with their own equally valid defaults.
             match self.generation.compare_exchange(
                 observed,
                 prepared,
@@ -53,6 +75,9 @@ impl<T: Default + Send + Sync + 'static> ProcessLocal<T> {
                     // no thread will free it or any earlier generation.
                     return unsafe { &(*prepared).value };
                 }
+                // After losing the race, discard only this attempt's candidate and
+                // reload. The next iteration returns the winner if it belongs to
+                // this PID.
                 Err(_) => {
                     // SAFETY: an unpublished, process-local allocation; no
                     // other thread could have borrowed this pointer.

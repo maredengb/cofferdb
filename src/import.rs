@@ -1,3 +1,17 @@
+//! A manifest ties document and chunk streams to an optional embedding stream.
+//! Each chunk names its parent document by external ID, and each embedding names
+//! its target chunk the same way. Primary record offsets, database-generated IDs
+//! and checkpoint segments do not travel with an export.
+//!
+//! Import first captures the bytes of each artifact, then asks the database
+//! planner to resolve the relationships and apply the conflict policy. The
+//! captures are taken in succession. Declared hashes identify the expected streams
+//! if an external producer can replace files between opens.
+//!
+//! Export holds one catalog view while reading the underlying primary records. It
+//! publishes completed data files individually and installs their manifest last.
+//! An import of an export directory being replaced may see files from different
+//! runs and fail a hash check.
 use std::fs::{self, File};
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -38,6 +52,8 @@ use warnings::ImportWarnings;
 struct ExportChunk {
     // The synthesized value shares the retained chunk's JSON reservation.
     source_span: JsonValue,
+    // Materialized chunk and its memory reservation. Keep both until the export row
+    // has finished borrowing text and fields from it.
     retained: crate::storage::RetainedChunk,
 }
 
@@ -49,11 +65,20 @@ impl ExportChunk {
     ) -> Result<Self> {
         #[cfg(test)]
         tests::EXPORT_CHUNK_READS.set(tests::EXPORT_CHUNK_READS.get() + 1);
+        // The catalog locator identifies the visible chunk record. Read its
+        // payload through the snapshot's reader so exported text, metadata and
+        // source span all describe that same record.
         let mut retained = reader.read_chunk_in(record_ref, context)?;
         #[cfg(test)]
         tests::EXPORT_SPAN_BUILDS.set(tests::EXPORT_SPAN_BUILDS.get() + 1);
         let (chunk, work) = retained.parts();
+        // Charge the generated span to the retained chunk's JSON owner before any
+        // writer sees its fields. A budget failure here can retry row preparation
+        // without having started a line of output.
         let builder = JsonBuilder::budgeted(work, JsonInputKind::StoredJson);
+        // Build a separate JSON value for the source span only when the stored
+        // chunk has one. The row always carries this member: an absent span is
+        // exported as JSON null.
         let source_span = chunk
             .source_span
             .as_ref()
@@ -69,6 +94,8 @@ impl ExportChunk {
 // Three hexadecimal SHA-256 strings and the returned manifest filename remain
 // live through export and host projection. This is separate from writer buffers.
 const EXPORT_SUMMARY_BYTES: usize = 3 * 64 + "export_manifest.json".len();
+// Every final export pathname belongs in this list, including the manifest. The
+// same list protects the source before staging and just before renaming outputs.
 const EXPORT_FILES: [&str; 4] = [
     "documents.jsonl",
     "chunks.jsonl",
@@ -77,17 +104,29 @@ const EXPORT_FILES: [&str; 4] = [
 ];
 
 fn validate_export_destinations(source: &Path, directory: &Path) -> Result<()> {
+    // Resolve the source once before comparing the fixed export names. A relative
+    // spelling or a symbolic link to the source must not make the database itself
+    // an eligible artifact destination.
     let source = fs::canonicalize(source)?;
     let source_metadata = fs::metadata(&source)?;
     for name in EXPORT_FILES {
         let target = directory.join(name);
         let metadata = match fs::metadata(&target) {
             Ok(metadata) => metadata,
+            // A name with no readable target can be created during publication.
+            // Other metadata failures are significant: treating permission or I/O
+            // errors as absence would skip the checks on an existing destination.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
+        // Metadata follows a target symlink. The canonical comparison below
+        // therefore checks its resolved destination, even when the directory entry
+        // itself is not the database pathname.
         let same_file = fs::canonicalize(&target)? == source;
         #[cfg(unix)]
+        // On Unix, a different canonical pathname can still refer to the same
+        // inode through a hard link. Compare both device and inode because inode
+        // numbers alone are local to a filesystem.
         let same_file = {
             use std::os::unix::fs::MetadataExt;
             same_file
@@ -96,6 +135,9 @@ fn validate_export_destinations(source: &Path, directory: &Path) -> Result<()> {
         };
         #[cfg(not(unix))]
         let _ = &source_metadata;
+        // Publication renames the staged file over the directory entry. A
+        // permitted link to some other regular file is replaced at that name; the
+        // exporter never opens the link's referent for writing.
         if same_file {
             return Err(Error::new(
                 ErrorCode::PermissionDenied,
@@ -103,6 +145,9 @@ fn validate_export_destinations(source: &Path, directory: &Path) -> Result<()> {
             )
             .with_detail("path", target.display()));
         }
+        // An existing data or manifest name must resolve to a regular file. Reject
+        // directories and special files before staging any replacement under that
+        // name.
         if !metadata.is_file() {
             return Err(Error::new(
                 ErrorCode::IoError,
@@ -134,6 +179,9 @@ fn open_bounded(path: &Path, limit: u64) -> Result<File> {
     Ok(file)
 }
 
+// A standalone manifest read can use the ordinary schema-limited reader. The
+// database import entry below must use its attached operation context so this
+// parsing competes with the handle's other work.
 fn read_manifest(path: &Path) -> Result<JsonValue> {
     parse_reader(
         File::open(path)?,
@@ -142,46 +190,83 @@ fn read_manifest(path: &Path) -> Result<JsonValue> {
     .map_err(|error| error.with_detail("path", path.display()))
 }
 
+/// Decoded import instructions for one collection and its JSONL artifacts.
 #[derive(Clone, Debug)]
 pub struct ImportManifest {
+    /// Tokenizer selected for this collection's text index.
     pub tokenizer: crate::TokenizerConfig,
+    /// Manifest schema version used to interpret the input.
     pub schema_version: String,
+    /// Optional dataset identifier carried by the manifest.
     pub dataset_id: Option<String>,
+    /// Name of the target collection.
     pub collection: String,
+    /// Path to the documents JSONL file, resolved relative to the manifest.
     pub documents: PathBuf,
+    /// Path to the chunks JSONL file, resolved relative to the manifest.
     pub chunks: PathBuf,
+    /// Optional path to the embeddings JSONL file, resolved relative to the manifest.
     pub embeddings: Option<PathBuf>,
+    /// SHA-256 digest of the documents JSONL artifact.
     pub documents_sha256: Option<String>,
+    /// SHA-256 digest of the chunks JSONL artifact.
     pub chunks_sha256: Option<String>,
+    /// SHA-256 digest of the embeddings JSONL artifact.
     pub embeddings_sha256: Option<String>,
+    /// Expected collection embedding model when specified.
     pub embedding_model: Option<String>,
+    /// Expected vector dimension when specified.
     pub embedding_dim: Option<usize>,
+    /// Metric requested by the manifest for vector scoring.
     pub distance_metric: Option<DistanceMetric>,
+    /// Optional declaration of whether stored vectors are normalized.
     pub vectors_normalized: Option<bool>,
 }
 
+/// Counts and warnings from importing a manifest into a database.
 #[derive(Clone, Debug, Default)]
 pub struct ImportSummary {
+    /// Tokenizer selected for this collection's text index.
     pub tokenizer: crate::TokenizerConfig,
+    /// Optional dataset identifier carried by the manifest.
     pub dataset_id: Option<String>,
+    /// Number of documents read from the input.
     pub documents_seen: usize,
+    /// Number of chunks read from the input.
     pub chunks_seen: usize,
+    /// Number of embeddings read from the input.
     pub embeddings_seen: usize,
+    /// Number of documents written, including replacements.
     pub documents_inserted: usize,
+    /// Number of chunks written, including replacements.
     pub chunks_inserted: usize,
+    /// Number of embeddings written, including replacements.
     pub embeddings_inserted: usize,
+    /// Number of documents skipped by the conflict policy.
     pub documents_skipped: usize,
+    /// Number of chunks skipped by the conflict policy.
     pub chunks_skipped: usize,
+    /// Number of embeddings skipped by the conflict policy.
     pub embeddings_skipped: usize,
+    /// Number of documents replaced under the conflict policy.
     pub documents_replaced: usize,
+    /// Number of chunks replaced under the conflict policy.
     pub chunks_replaced: usize,
+    /// Number of embeddings replaced under the conflict policy.
     pub embeddings_replaced: usize,
+    /// Non-fatal issues reported by the importer.
     pub warnings: Vec<ImportWarning>,
 }
 
 pub(crate) struct MeasuredImport {
+    // User-visible import counts and warnings kept for delivery after the final
+    // primary/index work.
     pub(crate) summary: ImportSummary,
+    // Per-import measurements of batch commits and checkpoint work used by the
+    // benchmark runner.
     pub(crate) batches: crate::db::ImportBatchMetrics,
+    // Retains workspace transferred with this measured result, including owned
+    // summary data that survives processing.
     _work: WorkspaceReservation,
 }
 
@@ -191,10 +276,19 @@ impl MeasuredImport {
         database: &Database,
         context: &JsonOperationContext,
     ) -> Result<crate::binding::Output> {
+        // The binding needs the summary and its retained workspace. Batch timing
+        // and checkpoint measurements are internal to the measured path and do not
+        // become fields in the public result.
         let Self { summary, _work, .. } = self;
         let mut work = crate::storage::RecordReservation::new(context.reservation(), _work);
         let value = summary.into_json_retained(&mut work)?;
+        // Projection has moved the surviving dataset and warning strings into JSON
+        // ownership. Release leftover workspace for the consumed summary before
+        // returning the binding's output guard.
         work.retain_workspace(0);
+        // Pass the database into the binding output so its lifetime extends
+        // through the caller's native-to-host projection. The summary alone no
+        // longer has a handle to supply that context.
         Ok(crate::binding::Output::new(
             value,
             work,
@@ -203,31 +297,59 @@ impl MeasuredImport {
     }
 }
 
+/// A non-fatal issue encountered while processing a manifest or one of its artifacts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportWarning {
+    /// Machine-readable warning identifier.
     pub code: String,
+    /// Name of the field associated with this warning.
     pub field: String,
+    /// Kind of input artifact associated with this warning.
     pub artifact_kind: String,
+    /// Human-readable explanation of the warning.
     pub message: String,
 }
 
+/// Visible record counts, manifest name and artifact digests from a collection export.
 #[derive(Clone, Debug, Default)]
 pub struct ExportSummary {
+    /// Number of visible documents written to the export.
     pub documents: usize,
+    /// Number of visible chunks written to the export.
     pub chunks: usize,
+    /// Number of visible embeddings written to the export.
     pub embeddings: usize,
+    /// Filename of the generated manifest in the export directory.
     pub manifest: String,
+    /// SHA-256 digest of the documents JSONL artifact.
     pub documents_sha256: String,
+    /// SHA-256 digest of the chunks JSONL artifact.
     pub chunks_sha256: String,
+    /// SHA-256 digest of the embeddings JSONL artifact.
     pub embeddings_sha256: String,
 }
 
 impl Database {
+    /// Read the manifest and its JSONL inputs into this writable database using the selected
+    /// external-ID conflict policy.
+    ///
+    /// # Errors
+    ///
+    /// Malformed inputs, mismatched artifact hashes or rejected conflicts can prevent import.
+    /// Once batch commits begin, a later error can leave earlier batches visible. Inspect the
+    /// affected IDs before choosing a conflict policy for a retry.
+    ///
+    /// # Examples
+    ///
+    /// See the [export and import round trip](crate#examples).
     pub fn import_manifest(
         &self,
         manifest_path: impl AsRef<Path>,
         on_conflict: OnConflict,
     ) -> Result<ImportSummary> {
+        // The public import selects deferred checkpoint building. Records still
+        // follow the selected conflict policy and their batch commit boundaries
+        // are independent of when the final index is built.
         self.import_manifest_with_index_mode(
             manifest_path.as_ref(),
             on_conflict,
@@ -256,6 +378,9 @@ impl Database {
         index_build_mode: ImportIndexBuildMode,
         context: JsonOperationContext,
     ) -> Result<ImportSummary> {
+        // Non-measured callers return the same validated import summary. Extract
+        // it only after the measured path succeeds, preserving the same error and
+        // commit behavior in either entry point.
         self.import_manifest_measured_in(manifest_path, on_conflict, index_build_mode, context)
             .map(|import| import.summary)
     }
@@ -267,6 +392,9 @@ impl Database {
         index_build_mode: ImportIndexBuildMode,
         context: JsonOperationContext,
     ) -> Result<MeasuredImport> {
+        // Attach this operation to the database resource ledger before reading the
+        // manifest. A caller-supplied context must charge its JSON processing to
+        // the handle that will execute the import.
         self.attach_json_context(&context, JsonInputKind::Manifest)
             .map_err(|error| error.with_detail("path", manifest_path.display()))?;
         let manifest_value = parse_reader_in(
@@ -275,11 +403,30 @@ impl Database {
             &context,
         )
         .map_err(|error| error.with_detail("path", manifest_path.display()))?;
+        // Typed fields and export-only counts come from the very same parsed
+        // object. A producer can omit counts without changing the semantic
+        // validation of paths, tokenizer or collection name.
         let manifest = ImportManifest::from_value(manifest_path, &manifest_value.value)?;
+        // from_value has checked that the root is an object and that any declared
+        // counts have the right types. The typed manifest does not retain those
+        // counts. Extract them from this same tree before releasing it.
         let expected_counts =
             parse_export_manifest_counts(manifest_value.value.as_object().unwrap())?;
+        // The typed manifest and its count expectations contain everything still
+        // needed from this JSON tree. Drop its parsing reservation before staging
+        // artifacts or allocating per-row state.
         drop(manifest_value);
+        // The input copies and the planner's temporary record and key files share
+        // the database's disk allowance. The source guards stay live while the
+        // planner consumes the staged rows, so capacity for the copies alone need
+        // not be enough to complete preparation.
         let disk = self.temporary_disk_budget();
+        // Stage each input once, recording its byte length and checking any digest
+        // supplied by the manifest. The visitor reads that private copy, so
+        // replacing the source pathname cannot change what the planner consumes.
+        // Limit reclamation to creation of a staging file. Reopening original
+        // paths or relaunching the import callback to recover workspace would take
+        // a new input sample or repeat already consumed rows.
         let mut inputs = manifest.validated_inputs_reclaiming(disk.clone(), || {
             self.admit_input_reclaiming(|| {
                 create_budgeted_temporary_file_in_context(
@@ -292,11 +439,18 @@ impl Database {
                 )
             })
         })?;
+        // Shape resolution can fill omitted values from an existing collection. It
+        // takes place after artifact capture, so a bad declared digest is reported
+        // before a missing dimension on a new target. The planner checks the
+        // resolved options against its own locked catalog view.
         let (embedding_dim, distance_metric) = self.resolve_import_collection_shape(&manifest)?;
         let mut summary_work = context.workspace_reservation();
         let dataset_id = manifest
             .dataset_id
             .as_deref()
+            // The measured result can outlive the manifest, so it needs its own
+            // dataset-ID copy and credit. Reclaim optional memory during that copy
+            // before constructing row-level work.
             .map(|value| self.admit_input_reclaiming(|| ReservedString::copy(value, &context)))
             .transpose()?
             .map(|value| {
@@ -305,16 +459,26 @@ impl Database {
                 value
             });
         let mut warnings = ImportWarnings::new(&context)?;
+        // Missing reproducibility information yields retained warnings. Declared
+        // but incorrect artifact hashes failed during staging above, so they never
+        // become successful-import warnings.
         for (missing, fields) in manifest.reproducibility_warnings() {
             if missing {
                 self.admit_input_reclaiming(|| warnings.push(fields))?;
             }
         }
+        // Start with the tokenizer and dataset identity chosen by the manifest.
+        // Input visitors fill the seen counts, while final planner results supply
+        // the inserted, skipped and replaced counts.
         let mut summary = ImportSummary {
             tokenizer: manifest.tokenizer.clone(),
             dataset_id,
             ..ImportSummary::default()
         };
+        // The visitor feeds parents before children and checks the manifest's
+        // declared totals before returning. The planner may start committing once
+        // the visitor succeeds. Moving the count check after this call could reject
+        // a manifest only after its records had already changed the database.
         let (inserted, batches) = self.import_preprocessed_rows(
             ManifestImportOptions {
                 tokenizer: manifest.tokenizer,
@@ -323,6 +487,9 @@ impl Database {
                 distance_metric,
                 embedding_model: manifest.embedding_model,
                 vectors_normalized: manifest.vectors_normalized,
+                // Retain the declared filenames in planner options even though
+                // reads use temporary copies. The line number remains meaningful
+                // to an operator only alongside its original artifact path.
                 document_path: manifest.documents.clone(),
                 chunk_path: manifest.chunks.clone(),
                 embedding_path: manifest.embeddings.clone(),
@@ -331,7 +498,14 @@ impl Database {
             },
             context.clone(),
             &mut warnings,
+            // The planner calls this visitor once. Each consumer call can retain
+            // information in its staged records and source-key tables. A later
+            // failure abandons preparation; retrying the entire visitor in place
+            // would feed it the same keys twice.
             |consume| {
+                // Use the staged byte length and staged reader together. The
+                // original file's size from disk preflight can differ if it
+                // changed during copying.
                 let document_bytes = inputs.documents.len;
                 visit_documents_jsonl_in(
                     &manifest.documents,
@@ -339,6 +513,10 @@ impl Database {
                     &context,
                     document_bytes,
                     |line, document, work| {
+                        // Seen counts refer to decoded input rows before the
+                        // conflict policy decides whether a row is inserted,
+                        // skipped or replaced. The planner supplies those separate
+                        // mutation counts on success.
                         summary.documents_seen += 1;
                         consume(
                             ImportRow::Document {
@@ -349,6 +527,9 @@ impl Database {
                         )
                     },
                 )?;
+                // Finish documents before visiting chunks so parent references can
+                // be resolved using earlier planned rows. Embeddings follow the
+                // same ordering rule with chunks as their parents.
                 let chunk_bytes = inputs.chunks.len;
                 visit_chunks_jsonl_in(
                     &manifest.chunks,
@@ -356,6 +537,10 @@ impl Database {
                     &context,
                     chunk_bytes,
                     |line, chunk, work| {
+                        // The planner uses the conflict flag to append the
+                        // standard source-span warning. The separate line number
+                        // locates errors while validating or resolving this chunk;
+                        // the warning itself contains the artifact kind and field.
                         summary.chunks_seen += 1;
                         consume(
                             ImportRow::Chunk {
@@ -368,6 +553,9 @@ impl Database {
                         )
                     },
                 )?;
+                // An absent embeddings path means there is no embedding stream to
+                // visit. A supplied path must have a corresponding staged input,
+                // even when that artifact has zero bytes.
                 if let Some(path) = &manifest.embeddings {
                     let input = inputs.embeddings.as_mut().unwrap();
                     let embedding_bytes = input.len;
@@ -377,6 +565,10 @@ impl Database {
                         &context,
                         embedding_bytes,
                         |line, embedding, work| {
+                            // The embedding JSONL parser owns the row's vector and
+                            // its admission credit. Pass the corresponding work
+                            // object to the consumer with the input so a retained
+                            // embedding stays accounted for.
                             summary.embeddings_seen += 1;
                             consume(
                                 ImportRow::Embedding {
@@ -388,6 +580,10 @@ impl Database {
                         },
                     )?;
                 }
+                // The comparisons use source row counts, including rows skipped by
+                // the conflict policy. A mismatch returned here takes precedence
+                // over a target conflict the planner has recorded for later, and
+                // no primary batch has started.
                 expected_counts.validate_actual(
                     summary.documents_seen,
                     summary.chunks_seen,
@@ -395,7 +591,13 @@ impl Database {
                 )
             },
         )?;
+        // Inserted and replaced counts overlap: rewriting an existing external ID
+        // emits a new put and increments both. Adding the two columns would count
+        // the replacement twice.
         merge_insert_summary(&mut summary, inserted);
+        // Each warning owns strings that survive the row visitor. Move their
+        // reservation into the measured result along with the vector so returning
+        // diagnostics does not release their memory accounting.
         let (values, work) = warnings.into_parts();
         summary.warnings = values;
         summary_work.merge(work);
@@ -406,11 +608,26 @@ impl Database {
         })
     }
 
+    /// Write the visible collection's documents, chunks, embeddings and a manifest to the
+    /// output directory. Existing export files can be replaced. The manifest is published last.
+    ///
+    /// # Errors
+    ///
+    /// Opening, writing or publishing the files can fail. Some artifacts may already have
+    /// replaced their predecessors. Use a fresh directory and verify artifact
+    /// hashes against the manifest before reuse.
+    ///
+    /// # Examples
+    ///
+    /// See the [export and import round trip](crate#examples).
     pub fn export_collection_jsonl(
         &self,
         collection_name: &str,
         output_dir: impl AsRef<Path>,
     ) -> Result<ExportSummary> {
+        // The public Rust result takes ownership of its small summary. Callers
+        // that still need database-accounted data during binding conversion use
+        // the retained entry point below.
         let context = self.json_context();
         self.export_collection_jsonl_retained_in(collection_name, output_dir.as_ref(), &context)
             .map(|(summary, _)| summary)
@@ -423,25 +640,54 @@ impl Database {
         context: &JsonOperationContext,
     ) -> Result<(ExportSummary, WorkspaceReservation)> {
         self.attach_json_context(context, JsonInputKind::StoredJson)?;
+        // Keep the catalog and storage from one locked read through all streams
+        // and publication. The reclamation callback can evict optional caches
+        // while leaving those borrowed source identities intact.
         self.with_read_snapshot_reclaiming(|catalog, storage, reclaim| {
             let mut summary_work = context.workspace_reservation();
+            // Reserve the three hex digests and manifest filename up front. A late
+            // refusal for the returned summary should not follow publication of
+            // already prepared artifacts.
             summary_work.grow_to(
                 EXPORT_SUMMARY_BYTES,
                 EXPORT_SUMMARY_BYTES,
                 "operation_scratch",
             )?;
+            // Resolve the requested collection name once and filter all three live
+            // record streams by that internal ID. Reusing the display name for
+            // individual record joins would mix naming and identity.
             let collection_info = catalog.collection_by_name(collection_name)?;
             let collection_id = &collection_info.collection_id;
+            // The payload reader clones the open database descriptor. The
+            // destination checks separately resolve the current database pathname.
+            // If that name has disappeared, validation fails even though the
+            // descriptor could still supply the old view's records.
             let mut reader = storage.payload_reader()?;
+            // Destination validation follows directory creation, so a failed
+            // export can leave a newly created output directory behind even when
+            // no data file has been published.
             fs::create_dir_all(output_dir)?;
+            // Check all four destinations before opening staged artifact writers.
+            // A source alias in the manifest name is just as destructive as an
+            // alias in one of the three data names.
             validate_export_destinations(storage.path(), output_dir)?;
             let documents_path = output_dir.join("documents.jsonl");
             let chunks_path = output_dir.join("chunks.jsonl");
             let embeddings_path = output_dir.join("embeddings.jsonl");
             let manifest_path = output_dir.join("export_manifest.json");
 
+            // The capacity here is a preference for each stream. ExportWriter can
+            // start with a smaller or empty buffer, so three streams do not
+            // require three full buffers before the first row can be written.
             const OUTPUT_BUFFER_BYTES: usize = 8192;
+            // Stage the data under temporary names. The file's cleanup guard keeps
+            // accepted bytes charged after its writer finishes. A partial row is
+            // abandoned with the file because replaying the row could duplicate its
+            // prefix.
             let disk = self.temporary_disk_budget();
+            // Create staged files in the output directory so each finished
+            // artifact can be installed there by its cleanup guard. Until that
+            // step the final names still refer to their previous files, if any.
             let (documents, mut documents_temp) = create_budgeted_temporary_file_reclaiming(
                 output_dir,
                 "export-documents",
@@ -469,6 +715,9 @@ impl Database {
                 "operation_scratch",
                 &mut *reclaim,
             )?;
+            // The three streams can each retain an optional output buffer against
+            // the same operation. Later row preparation may release buffers
+            // belonging to otherwise idle streams.
             let mut documents_file =
                 ExportWriter::new_in(documents, &mut documents_temp, OUTPUT_BUFFER_BYTES, context)?;
             let mut chunks_file =
@@ -479,19 +728,33 @@ impl Database {
                 OUTPUT_BUFFER_BYTES,
                 context,
             )?;
+            // These counters advance only after the writer accepts a whole row. An
+            // empty collection still reaches all three finish calls and therefore
+            // has hashes for three empty artifacts.
             let mut documents_count = 0;
             let mut chunks_count = 0;
             let mut embeddings_count = 0;
 
+            // Build rows under the same catalog read that selected their identities.
+            // Chunk text and vectors come from record offsets on this storage
+            // handle; reopening the pathname could select a different generation
+            // after compaction.
             for doc in catalog
                 .live_documents()
                 .filter(|doc| &doc.collection_id == collection_id)
             {
+                // Document rows borrow catalog metadata without rebuilding a
+                // document payload. Keep its JSON guard live through
+                // serialization, including a retry that frees optional writer
+                // buffers.
                 let _metadata_work = retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
                     |_| doc.metadata.guard_in(JsonInputKind::StoredJson, context),
                 )?;
+                // Source URI and title may be absent. Use optional borrowed
+                // strings so a missing attribute is preserved without
+                // manufacturing an empty string or copying document metadata.
                 let fields = [
                     (
                         "external_id",
@@ -504,6 +767,9 @@ impl Database {
                     ),
                     ("metadata", JsonFieldValue::Json(&doc.metadata)),
                 ];
+                // A row can retry after pre-write memory admission fails. The
+                // writer preserves output failures once bytes have been accepted,
+                // so replay cannot duplicate a prefix in the JSONL file.
                 retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
@@ -512,13 +778,23 @@ impl Database {
                 documents_count += 1;
             }
 
+            // Use catalog visibility here. Deleting a document hides its chunks
+            // even when their own primary records and payload locators still
+            // exist.
             for summary in catalog
                 .live_chunks()
                 .filter(|chunk| &chunk.collection_id == collection_id)
             {
+                // Reconstruct the document relationship from the catalog's
+                // internal ID but write the document's external ID. A dangling
+                // parent is a format error rather than a chunk that can be
+                // exported without its relationship.
                 let doc = catalog.documents.get(&summary.document_id).ok_or_else(|| {
                     Error::new(ErrorCode::FileFormatError, "export chunk has no document")
                 })?;
+                // The catalog summary locates the record but does not own the full
+                // chunk payload. A visible chunk with no primary locator cannot
+                // supply verifiable text for this artifact.
                 let record_ref =
                     catalog
                         .record_ref_for_chunk(&summary.chunk_id)
@@ -528,12 +804,20 @@ impl Database {
                                 "export chunk has no payload locator",
                             )
                         })?;
+                // A retry here can release optional writer buffers before
+                // materializing the row. Keep the retained payload and its workspace
+                // alive until its fields have been emitted, since the field array
+                // borrows them.
                 let mut prepared = retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
                     |_| ExportChunk::read_in(&mut reader, record_ref, context),
                 )?;
                 let (chunk, _) = prepared.retained.parts();
+                // Borrow text and metadata from the retained payload and keep the
+                // temporary ordinal value live for the entire write. The row uses
+                // external IDs so another database can reconstruct these
+                // relationships.
                 let ordinal = JsonValue::Number(chunk.ordinal as f64);
                 let fields = [
                     (
@@ -547,8 +831,14 @@ impl Database {
                     ("ordinal", JsonFieldValue::Json(&ordinal)),
                     ("text", JsonFieldValue::String(Some(&chunk.text))),
                     ("metadata", JsonFieldValue::Json(&chunk.metadata)),
+                    // Preserve the resolved span separately from the original
+                    // metadata. Both can carry positions, and reimport gives an
+                    // explicit span precedence if their boundaries disagree.
                     ("source_span", JsonFieldValue::Json(&prepared.source_span)),
                 ];
+                // Once the chunk has been materialized, retry just its pending row
+                // serialization. The fields already borrow its prepared payload
+                // and span and do not require another read from storage.
                 retry_after_buffer_reclaim(
                     &mut [&mut documents_file, &mut chunks_file, &mut embeddings_file],
                     &mut *reclaim,
@@ -557,10 +847,18 @@ impl Database {
                 chunks_count += 1;
             }
 
+            // An older embedding put can remain on disk after replacement. The
+            // live iterator follows the embedding currently selected by each live
+            // chunk, keeping superseded vectors out of the artifact and its row
+            // count.
             for summary in catalog
                 .live_embeddings()
                 .filter(|embedding| &embedding.collection_id == collection_id)
             {
+                // Load the vector from its primary record even though the catalog
+                // already identifies its chunk. Exported coordinates must be the
+                // stored values, independent of whether a search index is
+                // available.
                 let record_ref = catalog
                     .record_ref_for_embedding(&summary.embedding_id)
                     .ok_or_else(|| {
@@ -575,6 +873,9 @@ impl Database {
                     |_| reader.read_embedding_in(record_ref, context),
                 )?;
                 let embedding = retained.embedding();
+                // The exported dimension comes from the retained embedding itself.
+                // The collection's configured dimension is recorded separately in
+                // the manifest for the importer.
                 let dim = JsonValue::Number(embedding.dim as f64);
                 let fields = [
                     (
@@ -586,6 +887,9 @@ impl Database {
                         JsonFieldValue::String(Some(&embedding.model_name)),
                     ),
                     ("dim", JsonFieldValue::Json(&dim)),
+                    // Serialize the borrowed numeric slice as a vector. This
+                    // avoids building an intermediate array of JSON number values
+                    // whose workspace would grow with embedding dimension.
                     ("vector", JsonFieldValue::Vector(&embedding.vector)),
                 ];
                 retry_after_buffer_reclaim(
@@ -595,16 +899,34 @@ impl Database {
                 )?;
                 embeddings_count += 1;
             }
+            // Finish the three streams before constructing manifest metadata. These
+            // hashes describe the exact emitted JSONL bytes, including separators
+            // and newlines, rather than the in-memory records.
             let documents_sha256 = documents_file.finish()?;
             let chunks_sha256 = chunks_file.finish()?;
             let embeddings_sha256 = embeddings_file.finish()?;
+            // The export time is sampled after the data streams finish and can
+            // differ from the commit time of the records. Capture it once so a
+            // budget retry while building the manifest will reproduce the same
+            // value.
             let exported_at = crate::time::unix_millis_now();
+            // There are no data writers left to shed buffers at this point. Reuse
+            // the same retry helper with an empty writer set so optional database
+            // cache can still be reclaimed for manifest construction.
             let mut no_writers: [&mut ExportWriter<'_>; 0] = [];
             let mut manifest = retry_after_buffer_reclaim(&mut no_writers, &mut *reclaim, |_| {
                 let mut work = context.reservation();
                 let builder = JsonBuilder::budgeted(&mut work, JsonInputKind::StoredJson);
                 let value = builder.object([
+                    // Preserve the complete tokenizer identity alongside package
+                    // and file-format versions. An importing database compares
+                    // that structured identity when checking compatibility with
+                    // the target collection.
                     ("tokenizer", collection_info.tokenizer.build_json(&builder)?),
+                    // The importer accepts this manifest schema version. The
+                    // producing crate version and source file format are
+                    // descriptive. They do not change how the destination encodes
+                    // the imported records.
                     ("schema_version", builder.string("0.1")?),
                     (
                         "cofferdb_version",
@@ -619,6 +941,10 @@ impl Database {
                         "exported_at",
                         builder.owned_string(crate::time::format_unix_millis(exported_at))?,
                     ),
+                    // Write the collection's configured model here. It can be
+                    // absent even when individual embedding rows name their
+                    // models. Inferring a declaration from an exported row would
+                    // change what the collection configuration says.
                     (
                         "embedding_model",
                         builder.optional_str(collection_info.embedding_model.as_deref())?,
@@ -635,17 +961,32 @@ impl Database {
                         "vectors_normalized",
                         JsonValue::Bool(collection_info.vectors_normalized),
                     ),
+                    // Store paths relative to the manifest, using the names about
+                    // to be published. Moving the completed export directory as a
+                    // unit therefore preserves the links between manifest and
+                    // artifacts.
                     ("documents", builder.string("documents.jsonl")?),
                     ("chunks", builder.string("chunks.jsonl")?),
+                    // Export always lists an embeddings artifact, including an
+                    // empty one with the digest of zero bytes. A handwritten
+                    // import manifest can instead omit both the path and its
+                    // digest.
                     ("embeddings", builder.string("embeddings.jsonl")?),
                     (
                         "counts",
+                        // Report counts from successful row writes. Use the three
+                        // finished writers' digests for the same artifacts so
+                        // count metadata and hashes are tied to the exported
+                        // snapshot.
                         builder.object([
                             ("documents", JsonValue::Number(documents_count as f64)),
                             ("chunks", JsonValue::Number(chunks_count as f64)),
                             ("embeddings", JsonValue::Number(embeddings_count as f64)),
                         ])?,
                     ),
+                    // The hashes identify byte streams, including the final
+                    // newline of each nonempty JSONL file. A consumer can verify
+                    // those streams without loading any record into a database.
                     (
                         "hashes",
                         builder.object([
@@ -657,6 +998,9 @@ impl Database {
                 ])?;
                 Ok((value, work))
             })?;
+            // Stage the manifest only after the three data writers have finished.
+            // A failure building or writing it can still drop the private data
+            // files before any final pathname is replaced.
             let (file, mut manifest_temp) = create_budgeted_temporary_file_reclaiming(
                 output_dir,
                 "export-manifest",
@@ -671,6 +1015,10 @@ impl Database {
             retry_after_buffer_reclaim(&mut [&mut manifest_file], &mut *reclaim, |writers| {
                 #[cfg(test)]
                 tests::EXPORT_MANIFEST_WRITES.set(tests::EXPORT_MANIFEST_WRITES.get() + 1);
+                // Retain the already constructed manifest and its JSON reservation
+                // during serialization. A permitted admission retry reuses that
+                // value, including the same exported_at timestamp and digest
+                // strings.
                 let (value, work) = &mut manifest;
                 let written = value.write_value_retained_in(
                     writers[0],
@@ -679,10 +1027,23 @@ impl Database {
                     work,
                     true,
                 );
+                // Let the export writer recover any structured disk-budget error
+                // recorded during the JSON writer's I/O calls. An ordinary I/O
+                // error must retain its cause when no such error is pending.
                 writers[0].checked(written)
             })?;
+            // Finish flushes the manifest writer and discards its own digest. The
+            // published manifest lists only the data streams. Export uses
+            // individual renames for publication and requests no file or directory
+            // sync here.
             manifest_file.finish()?;
+            // Check the destinations again after writing the private files. Each
+            // persist publishes one name. A later failure can leave earlier data
+            // files in place, so the manifest is the last name installed.
             validate_export_destinations(storage.path(), output_dir)?;
+            // Each successful persist replaces one destination name. If publishing
+            // a subsequent artifact fails, an older manifest may remain beside
+            // some newly installed files and consumers must check its hashes.
             documents_temp.persist(&documents_path)?;
             chunks_temp.persist(&chunks_path)?;
             embeddings_temp.persist(&embeddings_path)?;
@@ -698,6 +1059,9 @@ impl Database {
                     chunks_sha256,
                     embeddings_sha256,
                 },
+                // The compact returned summary retains credit for its digest
+                // strings and manifest name. The staged file guards and writer
+                // buffers have separate lifetimes.
                 summary_work,
             ))
         })
@@ -705,13 +1069,26 @@ impl Database {
 }
 
 impl ImportManifest {
+    /// Read and validate the manifest at this path and resolve its artifact paths relative to
+    /// its directory. This step does not import records.
+    /// # Errors
+    ///
+    /// Returns an error if the manifest cannot be read, its JSON exceeds the
+    /// applicable limits, or its schema version, fields, or tokenizer identity are
+    /// unsupported. Artifact existence and digest checks occur during import.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        // Reading this file uses the manifest JSON limits. Artifact content,
+        // counts and hashes cannot be checked from this value alone, so a
+        // successful load is not verification of the files it names.
         let value = read_manifest(path)?;
         Self::from_value(path, &value)
     }
 
     fn from_value(path: &Path, value: &JsonValue) -> Result<Self> {
+        // Resolve relative artifact names against the directory in the supplied
+        // manifest path. An absolute artifact path remains absolute. A relative
+        // manifest path can still have a relative parent.
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         let obj = value.as_object().ok_or_else(|| {
             Error::new(
@@ -719,6 +1096,9 @@ impl ImportManifest {
                 "import manifest must be a JSON object",
             )
         })?;
+        // The manifest schema version selects the interpretation of every field
+        // that follows. A present unsupported version receives a version error
+        // before any artifact is opened.
         let schema_version = required_string(obj, "schema_version")?;
         if schema_version != "0.1" {
             return Err(Error::new(
@@ -726,6 +1106,9 @@ impl ImportManifest {
                 format!("unsupported manifest schema_version {schema_version}"),
             ));
         }
+        // A missing or null hashes object makes all digests optional. A present
+        // object is checked for recognized members before its individual digest
+        // strings are accepted.
         let hashes = match obj.get("hashes").filter(|value| !value.is_null()) {
             Some(value) => Some(value.as_object().ok_or_else(|| {
                 Error::new(ErrorCode::InvalidJsonlSchema, "hashes must be an object")
@@ -733,6 +1116,9 @@ impl ImportManifest {
             })?),
             None => None,
         };
+        // Report the legacy metric spelling explicitly, even when distance_metric
+        // is also present. Accepting both would leave the import shape dependent
+        // on which spelling took precedence.
         if obj.get("metric").is_some() {
             return Err(Error::new(
                 ErrorCode::InvalidJsonlSchema,
@@ -740,29 +1126,55 @@ impl ImportManifest {
             )
             .with_detail("field", "metric"));
         }
+        // Export adds identity and count fields to the importable manifest. Admit
+        // those recognized fields but still validate their shapes so importing an
+        // export does not silently ignore a malformed declaration.
         reject_unknown_import_manifest_fields(obj)?;
+        // Version and timestamp annotations describe the exporting producer. This
+        // is a shape check. The importer uses schema_version, not the producer's
+        // product version string, to select the manifest grammar.
         validate_export_manifest_identity_fields(obj)?;
         if let Some(hashes) = hashes {
             reject_unknown_import_hash_fields(hashes)?;
         }
         Ok(Self {
             schema_version,
+            // An omitted tokenizer selects the immutable default. An explicitly
+            // supplied value, including null, must pass the complete tokenizer
+            // identity check rather than being treated as another spelling of
+            // absence.
             tokenizer: obj
                 .get("tokenizer")
                 .map(crate::TokenizerConfig::from_json)
                 .transpose()?
                 .unwrap_or_default(),
+            // The dataset ID is copied into the import summary. The collection
+            // name selects the target, so repeating a dataset ID does not by
+            // itself make an import idempotent.
             dataset_id: optional_manifest_string(obj, "dataset_id")?,
             collection: required_manifest_string(obj, "collection")?,
             documents: base.join(required_manifest_string(obj, "documents")?),
             chunks: base.join(required_manifest_string(obj, "chunks")?),
+            // A present embeddings path designates an artifact even when that file
+            // is empty. Keep the option intact so later staging and
+            // reproducibility reporting can distinguish it from an omitted
+            // artifact.
             embeddings: optional_manifest_string(obj, "embeddings")?.map(|value| base.join(value)),
+            // At this layer a supplied digest must be a nonblank string. Its value
+            // is compared against bytes only after the corresponding file is
+            // staged, so loading the manifest cannot establish a hash match.
             documents_sha256: optional_hash(hashes, "documents_sha256")?,
             chunks_sha256: optional_hash(hashes, "chunks_sha256")?,
             embeddings_sha256: optional_hash(hashes, "embeddings_sha256")?,
             embedding_model: optional_manifest_string(obj, "embedding_model")?,
             embedding_dim: optional_usize(obj, "embedding_dim")?,
+            // The field name must be distance_metric, but its string value uses
+            // the engine's metric parser. An export writes the canonical spelling
+            // even when the original manifest used an accepted alias.
             distance_metric: optional_distance_metric(obj, "distance_metric")?,
+            // Preserve the distinction between a stated false and no normalization
+            // claim. Once the key exists its value must be a boolean, including on
+            // a manifest without a hash block.
             vectors_normalized: obj
                 .get("vectors_normalized")
                 .map(|value| {
@@ -809,6 +1221,9 @@ impl ImportManifest {
         disk: std::sync::Arc<TemporaryDiskBudget>,
         mut create: impl FnMut() -> Result<(TemporaryFile, TempFileGuard)>,
     ) -> Result<ValidatedInputs> {
+        // A digest for an absent optional embeddings file cannot be verified.
+        // Reject that pairing before staging the other artifacts or spending space
+        // on their private copies.
         if self.embeddings_sha256.is_some() && self.embeddings.is_none() {
             return Err(Error::new(
                 ErrorCode::MissingRequiredField,
@@ -818,20 +1233,38 @@ impl ImportManifest {
             .with_detail("artifact_kind", "embeddings"));
         }
         let mut load = |kind: &str, path: &Path, hash: Option<&str>| -> Result<ValidatedInput> {
+            // Holding the opened source stabilizes its file identity but cannot
+            // freeze concurrent writes to that file. The staged copy and any
+            // expected digest represent the stream actually read.
             let source = File::open(path)?;
+            // Retry cleanup of previously charged temporary files before testing
+            // available disk capacity. A failure there must not be mistaken for a
+            // corrupt artifact or a digest mismatch.
             disk.retry_cleanup()?;
             // This is only a preflight; each actual write still reserves atomically,
             // accounting for concurrent operations and files that grow after opening.
             disk.check_additional(source.metadata()?.len())?;
+            // Create the private destination only after the source passes its size
+            // preflight. Its guard takes responsibility for cleanup and credit as
+            // the copy grows.
             let temporary = create()?;
+            // Copy file contents without parsing or normalizing them. SHA-256
+            // covers the bytes as stored, including line endings and any trailing
+            // newline; JSONL decoding happens on the staged handle later.
             ValidatedInput::copy_into(source, kind, path, hash, temporary)
         };
+        // Return the three staged owners together. If a later artifact fails,
+        // previously built inputs lose their guards here and no incomplete input
+        // set can reach the import planner.
         Ok(ValidatedInputs {
             documents: load(
                 "documents",
                 &self.documents,
                 self.documents_sha256.as_deref(),
             )?,
+            // Staging uses a shared temporary-disk budget across all artifacts. A
+            // successful document copy continues holding its credit while chunks
+            // and optional embeddings are copied.
             chunks: load("chunks", &self.chunks, self.chunks_sha256.as_deref())?,
             embeddings: self
                 .embeddings
@@ -842,6 +1275,9 @@ impl ImportManifest {
     }
 
     fn reproducibility_warnings(&self) -> [(bool, [&'static str; 4]); 3] {
+        // The tuple flag controls whether the caller emits the warning. A missing
+        // digest reduces reproducibility but leaves a supplied artifact eligible
+        // for staging and schema validation.
         [
             (self.documents_sha256.is_none(), [
                 "missing_reproducibility_hash", "hashes.documents_sha256", "documents",
@@ -851,6 +1287,8 @@ impl ImportManifest {
                 "missing_reproducibility_hash", "hashes.chunks_sha256", "chunks",
                 "hashes.chunks_sha256 is missing; import is allowed, but reproducibility is reduced",
             ]),
+            // No embeddings source is an ordinary optional omission. Warn about
+            // its missing digest only when a file was actually supplied.
             (self.embeddings.is_some() && self.embeddings_sha256.is_none(), [
                 "missing_reproducibility_hash", "hashes.embeddings_sha256", "embeddings",
                 "hashes.embeddings_sha256 is missing; import is allowed, but reproducibility is reduced",
@@ -861,15 +1299,29 @@ impl ImportManifest {
 
 #[derive(Debug)]
 struct ValidatedInputs {
+    // Staged document bytes used for validation and subsequent import passes,
+    // independent of later path changes.
     documents: ValidatedInput,
+    // Staged chunk artifact used to check its relationships against document
+    // identities.
     chunks: ValidatedInput,
+    // Staged embedding bytes when a source was supplied. An absent file and an
+    // explicitly supplied empty file are distinct.
     embeddings: Option<ValidatedInput>,
 }
 
+// Later parsing passes rewind this private copy. Reopening the original
+// path could import different bytes from those checked against the manifest.
 #[derive(Debug)]
 struct ValidatedInput {
+    // Open staged copy used for subsequent passes over the exact bytes that were
+    // captured from the source.
     file: TemporaryFile,
+    // Cleanup guard retaining the staged file's disk charge while validation or
+    // import can still read it.
     temporary: TempFileGuard,
+    // Number of bytes copied into the staged file. Each JSONL visitor uses this
+    // length as its input byte limit.
     len: u64,
 }
 
@@ -904,44 +1356,77 @@ impl ValidatedInput {
         expected: Option<&str>,
         (file, temporary): (TemporaryFile, TempFileGuard),
     ) -> Result<Self> {
+        // Take ownership of the temporary file and guard before reading from the
+        // source. Every early return from copying or verification then follows the
+        // same cleanup path.
         let mut input = Self {
             file,
             temporary,
             len: 0,
         };
+        // Build a digest only when there is an expected value to check. Without
+        // one the identical byte stream is still staged for every subsequent
+        // parsing pass.
         let mut hash = expected.map(|_| Sha256::default());
         let mut buffer = [0; 8192];
         loop {
+            // An interrupted read has delivered no bytes to this loop. Retry it
+            // before changing the hash, disk charge or recorded length. Other
+            // errors discard the incomplete staged artifact.
             let count = match source.read(&mut buffer) {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 result => result?,
             };
+            // A zero-length source reaches EOF without reserving payload bytes. If
+            // a digest was promised, the later comparison still checks the SHA-256
+            // of the empty stream.
             if count == 0 {
                 break;
             }
+            // Hash only the prefix the reader returned. A short read leaves older
+            // bytes in the rest of the reusable buffer and those bytes must never
+            // affect the manifest comparison.
             if let Some(hash) = &mut hash {
                 hash.update(&buffer[..count]);
             }
+            // Reserve the bytes that are about to reach disk before writing them.
+            // A concurrent operation or a growing source can exhaust space after
+            // the metadata preflight succeeded.
             input
                 .temporary
                 .reserve_disk(count as u64)
                 .map_err(|error| error.with_detail("path", path.display()))?;
+            // Increase the checked byte count before writing the chunk. If the
+            // write fails, the staged owner is discarded, so no consumer can
+            // observe this tentative count.
             input.len += count as u64;
             input.file.write_all(&buffer[..count])?;
         }
+        // Compare the digest only after EOF, before handing out the staged owner.
+        // A correct prefix of a corrupt or truncated artifact must not pass
+        // verification by itself.
         if let Some(hash) = hash {
+            // Compare with the lowercase hex produced by the exporter. The
+            // expected digest keeps its original spelling, so case differences or
+            // surrounding whitespace produce a checksum mismatch.
             validate_optional_hash(kind, path, expected, &digest_hex(hash.finish()))?;
         }
         Ok(input)
     }
 
     fn reader(&mut self) -> Result<&mut File> {
+        // Rewind the same staged handle for every consumer. Reopening the source
+        // pathname could feed different artifact bytes to parsing even after the
+        // staged copy passed its digest check.
         self.file.rewind()?;
         Ok(&mut self.file)
     }
 }
 
 fn reject_unknown_import_manifest_fields(obj: &JsonObject) -> Result<()> {
+    // Accept the common import and export envelope. Unknown top-level fields are
+    // rejected even when their values look harmless, so a misspelled input path or
+    // vector setting cannot silently disappear.
     for field in obj.keys() {
         if !matches!(
             field.as_str(),
@@ -973,6 +1458,9 @@ fn reject_unknown_import_manifest_fields(obj: &JsonObject) -> Result<()> {
 }
 
 fn reject_unknown_import_hash_fields(obj: &JsonObject) -> Result<()> {
+    // Digest names form a closed namespace inside hashes. Qualify an invalid
+    // member with its container so it cannot be confused with an unknown top-level
+    // artifact field.
     for field in obj.keys() {
         if !matches!(
             field.as_str(),
@@ -989,17 +1477,31 @@ fn reject_unknown_import_hash_fields(obj: &JsonObject) -> Result<()> {
 }
 
 fn validate_export_manifest_identity_fields(obj: &JsonObject) -> Result<()> {
+    // These export annotations are optional when importing a hand-written
+    // manifest. Validate recognized fields here even though the compact
+    // ImportManifest does not retain all of them.
     optional_manifest_string(obj, "cofferdb_version")?;
     optional_manifest_string(obj, "exported_at")?;
+    // An export's recorded file format is descriptive. JSONL import rebuilds
+    // records in the destination's format and does not open the exported source
+    // database to check this version.
     optional_usize(obj, "file_format_version")?;
+    // Parsing counts here checks only their declaration. The import entry point
+    // retains a separate copy of the parsed counts for comparison after the JSONL
+    // visitors have measured the artifacts.
     parse_export_manifest_counts(obj)?;
     Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ExportManifestCounts {
+    // Expected document rows when the export recorded a count. A missing count is
+    // not an assertion of zero.
     documents: Option<usize>,
+    // Expected chunk rows to compare with the observed source count when present.
     chunks: Option<usize>,
+    // Expected embedding rows when present, including an explicit zero for an empty
+    // embedding artifact.
     embeddings: Option<usize>,
 }
 
@@ -1010,6 +1512,9 @@ impl ExportManifestCounts {
         chunks_count: usize,
         embeddings_count: usize,
     ) -> Result<()> {
+        // Compare declared counts with source rows seen. Conflict policy can
+        // change the number applied independently of those input counts. An
+        // explicit zero asserts an empty artifact.
         self.validate_count("documents", documents_count)?;
         self.validate_count("chunks", chunks_count)?;
         self.validate_count("embeddings", embeddings_count)?;
@@ -1023,12 +1528,19 @@ impl ExportManifestCounts {
             "embeddings" => self.embeddings,
             _ => None,
         };
+        // An omitted count leaves this artifact unconstrained. Keep expected and
+        // observed counts in the error when a supplied declaration disagrees,
+        // including when either is zero.
         if let Some(expected) = expected {
             if expected != actual {
                 return Err(Error::new(
                     ErrorCode::InvalidJsonlSchema,
                     format!("export manifest counts.{field} does not match JSONL row count"),
                 )
+                // Name the artifact and report both cardinalities. An absent
+                // artifact recorded as zero and a supplied artifact with zero rows
+                // can have the same count, so counts alone do not establish file
+                // presence.
                 .with_detail("field", format!("counts.{field}"))
                 .with_detail("expected_count", expected)
                 .with_detail("actual_count", actual));
@@ -1039,9 +1551,14 @@ impl ExportManifestCounts {
 }
 
 fn parse_export_manifest_counts(obj: &JsonObject) -> Result<ExportManifestCounts> {
+    // Treat an absent or null counts object as having no count assertions. Each
+    // member can also be omitted independently, so recording just one artifact
+    // count is supported.
     let Some(counts) = obj.get("counts").filter(|value| !value.is_null()) else {
         return Ok(ExportManifestCounts::default());
     };
+    // A present non-object cannot carry named artifact counts. Validate the
+    // container even when none of its expected members was supplied.
     let counts = counts.as_object().ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidJsonlSchema,
@@ -1049,6 +1566,9 @@ fn parse_export_manifest_counts(obj: &JsonObject) -> Result<ExportManifestCounts
         )
         .with_detail("field", "counts")
     })?;
+    // Check all count names before extracting the known members. Without this pass
+    // a typo in the only declared count would disable the caller's intended
+    // verification.
     for field in counts.keys() {
         if !matches!(field.as_str(), "documents" | "chunks" | "embeddings") {
             return Err(Error::new(
@@ -1058,6 +1578,8 @@ fn parse_export_manifest_counts(obj: &JsonObject) -> Result<ExportManifestCounts
             .with_detail("field", format!("counts.{field}")));
         }
     }
+    // Read each known count into its own option. A documents-only declaration does
+    // not imply a zero default for chunks or embeddings.
     Ok(ExportManifestCounts {
         documents: optional_count_field(counts, "documents")?,
         chunks: optional_count_field(counts, "chunks")?,
@@ -1066,9 +1588,15 @@ fn parse_export_manifest_counts(obj: &JsonObject) -> Result<ExportManifestCounts
 }
 
 fn optional_count_field(obj: &JsonObject, field: &str) -> Result<Option<usize>> {
+    // A null member is the same as leaving just that count unspecified. A decimal
+    // string, even one containing only digits, is a different JSON type and cannot
+    // assert a row count.
     obj.get(field)
         .filter(|value| !value.is_null())
         .map(|value| {
+            // Use the checked JSON-to-usize conversion. Fractional, negative and
+            // out-of-range counts are malformed declarations and cannot be
+            // compared to the row counters.
             json_usize(value).ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1082,6 +1610,9 @@ fn optional_count_field(obj: &JsonObject, field: &str) -> Result<Option<usize>> 
 
 impl ImportWarning {
     fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // A borrowed warning remains usable after serialization, so copy its
+        // strings. Its structured details repeat the affected field and artifact
+        // name for consumers that read the common diagnostic envelope.
         WarningFields {
             code: builder.string(&self.code)?,
             field: builder.string(&self.field)?,
@@ -1096,6 +1627,9 @@ impl ImportWarning {
     }
 
     pub(crate) fn into_json_owned(self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // The consumed warning can donate its four top-level strings. Build the
+        // independently owned details object first while field and artifact_kind
+        // can still be borrowed for the duplicate entries.
         let details = builder.object([
             ("field", builder.string(&self.field)?),
             ("artifact_kind", builder.string(&self.artifact_kind)?),
@@ -1112,15 +1646,24 @@ impl ImportWarning {
 }
 
 struct WarningFields {
+    // Stable warning identifier prepared for the JSON envelope.
     code: JsonValue,
+    // Name of the affected input field included in the warning.
     field: JsonValue,
+    // Kind of input artifact that supplied the warning, such as the chunks file.
     artifact_kind: JsonValue,
+    // Human-readable explanation prepared under the output builder's reservation.
     message: JsonValue,
+    // Structured diagnostic object for this warning, owned by the resulting JSON
+    // row.
     details: JsonValue,
 }
 
 impl WarningFields {
     fn build_json(self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // Manifest digest omissions and record-level warnings use the same
+        // envelope. Field and artifact kind describe their source. The envelope
+        // carries no filesystem path.
         builder.object([
             ("code", self.code),
             ("severity", builder.string("warning")?),
@@ -1138,13 +1681,22 @@ impl Database {
         &self,
         manifest: &ImportManifest,
     ) -> Result<(usize, DistanceMetric)> {
+        // Resolve the import target by its collection name. A manifest can omit
+        // shape parameters only if an existing target supplies them. A new target
+        // has no prior shape to inherit.
         let existing = self
             .list_collections()?
             .into_iter()
             .find(|collection| collection.name == manifest.collection);
+        // Choose an explicit dimension even for an existing target. This step
+        // fills omissions only. It does not authorize changing the stored
+        // collection's vector shape.
         let embedding_dim = match (manifest.embedding_dim, existing.as_ref()) {
             (Some(value), _) => value,
             (None, Some(collection)) => collection.embedding_dim,
+            // Check dimension first when a new target lacks both shape fields.
+            // Report the missing dimension directly rather than trying to infer it
+            // by reading an embedding row.
             (None, None) => {
                 return Err(Error::new(
                     ErrorCode::MissingRequiredField,
@@ -1153,6 +1705,9 @@ impl Database {
                 .with_detail("field", "embedding_dim"));
             }
         };
+        // Resolve metric independently of dimension. One can be supplied and the
+        // other inherited, while a new target must provide both even if the
+        // embeddings artifact is absent.
         let distance_metric = match (manifest.distance_metric, existing.as_ref()) {
             (Some(value), _) => value,
             (None, Some(collection)) => collection.distance_metric,
@@ -1164,12 +1719,21 @@ impl Database {
                 .with_detail("field", "distance_metric"));
             }
         };
+        // Return the shape used to prepare the rows. It is a snapshot of the
+        // catalog lookup; the write path checks the destination again before
+        // accepting the import.
         Ok((embedding_dim, distance_metric))
     }
 }
 
 fn required_manifest_string(obj: &JsonObject, field: &str) -> Result<String> {
+    // The shared required-string reader classifies both a missing field and a
+    // non-string as MissingRequiredField. Optional string fields below report a
+    // supplied wrong type as InvalidJsonlSchema.
     let value = required_string(obj, field)?;
+    // Whitespace makes an otherwise required string empty for validation purposes.
+    // Preserve the original nonblank spelling so artifact paths and collection
+    // names are not silently rewritten.
     if value.trim().is_empty() {
         return Err(Error::new(
             ErrorCode::MissingRequiredField,
@@ -1181,9 +1745,15 @@ fn required_manifest_string(obj: &JsonObject, field: &str) -> Result<String> {
 }
 
 fn optional_manifest_string(obj: &JsonObject, field: &str) -> Result<Option<String>> {
+    // Only omission or explicit null means no optional string. A present
+    // non-string is a schema error and a present whitespace-only string is
+    // rejected as an empty supplied field.
     let Some(value) = obj.get(field).filter(|value| !value.is_null()) else {
         return Ok(None);
     };
+    // The optional-field accessor keeps a wrong JSON type separate from a missing
+    // value. In particular a numeric-looking dataset ID is still required to be
+    // supplied as a string.
     let value = value.as_str().ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidJsonlSchema,
@@ -1198,13 +1768,22 @@ fn optional_manifest_string(obj: &JsonObject, field: &str) -> Result<Option<Stri
         )
         .with_detail("field", field));
     }
+    // Trimming is only the presence test. Keep surrounding whitespace on a
+    // nonblank value so filenames and application-provided identifiers retain
+    // their input spelling.
     Ok(Some(value.to_owned()))
 }
 
 fn optional_usize(obj: &JsonObject, field: &str) -> Result<Option<usize>> {
+    // An absent or null scalar leaves the manifest without that override. Keep a
+    // supplied zero for the caller's field-specific validation. Conflating zero
+    // with omission would silently select a default.
     obj.get(field)
         .filter(|value| !value.is_null())
         .map(|value| {
+            // Use the common JSON-to-host-size conversion for limits and count
+            // declarations. A value outside that representation must fail before
+            // it can become an allocation size or an expected row count.
             json_usize(value).ok_or_else(|| {
                 Error::new(
                     ErrorCode::InvalidJsonlSchema,
@@ -1217,6 +1796,9 @@ fn optional_usize(obj: &JsonObject, field: &str) -> Result<Option<usize>> {
 }
 
 fn optional_distance_metric(obj: &JsonObject, field: &str) -> Result<Option<DistanceMetric>> {
+    // Check the JSON token type before parsing the metric name. A wrong type
+    // identifies the manifest field, while an unknown name uses the metric
+    // parser's own validation error.
     obj.get(field)
         .filter(|value| !value.is_null())
         .map(|value| {
@@ -1233,6 +1815,9 @@ fn optional_distance_metric(obj: &JsonObject, field: &str) -> Result<Option<Dist
 }
 
 fn optional_hash(hashes: Option<&JsonObject>, field: &str) -> Result<Option<String>> {
+    // An omitted hashes object supplies no expected digests. Within a present
+    // object, each file can independently omit its digest, while a supplied string
+    // is checked against the staged bytes later.
     let Some(hashes) = hashes else {
         return Ok(None);
     };
@@ -1251,6 +1836,10 @@ fn optional_hash(hashes: Option<&JsonObject>, field: &str) -> Result<Option<Stri
                     .with_detail("field", format!("hashes.{field}"))
                 })
                 .and_then(|value| {
+                    // Check for blank input while preserving the literal digest
+                    // text. Validation compares the expected spelling directly
+                    // with the computed hexadecimal value, so stripping whitespace
+                    // here would change the accepted input.
                     if value.trim().is_empty() {
                         Err(Error::new(
                             ErrorCode::MissingRequiredField,
@@ -1271,9 +1860,13 @@ fn validate_optional_hash(
     expected: Option<&str>,
     actual: &str,
 ) -> Result<()> {
+    // An absent digest requests no verification. A present digest is compared
+    // literally against the computed digest of the staged bytes.
     let Some(expected) = expected else {
         return Ok(());
     };
+    // Report both digests and the source path. The comparison describes the bytes
+    // captured during staging, before any row can be committed to the database.
     if actual != expected {
         return Err(
             Error::new(ErrorCode::ChecksumMismatch, format!("{kind} hash mismatch"))
@@ -1288,14 +1881,23 @@ fn validate_optional_hash(
 }
 
 impl ImportSummary {
+    /// Build the structured JSON representation of this import summary. Counts
+    /// describe processed input and committed output. A replacement can increment
+    /// both the inserted and replaced counts.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // Build the optional dataset identity and warnings through the caller's
+        // builder. Import uses the same DTO layout for copied host results and
+        // results whose strings move directly from the operation.
         self.build_json_dynamic(
             builder.optional_str(self.dataset_id.as_deref())?,
+            // Convert warnings in stored order. Summaries can carry warnings from
+            // several source rows or batches, and traversal preserves the order
+            // the operation recorded them.
             builder.array(
                 self.warnings
                     .iter()
@@ -1309,11 +1911,20 @@ impl ImportSummary {
         mut self,
         work: &mut crate::storage::RecordReservation,
     ) -> Result<JsonValue> {
+        // Take the dynamic fields out before formatting the remaining scalar
+        // summary. The native reservation covers their strings until the budgeted
+        // builder transfers those allocations into the JSON result.
         let dataset_id = self.dataset_id.take();
         let warnings = std::mem::take(&mut self.warnings);
+        // Separate JSON allocation credit from the existing native string credit.
+        // The owned-string builder can use each where the final result needs it
+        // without accounting for both as new copies.
         let (json, strings) = work.parts_mut();
         let builder = JsonBuilder::budgeted_owned_strings(json, strings, JsonInputKind::StoredJson);
         let dataset_id = builder.optional_string(dataset_id)?;
+        // Consume the warning list so each warning can transfer owned strings. A
+        // formatting or budget error drops the unfinished result rather than
+        // exposing a partial success summary.
         let warnings = builder.array(
             warnings
                 .into_iter()
@@ -1328,13 +1939,23 @@ impl ImportSummary {
         warnings: JsonValue,
         builder: &JsonBuilder<'_>,
     ) -> Result<JsonValue> {
+        // Aggregate counts across the three record kinds. A replacement can also
+        // insert the new version, so these outcome categories can overlap.
         let skipped = self.documents_skipped + self.chunks_skipped + self.embeddings_skipped;
         let replaced = self.documents_replaced + self.chunks_replaced + self.embeddings_replaced;
+        // Keep shared report keys in this builder so borrowed and retained
+        // renderers agree. The caller passes the already built variable-size
+        // fields, while numeric counts come from this summary's accumulated
+        // operation state.
         builder.object([
             ("tokenizer", self.tokenizer.build_json(builder)?),
             ("skipped_files", JsonValue::Array(Vec::new())),
             ("dataset_id", dataset_id),
             (
+                // Seen counts describe decoded inputs, including rows later
+                // handled by conflict policy. Compare these with the manifest
+                // counts before reasoning about how many records were actually
+                // written.
                 "documents_seen",
                 JsonValue::Number(self.documents_seen as f64),
             ),
@@ -1343,6 +1964,9 @@ impl ImportSummary {
                 "embeddings_seen",
                 JsonValue::Number(self.embeddings_seen as f64),
             ),
+            // Both the inserted and imported spellings in this schema refer to the
+            // same value. Keep them in sync for clients that consume the earlier
+            // summary field names.
             (
                 "documents_inserted",
                 JsonValue::Number(self.documents_inserted as f64),
@@ -1379,6 +2003,9 @@ impl ImportSummary {
                 "embeddings_skipped",
                 JsonValue::Number(self.embeddings_skipped as f64),
             ),
+            // The total summarizes all three skipped categories. It can count
+            // several rows from a single skipped document input, so it is a row
+            // total rather than a number of conflicts.
             ("skipped", JsonValue::Number(skipped as f64)),
             (
                 "documents_replaced",
@@ -1394,6 +2021,9 @@ impl ImportSummary {
             ),
             ("replaced", JsonValue::Number(replaced as f64)),
             ("warnings", warnings),
+            // These fields belong to the success report. A missing required
+            // reference, model mismatch or hard planning failure returns an error
+            // instead of completing this summary with a nonzero error tally.
             ("missing_chunks", JsonValue::Number(0.0)),
             ("model_mismatches", JsonValue::Number(0.0)),
             ("errors", JsonValue::Number(0.0)),
@@ -1402,12 +2032,16 @@ impl ImportSummary {
 }
 
 impl ExportSummary {
+    /// Build the structured JSON representation of this import or export summary.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // The report combines generated path and digest strings with copied row
+        // counts. This borrowed formatter leaves their original native allocations
+        // with the summary.
         self.build_json_dynamic(
             builder.string(&self.manifest)?,
             builder.string(&self.documents_sha256)?,
@@ -1417,14 +2051,23 @@ impl ExportSummary {
         )
     }
 
+    // Convert the receipt after the exporter has finalized its artifacts. An
+    // output-budget failure here can prevent delivery of the receipt without
+    // removing the published files.
     pub(crate) fn into_json_retained(
         mut self,
         work: &mut crate::storage::RecordReservation,
     ) -> Result<JsonValue> {
+        // Take the strings individually so the record counts stay available for
+        // the common builder. A failed transfer drops the taken strings with the
+        // in-progress output.
         let manifest = std::mem::take(&mut self.manifest);
         let documents = std::mem::take(&mut self.documents_sha256);
         let chunks = std::mem::take(&mut self.chunks_sha256);
         let embeddings = std::mem::take(&mut self.embeddings_sha256);
+        // Use the same output schema as the borrowed formatter. Moving the four
+        // strings avoids duplicating them at the high-water mark where the report
+        // is charged to the same operation.
         let (json, strings) = work.parts_mut();
         let builder = JsonBuilder::budgeted_owned_strings(json, strings, JsonInputKind::StoredJson);
         self.build_json_dynamic(
@@ -1444,9 +2087,15 @@ impl ExportSummary {
         embeddings_sha256: JsonValue,
         builder: &JsonBuilder<'_>,
     ) -> Result<JsonValue> {
+        // The reported manifest path and content digests describe the generated
+        // artifacts. Keeping digest names tied to each row type lets the importer
+        // verify the corresponding files independently.
         builder.object([
             ("documents", JsonValue::Number(self.documents as f64)),
             (
+                // Document, chunk and embedding totals cover each exported
+                // artifact separately. Older readers of the short keys and readers
+                // of the exported count keys observe the same totals.
                 "documents_exported",
                 JsonValue::Number(self.documents as f64),
             ),
@@ -1457,6 +2106,9 @@ impl ExportSummary {
                 "embeddings_exported",
                 JsonValue::Number(self.embeddings as f64),
             ),
+            // The path identifies the manifest, while the digest fields identify
+            // the three corresponding byte streams. These values are assembled by
+            // the writer and are not digests of the rendered summary object.
             ("manifest", manifest),
             ("documents_sha256", documents_sha256),
             ("chunks_sha256", chunks_sha256),
@@ -1466,8 +2118,14 @@ impl ExportSummary {
 }
 
 pub(crate) struct JsonlChunk {
+    // External document ID from the row, before it is resolved to the catalog's
+    // internal ID.
     pub(crate) document_external_id: String,
+    // Decoded chunk payload and caller-supplied identity. Its source span is
+    // validated separately from the parent's ID.
     pub(crate) chunk: ChunkInput,
+    // Set when an explicit source span overrides a different or malformed metadata
+    // span. Preserve the warning without parsing the input line again.
     source_span_metadata_conflict: bool,
 }
 
@@ -1504,9 +2162,18 @@ pub(crate) fn visit_documents_jsonl_in(
     consume: impl FnMut(usize, JsonlDocument, RecordReservation) -> Result<()>,
 ) -> Result<()> {
     visit_jsonl_rows_in(
+        // Give the line reader both the schema and the staged byte limit. The JSON
+        // parser then classifies document metadata separately from the enclosing
+        // row before the row is moved into native fields.
         path,
         JsonLines::new(source, JsonSchema::DocumentRow, context, byte_limit),
+        // Apply the allowlist before taking fields from the object. A misspelled
+        // optional name should fail at the source line and cannot be interpreted
+        // as omission.
         |obj| {
+            // Select the document's external identity rather than resolving it
+            // here. A copy of the row can carry the same key into direct planning
+            // or manifest staging before the database assigns an internal ID.
             reject_unknown_jsonl_fields(obj, &["external_id", "title", "source_uri", "metadata"])?;
             Ok(JsonlDocument {
                 external_id: required_nonempty_jsonl_string(obj, "external_id")?,
@@ -1515,6 +2182,9 @@ pub(crate) fn visit_documents_jsonl_in(
                 metadata: required_metadata(obj)?,
             })
         },
+        // Pass the metadata object and native string capacities to the generic
+        // visitor independently. The parser's row allocation can be reduced once
+        // those retained fields have moved into the typed document.
         |row| Some((&row.metadata, JsonInputKind::DocumentMetadata)),
         |row| {
             row.external_id.capacity()
@@ -1526,6 +2196,9 @@ pub(crate) fn visit_documents_jsonl_in(
 }
 
 fn required_metadata(obj: &mut JsonObject) -> Result<JsonValue> {
+    // Move the metadata object out of the parsed row. An empty object is permitted
+    // and explicit, whereas omission has its own required-field error. A
+    // non-object fails shape validation.
     ensure_object(obj.remove("metadata").ok_or_else(|| {
         Error::new(
             ErrorCode::MissingRequiredField,
@@ -1567,6 +2240,9 @@ pub(crate) fn visit_chunks_jsonl_in(
     consume: impl FnMut(usize, JsonlChunk, RecordReservation) -> Result<()>,
 ) -> Result<()> {
     visit_jsonl_rows_in(
+        // A chunk row carries the external argument identifying its parent
+        // document. Resolving that reference against the import plan or the live
+        // catalog is a later operation.
         path,
         JsonLines::new(source, JsonSchema::ChunkRow, context, byte_limit),
         |obj| {
@@ -1581,7 +2257,15 @@ pub(crate) fn visit_chunks_jsonl_in(
                     "source_span",
                 ],
             )?;
+            // Resolve source span before moving the text and IDs. The explicit
+            // field and legacy metadata use different paths, and the result
+            // carries whether the explicit value overrode conflicting or malformed
+            // legacy data.
             let metadata = required_metadata(obj)?;
+            // An omitted field allows legacy metadata to supply the coordinates. A
+            // present JSON null parses as an explicit empty span and can override
+            // legacy metadata. Any other malformed explicit value fails before
+            // fallback.
             let explicit = obj
                 .get("source_span")
                 .map(SourceSpan::from_json)
@@ -1592,15 +2276,29 @@ pub(crate) fn visit_chunks_jsonl_in(
                 document_external_id: required_nonempty_jsonl_string(obj, "document_external_id")?,
                 chunk: ChunkInput {
                     chunk_external_id: required_nonempty_jsonl_string(obj, "chunk_external_id")?,
+                    // The ordinal is a nonnegative host-sized count. Uniqueness
+                    // relative to the parent and acceptance of a particular
+                    // document key are checked later, because both require the
+                    // import's reference scope.
                     ordinal: required_usize(obj, "ordinal")?,
                     text: required_nonempty_jsonl_string(obj, "text")?,
                     metadata,
+                    // The metadata tree and chosen span move into the typed chunk.
+                    // Keep the conflict bit separately for the warning path rather
+                    // than recording the choice by modifying the caller's
+                    // metadata.
                     source_span,
                 },
                 source_span_metadata_conflict,
             })
         },
+        // The same native fields are charged whether or not the span override
+        // produced a warning. A warning is derived from the conflict bit later and
+        // is not part of the returned metadata allocation.
         |row| Some((&row.chunk.metadata, JsonInputKind::ChunkMetadata)),
+        // Only the surviving strings count toward native row workspace at this
+        // boundary. Keep metadata under the JSON reservation so its nested
+        // allocations remain accounted for.
         |row| {
             row.document_external_id.capacity()
                 + row.chunk.chunk_external_id.capacity()
@@ -1614,14 +2312,23 @@ pub(crate) fn resolve_input_source_span(
     metadata: &JsonValue,
     explicit: Option<SourceSpan>,
 ) -> Result<(Option<SourceSpan>, bool)> {
+    // Evaluate the legacy span once. It is the selected value when no explicit
+    // span was supplied, and it can still provide evidence of a conflict when an
+    // explicit value takes precedence.
     let fallback = SourceSpan::try_from_metadata(metadata);
     match explicit {
         Some(span) => {
+            // A different legacy span and a malformed legacy span both set the
+            // warning flag. No legacy value means there is nothing to disagree
+            // with, so a valid explicit span alone does not produce the warning.
             let conflict =
                 matches!(&fallback, Ok(Some(other)) if other != &span) || fallback.is_err();
             // An empty explicit span overrides metadata until write normalization.
             Ok((Some(span), conflict))
         }
+        // A missing explicit span leaves the legacy result authoritative. Return
+        // its validation error rather than turning malformed metadata into an
+        // absent span.
         None => fallback.map(|span| (span, false)),
     }
 }
@@ -1657,17 +2364,29 @@ pub(crate) fn visit_embeddings_jsonl_in(
     byte_limit: u64,
     mut consume: impl FnMut(usize, EmbeddingInput, JsonReservation) -> Result<()>,
 ) -> Result<()> {
+    // Embedding rows need an extra native vector allocation in addition to the
+    // input JSON tree. This path keeps its conversion reservation explicit and
+    // applies the byte limit to the original staged stream.
     let reader = JsonLines::new(source, JsonSchema::EmbeddingRow, context, byte_limit)
         .map_err(|error| error.with_detail("path", path.display()))?;
     for row in reader {
+        // Use the parser's source line number, including when earlier blank lines
+        // were skipped. Keep that location through conversion and the database
+        // callback so a failing row can be found in the original input.
         let (line, parsed) = row.map_err(|error| error.with_detail("path", path.display()))?;
         let mut work = context.reservation();
         let (mut value, parsed_work) = parsed.into_parts();
         work.merge(parsed_work);
         let (input, conversion) = embedding_from_json_in(&mut value, context)
             .map_err(|error| with_jsonl_location(error, path, line))?;
+        // Merge conversion credit while both values can still be alive. Once the
+        // unused JSON tree is gone, retain only the native row's owned capacity
+        // before passing it to the consumer.
         work.merge(conversion);
         drop(value);
+        // Trim the reservation after dropping the parsed object. Returning credit
+        // first while its residual numeric array remained alive could let the next
+        // row admit bytes already in use.
         work.retain(input.workspace_bytes());
         consume(line, input, work).map_err(|error| with_jsonl_location(error, path, line))?;
     }
@@ -1682,10 +2401,16 @@ pub(crate) fn embedding_from_json_in(
         .as_object_mut()
         .ok_or_else(|| Error::new(ErrorCode::InvalidJsonlSchema, "JSONL row must be an object"))?;
     reject_unknown_jsonl_fields(obj, &["chunk_external_id", "model_name", "dim", "vector"])?;
+    // Check the vector shape before allocating f32 storage. Admission covers the
+    // entire converted array while the parsed numbers or other values still occupy
+    // their original JSON slots.
     let values = required_array(obj, "vector")?;
     let mut conversion = context.reservation();
     let mut vector = Vec::new();
     conversion.reserve_vec(&mut vector, values.len(), JsonInputKind::JsonlRecord)?;
+    // Convert through the JSON numeric representation, then test the f32 value. A
+    // legal finite f64 can overflow to infinity when narrowed and must fail before
+    // it enters the typed vector.
     for value in values {
         let value = value.as_f64().ok_or_else(|| {
             Error::new(
@@ -1702,6 +2427,9 @@ pub(crate) fn embedding_from_json_in(
         vector.push(value);
     }
     // All budget admission precedes moving strings out of the retained row.
+    // Move the chunk key and model name out of the input object only after the
+    // vector is admitted. The declared dimension is preserved for later row and
+    // collection checks rather than inferred from the converted count.
     let input = EmbeddingInput {
         chunk_external_id: required_nonempty_jsonl_string(obj, "chunk_external_id")?,
         model_name: required_nonempty_jsonl_string(obj, "model_name")?,
@@ -1712,6 +2440,9 @@ pub(crate) fn embedding_from_json_in(
 }
 
 fn reject_unknown_jsonl_fields(obj: &JsonObject, allowed: &[&str]) -> Result<()> {
+    // Use an explicit allowlist for each row kind so misspelled names fail.
+    // Document and chunk rows carry extension values under metadata. Embedding
+    // rows have no extension object.
     for field in obj.keys() {
         if !allowed.contains(&field.as_str()) {
             return Err(Error::new(
@@ -1725,9 +2456,15 @@ fn reject_unknown_jsonl_fields(obj: &JsonObject, allowed: &[&str]) -> Result<()>
 }
 
 fn optional_jsonl_string(obj: &mut JsonObject, field: &str) -> Result<Option<String>> {
+    // Treat null and omission consistently for optional strings. A numeric or
+    // boolean token is an explicit type mistake, and a whitespace-only supplied
+    // string does not mean an omitted value.
     let Some(value) = obj.get_mut(field).filter(|value| !value.is_null()) else {
         return Ok(None);
     };
+    // A typed extractor must leave the parsed object consistent if a later field
+    // triggers an error. It takes ownership only of a recognized string, so the
+    // remaining tree still frees all untouched fields normally.
     let JsonValue::String(value) = value else {
         return Err(Error::new(
             ErrorCode::InvalidJsonlSchema,
@@ -1735,6 +2472,9 @@ fn optional_jsonl_string(obj: &mut JsonObject, field: &str) -> Result<Option<Str
         )
         .with_detail("field", field));
     };
+    // Test the trimmed string for emptiness while keeping the original content.
+    // This preserves legitimate spelling and surrounding whitespace for later
+    // external key comparisons or output.
     if value.trim().is_empty() {
         return Err(Error::new(
             ErrorCode::MissingRequiredField,
@@ -1746,12 +2486,18 @@ fn optional_jsonl_string(obj: &mut JsonObject, field: &str) -> Result<Option<Str
 }
 
 fn required_nonempty_jsonl_string(obj: &mut JsonObject, field: &str) -> Result<String> {
+    // A required value has to be present and string-shaped before extraction.
+    // Return a source-field error rather than creating an empty identifier that
+    // would collide with another row later.
     let Some(JsonValue::String(value)) = obj.get_mut(field) else {
         return Err(Error::new(
             ErrorCode::MissingRequiredField,
             format!("missing string field {field}"),
         ));
     };
+    // The validation uses trim only for the emptiness check. Returning the
+    // original owned string keeps the spelling used for alias and reference
+    // matching.
     if value.trim().is_empty() {
         return Err(Error::new(
             ErrorCode::MissingRequiredField,
@@ -1791,14 +2537,23 @@ fn visit_jsonl_rows_in<T>(
     retained_workspace: impl Fn(&T) -> usize,
     mut consume: impl FnMut(usize, T, RecordReservation) -> Result<()>,
 ) -> Result<()> {
+    // Attach the source path if the parser cannot start. Once it returns rows, the
+    // row number and path also accompany type validation, reservation adjustments
+    // and callback errors.
     let reader = reader.map_err(|error| error.with_detail("path", path.display()))?;
     for row in reader {
         let (line_number, parsed) =
             row.map_err(|error| error.with_detail("path", path.display()))?;
+        // Separate origin JSON ownership from the conversion result. Field
+        // extractors move strings and metadata out of the tree, so the row can
+        // adopt their existing allocations rather than cloning them.
         let (mut row_work, mut value) = {
             let (value, work) = parsed.into_parts();
             (RecordReservation::from(work), value)
         };
+        // The line schema can parse a JSON value before the typed path decides
+        // which object fields it requires. Report shape failure at the original
+        // path and one-based row location.
         let obj = value.as_object_mut().ok_or_else(|| {
             Error::new(ErrorCode::InvalidJsonlSchema, "JSONL row must be an object")
                 .with_detail("path", path.display())
@@ -1806,9 +2561,18 @@ fn visit_jsonl_rows_in<T>(
         })?;
         // Moved fields keep the parser's existing credit, without a second admission.
         let row = parse_row(obj).map_err(|err| with_jsonl_location(err, path, line_number))?;
+        // Native row strings and the remaining JSON metadata have different
+        // lifetimes. Move credit for those strings to workspace before dropping
+        // the obsolete parts of the original decoded object.
         let ordinary_work = row_work.json.take_workspace(retained_workspace(&row));
         row_work.merge_workspace(ordinary_work);
+        // The remaining input tree contains fields that did not move to the row.
+        // Drop it while its reservation still exists, leaving only the separately
+        // accounted native fields and optional retained metadata.
         drop(value);
+        // Reconcile the retained metadata against its final shape. Unused row
+        // fields have already dropped. For a row with no remaining JSON value,
+        // release the parser's residual JSON credit in full.
         if let Some((value, kind)) = retained_json(&row) {
             value
                 .reconcile_retained_in(kind, &mut row_work.json)
@@ -1816,6 +2580,9 @@ fn visit_jsonl_rows_in<T>(
         } else {
             row_work.json.retain(0);
         }
+        // Deliver the typed row, its original line and its reservation together.
+        // The first callback failure ends the visit. Preserve any more specific
+        // path or line that nested validation already supplied.
         consume(line_number, row, row_work)
             .map_err(|err| with_jsonl_location(err, path, line_number))?;
     }
@@ -1823,6 +2590,8 @@ fn visit_jsonl_rows_in<T>(
 }
 
 pub(crate) fn with_jsonl_location(err: Error, path: &Path, line: usize) -> Error {
+    // Many lower-level validations already identify a file or line. Add only the
+    // missing coordinates so a nested failure never loses its more precise origin.
     let has_path = err.detail().iter().any(|(key, _)| key == "path");
     let has_line = err.detail().iter().any(|(key, _)| key == "line");
     let mut located = err;
@@ -1836,6 +2605,9 @@ pub(crate) fn with_jsonl_location(err: Error, path: &Path, line: usize) -> Error
 }
 
 fn merge_insert_summary(summary: &mut ImportSummary, inserted: InsertSummary) {
+    // Merge each record kind independently. Manifest work can commit several
+    // batches, and accumulating component counts keeps a document replacement
+    // distinct from any child rows skipped or written with it.
     summary.documents_inserted += inserted.documents_inserted;
     summary.chunks_inserted += inserted.chunks_inserted;
     summary.embeddings_inserted += inserted.embeddings_inserted;

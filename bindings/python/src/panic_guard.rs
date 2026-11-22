@@ -4,6 +4,9 @@ use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Once;
 
+// A panic hook runs before catch_unwind returns. Mark only the OS thread currently
+// crossing a guarded boundary; an unrelated Rust thread still needs its ordinary
+// panic reporting.
 thread_local! {
     static GUARDED: Cell<usize> = const { Cell::new(0) };
 }
@@ -13,6 +16,8 @@ thread_local! {
 pub(crate) fn install() {
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
+        // A single installation avoids wrapping the same process-wide hook again
+        // on later module initializations.
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if !GUARDED.with(|depth| depth.get() > 0) {
@@ -22,6 +27,8 @@ pub(crate) fn install() {
     });
 }
 
+// One guard balances one nesting increment. Its destructor restores the previous
+// depth even when the guarded closure unwinds through its own local destructors.
 struct Guard;
 impl Drop for Guard {
     fn drop(&mut self) {
@@ -30,8 +37,14 @@ impl Drop for Guard {
 }
 
 pub(crate) fn catch<T>(run: impl FnOnce() -> T) -> std::thread::Result<T> {
+    // Track nesting on this thread because an extension operation can enter another
+    // guarded helper. The hook resumes forwarding panics to the host only when the
+    // last guard on that thread leaves.
     GUARDED.with(|depth| depth.set(depth.get() + 1));
     let guard = Guard;
+    // Catch the unwind without requiring every PyO3 or native value captured by
+    // the caller to implement UnwindSafe. Callers determine how to quarantine an
+    // affected owner or translate the panic after this function returns.
     let result = catch_unwind(AssertUnwindSafe(run));
     drop(guard);
     result

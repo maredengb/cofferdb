@@ -106,7 +106,6 @@ jobs:
           python-version: ${{ env.PYTHON_314 }}
           architecture: ${{ matrix.python_arch }}
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        if: matrix.runner_arch == 'X64'
         with:
           name: cofferdb-014-old-database
           path: ${{ runner.temp }}/cofferdb-old-database
@@ -123,9 +122,7 @@ jobs:
           test "$RUNNER_ARCH" = "$EXPECTED_ARCH"
           work="$RUNNER_TEMP/cofferdb-mac-release"
           mkdir -m 700 "$work"
-          options=()
           if [[ "$EXPECTED_ARCH" == X64 ]]; then
-            options+=(--fixture "$RUNNER_TEMP/cofferdb-old-database")
             export CARGO_ENCODED_RUSTFLAGS=$'-C\x1ftarget-cpu=x86-64'
           fi
           echo build-inputs >"$work/stage"
@@ -134,7 +131,7 @@ jobs:
             "$PY312" -I -B tools/ci/release_wheel.py build "$work" --repo "$PWD" \
               --arch "$EXPECTED_ARCH" --commit "$SOURCE_SHA" \
               --python "$PY312" "$PY313" "$PY314" \
-              --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314" "${options[@]}"
+              --versions "$PYTHON_312" "$PYTHON_313" "$PYTHON_314" --fixture "$RUNNER_TEMP/cofferdb-old-database"
           ) >"$work/private.log" 2>&1; then
             read -r stage abi <"$work/stage"
             case "$stage" in
@@ -151,11 +148,11 @@ jobs:
           echo "All three macOS $WHEEL_ARCH wheel installations passed"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-macos-${{ matrix.wheel_arch }}
+          name: cofferdb-020-macos-${{ matrix.wheel_arch }}
           path: |
-            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.5-cp312-cp312-macosx_15_0_${{ matrix.wheel_arch }}.whl
-            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.5-cp313-cp313-macosx_15_0_${{ matrix.wheel_arch }}.whl
-            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.1.5-cp314-cp314-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.2.0-cp312-cp312-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.2.0-cp313-cp313-macosx_15_0_${{ matrix.wheel_arch }}.whl
+            ${{ runner.temp }}/cofferdb-mac-release/release-wheels/cofferdb-0.2.0-cp314-cp314-macosx_15_0_${{ matrix.wheel_arch }}.whl
             ${{ runner.temp }}/cofferdb-mac-release/release-wheels/SHA256SUMS
             ${{ runner.temp }}/cofferdb-mac-release/release-wheels/result.json
           if-no-files-found: error
@@ -187,7 +184,7 @@ jobs:
           path: ${{ runner.temp }}/cofferdb-snapshot
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: cofferdb-015-macos-x86_64
+          name: cofferdb-020-macos-x86_64
           path: ${{ runner.temp }}/cofferdb-intel-wheels
       - name: Restore the standalone snapshot
         shell: bash
@@ -227,7 +224,7 @@ jobs:
           echo 'Standalone snapshot restoration passed on all three Intel interpreters'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-intel-snapshot-acceptance
+          name: cofferdb-020-intel-snapshot-acceptance
           path: ${{ runner.temp }}/cofferdb-intel-restore/verified/restore.json
           if-no-files-found: error
 
@@ -242,6 +239,10 @@ jobs:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
           submodules: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: cofferdb-014-old-database
+          path: ${{ runner.temp }}/cofferdb-old-database
       - name: Build and verify the source crate, CLI and standalone restore
         shell: bash
         run: |
@@ -249,16 +250,16 @@ jobs:
           mkdir -m 700 "$work"
           if ! (
             rustup toolchain install 1.97.1 --profile minimal &&
-            python3 -I -B tools/ci/release_wheel.py crate "$work" --repo "$PWD" --commit "$SOURCE_SHA"
+            python3 -I -B tools/ci/release_wheel.py crate "$work" --repo "$PWD" --commit "$SOURCE_SHA" --fixture "$RUNNER_TEMP/cofferdb-old-database"
           ) >"$work/private.log" 2>&1; then
             echo '::error::ARM64 crate or CLI verification failed'
             exit 1
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-crate
+          name: cofferdb-020-crate
           path: |
-            ${{ runner.temp }}/cofferdb-crate/release-crate/cofferdb-0.1.5.crate
+            ${{ runner.temp }}/cofferdb-crate/release-crate/cofferdb-0.2.0.crate
             ${{ runner.temp }}/cofferdb-crate/release-crate/result.json
           if-no-files-found: error
 
@@ -284,7 +285,6 @@ jobs:
           persist-credentials: false
           submodules: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        if: matrix.arch == 'ARM64'
         with:
           name: cofferdb-014-old-database
           path: ${{ runner.temp }}/cofferdb-old-database
@@ -298,10 +298,8 @@ jobs:
           test "$(uname -m)" = "$MACHINE"
           work="$RUNNER_TEMP/cofferdb-linux"
           mkdir -p "$work/build" "$work/accept"
-          fixture=()
           if [[ "$RUNNER_ARCH" == ARM64 ]]; then
             export RELEASE_IMAGE="$ARM64_IMAGE"
-            fixture=(-v "$RUNNER_TEMP/cofferdb-old-database:/fixture:ro")
           else
             export RELEASE_IMAGE="$X64_IMAGE"
           fi
@@ -312,18 +310,18 @@ jobs:
             echo '::error::Native manylinux build failed'
             exit 1
           fi
-          if ! docker run "${common[@]}" "${fixture[@]}" -v "$work/build/transfer:/build-input:ro" \
+          if ! docker run "${common[@]}" -v "$RUNNER_TEMP/cofferdb-old-database:/fixture:ro" -v "$work/build/transfer:/build-input:ro" \
               -v "$work/accept:/work" "$RELEASE_IMAGE" bash /src/tools/ci/linux_release.sh accept >"$work/accept.log" 2>&1; then
             echo '::error::Native manylinux installation or compatibility verification failed'
             exit 1
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-linux-${{ matrix.machine }}
+          name: cofferdb-020-linux-${{ matrix.machine }}
           path: |
-            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.1.5-cp312-cp312-manylinux_2_28_${{ matrix.machine }}.whl
-            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.1.5-cp313-cp313-manylinux_2_28_${{ matrix.machine }}.whl
-            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.1.5-cp314-cp314-manylinux_2_28_${{ matrix.machine }}.whl
+            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.2.0-cp312-cp312-manylinux_2_28_${{ matrix.machine }}.whl
+            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.2.0-cp313-cp313-manylinux_2_28_${{ matrix.machine }}.whl
+            ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/cofferdb-0.2.0-cp314-cp314-manylinux_2_28_${{ matrix.machine }}.whl
             ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/SHA256SUMS
             ${{ runner.temp }}/cofferdb-linux/accept/release-wheels/result.json
           if-no-files-found: error
@@ -340,7 +338,7 @@ jobs:
           path: ${{ runner.temp }}/cofferdb-snapshot
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: cofferdb-015-linux-aarch64
+          name: cofferdb-020-linux-aarch64
           path: ${{ runner.temp }}/cofferdb-wheels
       - name: Restore the standalone snapshot on three ARM64 interpreters
         shell: bash
@@ -370,7 +368,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-arm-snapshot-acceptance
+          name: cofferdb-020-arm-snapshot-acceptance
           path: ${{ runner.temp }}/cofferdb-restore/results/verified/restore.json
           if-no-files-found: error
 
@@ -400,6 +398,6 @@ jobs:
           echo 'Verified the source crate, twelve wheels and both standalone restorations'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: cofferdb-015-checksums
+          name: cofferdb-020-checksums
           path: ${{ runner.temp }}/SHA256SUMS
           if-no-files-found: error

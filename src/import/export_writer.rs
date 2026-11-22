@@ -10,11 +10,25 @@ use crate::json::{
 use crate::temporary::{TempFileGuard, TemporaryFile};
 use crate::{Error, Result};
 
+// Disk credit is the unused part of the temporary file's reservation. Bytes
+// accepted by this writer stay charged to that file. At a row boundary other
+// writers may use the unused credit; after an ambiguous partial write the
+// reservation belongs to cleanup until the temporary file is removed.
 pub(super) struct ExportWriter<'a, W: Write = TemporaryFile> {
+    // Buffered stream that hashes the bytes accepted by the underlying destination.
+    // Optional so it can be taken apart without an implicit second flush on error.
     output: Option<BufWriter<Sha256Writer<W>>>,
+    // Memory charge for the output buffer, released only after the buffered stream
+    // is dismantled.
     buffer_work: WorkspaceReservation,
+    // Borrowed cleanup guard for the staged file. Accepted data keeps its disk
+    // charge on the guard after the writer is finished.
     temporary: &'a mut TempFileGuard,
+    // Original budget refusal saved across the std::io::Write interface so the
+    // caller receives the structured database error.
     budget_error: Option<Error>,
+    // Unused portion of a larger disk grant. Charge accepted bytes against it and
+    // return the remainder at row boundaries.
     disk_credit: u64,
 }
 
@@ -25,9 +39,14 @@ impl<'a, W: Write> ExportWriter<'a, W> {
         preferred_buffer_bytes: usize,
         context: &JsonOperationContext,
     ) -> Result<Self> {
+        // Request the output buffer with a zero minimum. A writer can still stream
+        // when mandatory export work leaves little or no workspace for buffering.
         let mut buffer_work = context.workspace_reservation();
         let capacity = buffer_work.grow_to(0, preferred_buffer_bytes, "operation_scratch")?;
         Ok(Self {
+            // Hash below the buffer, where writes report how many bytes the
+            // destination accepted. Bytes waiting in BufWriter therefore reach the
+            // hash in the same order as the file.
             output: Some(BufWriter::with_capacity(capacity, Sha256Writer::new(file))),
             buffer_work,
             temporary,
@@ -41,6 +60,9 @@ impl<'a, W: Write> ExportWriter<'a, W> {
         fields: [(&str, JsonFieldValue<'_>); N],
         context: &JsonOperationContext,
     ) -> Result<()> {
+        // The JSON writer has a generic Write interface. Finish its row through
+        // checked so the database's structured disk-limit error survives the I/O
+        // adapter.
         let result = write_validated_jsonl_fields(self, fields, context);
         self.checked(result)
     }
@@ -49,6 +71,9 @@ impl<'a, W: Write> ExportWriter<'a, W> {
         // Return unused preferred capacity at row boundaries so other files can use it.
         self.temporary.release_disk(self.disk_credit);
         self.disk_credit = 0;
+        // Take the saved refusal exactly once. If there was no disk-budget
+        // failure, preserve the caller's result, including any JSON validation or
+        // underlying write error.
         match self.budget_error.take() {
             Some(error) => Err(error),
             None => result,
@@ -56,26 +81,42 @@ impl<'a, W: Write> ExportWriter<'a, W> {
     }
 
     pub(super) fn finish(mut self) -> Result<String> {
+        // Settle any outstanding disk credit before extracting the hashing writer.
+        // An unreported budget failure must prevent the temporary artifact from
+        // receiving a successful digest.
         self.checked(Ok(()))?;
         Ok(self.take_unbuffered()?.finish()?)
     }
 
     pub(super) fn disable_buffering(&mut self) -> Result<bool> {
+        // A zero-capacity writer already operates directly. Report whether this
+        // call changed the state so the caller can decide if retrying failed
+        // workspace admission could help.
         if self.output.as_ref().unwrap().capacity() == 0 {
             return Ok(false);
         }
+        // Drain accepted bytes through the existing hasher before replacing the
+        // buffer. Starting with a new hash on the same file would lose its already
+        // written prefix.
         let output = self.take_unbuffered()?;
         self.output = Some(BufWriter::with_capacity(0, output));
         Ok(true)
     }
 
     fn take_unbuffered(&mut self) -> Result<Sha256Writer<W>> {
+        // Take ownership of BufWriter during the transition so an error path can
+        // dismantle it explicitly. The wrapper's Drop will then have no second
+        // buffered object to flush.
         match self.output.take().unwrap().into_inner() {
             Ok(output) => {
                 self.buffer_work.retain(0);
                 Ok(output)
             }
             Err(error) => {
+                // A failed flush may have committed part of its buffer. Extract
+                // and destroy the remainder before releasing its workspace, and
+                // propagate the original I/O error without replaying any pending
+                // bytes.
                 let (error, buffer) = error.into_parts();
                 // Destroy pending bytes without a second write from BufWriter::drop.
                 drop(buffer.into_parts());
@@ -88,10 +129,16 @@ impl<'a, W: Write> ExportWriter<'a, W> {
 
 impl<W: Write> Drop for ExportWriter<'_, W> {
     fn drop(&mut self) {
+        // Dropping an unfinished writer abandons its staged output. Dismantle the
+        // BufWriter without flushing so an error return cannot trigger another
+        // write from its destructor.
         if let Some(output) = self.output.take() {
             drop(output.into_parts());
         }
         self.buffer_work.retain(0);
+        // Return only unused disk credit. Accepted bytes stay with the temporary
+        // file's cleanup guard, including conservative charges retained after an
+        // uncertain write failure.
         self.temporary.release_disk(self.disk_credit);
         self.disk_credit = 0;
     }
@@ -105,12 +152,24 @@ pub(super) fn retry_after_buffer_reclaim<W: Write, T>(
     mut operation: impl FnMut(&mut [&mut ExportWriter<'_, W>]) -> Result<T>,
 ) -> Result<T> {
     match operation(writers) {
+        // Only a memory-budget refusal can be relieved by dropping output buffers
+        // or an optional cache. Disk admission and underlying write errors keep
+        // their original failure path.
         Err(error) if is_memory_budget_error(&error) => {
             let mut released = false;
+            // Several artifact writers may hold buffers while this one row is
+            // prepared. Try every writer, even after one releases space, so the
+            // single retry can use their combined headroom.
             for writer in writers.iter_mut() {
                 released |= writer.disable_buffering()?;
             }
+            // The reclaim callback may also shed database cache, even when there
+            // are no artifact writers left. Manifest preparation uses that case
+            // after all three data streams have finished.
             released |= reclaim();
+            // A retry requires an actual release. With no available buffer or
+            // reclaimable cache, preserve the first refusal. The second attempt,
+            // if any, returns its own result directly.
             if released {
                 operation(writers)
             } else {
@@ -124,6 +183,9 @@ pub(super) fn retry_after_buffer_reclaim<W: Write, T>(
 impl<W: Write> Write for ExportWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let requested = bytes.len() as u64;
+        // The writer may still have unused credit from a previous grant. Request
+        // only the shortfall for this slice, letting a larger grant cover
+        // subsequent small writes to the same file.
         if requested > self.disk_credit {
             let minimum = requested - self.disk_credit;
             match self
@@ -132,6 +194,10 @@ impl<W: Write> Write for ExportWriter<'_, W> {
             {
                 Ok(granted) => self.disk_credit += granted,
                 Err(error) => {
+                    // The Write trait can return only an I/O error. Save the
+                    // structured temporary-disk refusal before returning the
+                    // adapter error so the export's checked path can recover its
+                    // details.
                     self.budget_error = Some(error);
                     return Err(std::io::Error::other("export staging budget exhausted"));
                 }
@@ -139,12 +205,18 @@ impl<W: Write> Write for ExportWriter<'_, W> {
         }
         match self.output.as_mut().unwrap().write(bytes) {
             Ok(written) => {
+                // A partial success consumes credit only for the prefix accepted
+                // by BufWriter. Charge those bytes even if they are still buffered
+                // in memory on their way to the temporary file.
                 self.disk_credit -= written as u64;
                 Ok(written)
             }
             Err(error) => {
                 // A buffered write can fail after partially writing to the file. Keep
                 // its reservation until cleanup rather than guessing the physical length.
+                // Clear unused-credit bookkeeping on an ambiguous error. The guard
+                // still holds the disk grant and later cleanup can release it when
+                // the potentially partial file is removed.
                 self.disk_credit = 0;
                 Err(error)
             }

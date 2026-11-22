@@ -18,16 +18,26 @@ thread_local! {
 /// The immutable tokenizer identity shared by storage, import and query outputs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum TokenizerConfig {
+    /// The built-in `default_en` tokenizer, version `0.1`.
     #[default]
     DefaultEn,
 }
 
 impl TokenizerConfig {
+    /// Return the built-in tokenizer identity used by default.
     pub fn default_en() -> Self {
         Self::DefaultEn
     }
 
+    /// Resolve the case-sensitive tokenizer name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidJsonlSchema` for any name other than `default_en`.
     pub fn from_name(name: &str) -> Result<Self> {
+        // The CLI's short name selects the complete built-in identity. Accept only
+        // its exact spelling so an unknown profile cannot silently create a
+        // collection with different indexing rules.
         match name {
             "default_en" => Ok(Self::DefaultEn),
             _ => Err(
@@ -37,12 +47,20 @@ impl TokenizerConfig {
         }
     }
 
+    /// Return the complete immutable tokenizer identity, including version and configuration.
     pub fn to_json(&self) -> JsonValue {
+        // The public DTO uses the same identity builder as operation-budgeted
+        // output. Host construction takes no operation reservation, which is why
+        // this convenience call can unwrap the builder result.
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // These values form the identity checked when a stored or imported
+        // collection is reopened. Changing a spelling changes the accepted
+        // identity even if the tokenizer implementation still emits the same
+        // terms.
         builder.object([
             ("name", builder.string("default_en")?),
             ("version", builder.string("0.1")?),
@@ -50,6 +68,9 @@ impl TokenizerConfig {
             ("language_hint", builder.string("en")?),
             (
                 "config",
+                // Keep normalization and stop-word settings in the nested config
+                // object. Identity comparison checks the entire value, so moving
+                // one of these settings to the top level changes compatibility.
                 builder.object([
                     ("case_fold", builder.string("lower")?),
                     ("split", builder.string("unicode_punctuation")?),
@@ -59,7 +80,16 @@ impl TokenizerConfig {
         ])
     }
 
+    /// Validate the complete built-in tokenizer identity returned by [Self::to_json].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, additional or changed fields, or when the
+    /// input exceeds the collection configuration limits.
     pub fn from_json(value: &JsonValue) -> Result<Self> {
+        // Apply collection-configuration JSON limits before comparing this
+        // untrusted tree with the small built-in value. Limit errors keep their
+        // original kind and identify the tokenizer field.
         value
             .validate_kind(crate::json::JsonInputKind::CollectionConfig)
             .map_err(|err| err.with_detail("field", "tokenizer"))?;
@@ -70,6 +100,9 @@ impl TokenizerConfig {
         value: &JsonValue,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Self> {
+        // The caller has already checked the input limits. Allocate the reference
+        // identity under that same operation's collection-config budget and
+        // release its temporary storage after comparison.
         let mut work = context.reservation();
         let builder =
             JsonBuilder::budgeted(&mut work, crate::json::JsonInputKind::CollectionConfig);
@@ -78,6 +111,9 @@ impl TokenizerConfig {
     }
 
     fn compare_identity(value: &JsonValue, expected: &JsonValue) -> Result<Self> {
+        // Compare structured JSON values. Object key order is immaterial, but a
+        // changed nested option or an additional field names a different tokenizer
+        // and must fail the same identity check.
         if value != expected {
             return Err(Error::new(
                 ErrorCode::InvalidJsonlSchema,
@@ -90,6 +126,9 @@ impl TokenizerConfig {
     }
 }
 
+// This list is part of the versioned default_en token stream. Changing it can
+// alter stored document frequencies and query terms even though the full identity
+// object names the list with a single string.
 pub const STOP_WORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on",
     "or", "that", "the", "this", "to", "was", "were", "with",
@@ -134,6 +173,9 @@ pub(crate) fn query_tokens(input: &str) -> impl Iterator<Item = Cow<'_, str>> + 
         .filter_map(normalized_token)
 }
 
+// Keep underscores in the outer symbol so a code identifier can be offered as a
+// whole. Its components are derived separately below, after this Unicode
+// alphanumeric scan.
 fn symbols(input: &str) -> impl Iterator<Item = &str> {
     input
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
@@ -178,9 +220,15 @@ fn normalized_token(token: &str) -> Option<Cow<'_, str>> {
 
 fn symbol_parts(symbol: &str) -> impl Iterator<Item = &str> {
     symbol
+        // Discard empty components from leading, trailing or repeated underscores.
+        // Only nonempty pieces reach the iterator that consumes the first
+        // character unconditionally.
         .split('_')
         .filter(|part| !part.is_empty())
         .flat_map(|part| {
+            // char_indices yields valid UTF-8 byte offsets while the case tests
+            // operate on Unicode characters. Using character counts as slice
+            // offsets would split multibyte input incorrectly.
             let mut chars = part.char_indices().peekable();
             let mut previous = chars.next().expect("nonempty symbol part").1;
             let mut start = 0;
@@ -189,10 +237,16 @@ fn symbol_parts(symbol: &str) -> impl Iterator<Item = &str> {
                     return None;
                 }
                 while let Some((offset, current)) = chars.next() {
+                    // A lowercase-to-uppercase transition starts a new word.
+                    // Inside a run of capitals, look ahead for a lowercase letter
+                    // so XMLParser splits at P and keeps XML together.
                     let boundary = (previous.is_lowercase() && current.is_uppercase())
                         || (previous.is_uppercase()
                             && current.is_uppercase()
                             && chars.peek().is_some_and(|(_, ch)| ch.is_lowercase()));
+                    // Advance the preceding character before yielding the slice.
+                    // The boundary character starts the next piece, and its case
+                    // must remain available when that iterator resumes.
                     previous = current;
                     if boundary {
                         let token = &part[start..offset];
@@ -200,6 +254,9 @@ fn symbol_parts(symbol: &str) -> impl Iterator<Item = &str> {
                         return Some(token);
                     }
                 }
+                // Once no more boundaries remain, emit the borrowed suffix exactly
+                // once. Marking the byte end as the next start makes subsequent
+                // iterator calls return None.
                 let token = &part[start..];
                 start = part.len();
                 Some(token)

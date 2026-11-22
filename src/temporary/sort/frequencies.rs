@@ -8,17 +8,35 @@ use std::cmp::Ordering;
 use std::path::Path;
 use std::sync::Arc;
 
+// The target limits how much unsummed input normally stays in a batch. One term
+// can exceed it and still make progress when the operation ledger admits the
+// required storage.
 const PREFERRED_BATCH_BYTES: usize = 64 * 1024;
 
 // Unlike reference validation, summation needs neither lookup pages nor a fixed
 // workspace floor. Runs share the existing codec, file owners and disk ledger.
 pub(crate) struct ExternalTermFrequencies<'a> {
+    // Borrowed directory in which this operation creates temporary runs when the
+    // in-memory term batch spills.
     directory: &'a Path,
+    // Disk budget shared by all spill files, including both merge inputs and their
+    // unfinished output.
     disk: Arc<TemporaryDiskBudget>,
+    // Pending byte keys and their occurrence counts. A batch may contain several
+    // entries for a term until combination sums them.
     entries: Vec<Entry>,
+    // Sum of the heap capacities of all pending keys in bytes. Compacting duplicate
+    // terms recalculates it after dropping redundant keys.
     key_bytes: usize,
+    // One sorted, locally combined run per occupied level. Equal terms can still
+    // occur in different levels until the final merge.
     levels: [Option<Run>; 64],
+    // A consuming push, spill or finish leaves this set on error, since resuming
+    // could lose or double-count occurrences.
     failed: bool,
+    // Workspace credit for the resident entry array and its keys, also used to
+    // admit allocation overlap during growth. I/O buffers and merge heads have
+    // separate reservations.
     work: WorkspaceReservation,
 }
 
@@ -28,6 +46,9 @@ impl<'a> ExternalTermFrequencies<'a> {
         disk: Arc<TemporaryDiskBudget>,
         context: &JsonOperationContext,
     ) -> Self {
+        // Constructing an empty accumulator borrows the caller's directory and
+        // takes no disk space. Its workspace starts at zero, leaving memory
+        // available until the first distinct term arrives.
         Self {
             directory,
             disk,
@@ -41,11 +62,20 @@ impl<'a> ExternalTermFrequencies<'a> {
 
     pub(crate) fn push(&mut self, parts: &[&[u8]], value: u64) -> Result<()> {
         self.check_healthy()?;
+        // Combining and spilling can consume entries before a later allocation, sum
+        // or write fails. Leave the sorter failed on that path. Retrying the push as
+        // if the original batch were intact could lose or double-count occurrences.
         self.failed = true;
+        // Count all component bytes before touching a frequency. Both the native
+        // concatenation size and the four-byte length used in a spill entry must
+        // be representable, including for a key that can be counted in place.
         let length = parts.iter().try_fold(0usize, |length, part| {
             length.checked_add(part.len()).ok_or_else(invalid_run)
         })?;
         u32::try_from(length).map_err(|_| invalid_run())?;
+        // Adjacent repetitions can be folded straight into the last count.
+        // Comparing slices with the stored bytes avoids allocating another
+        // concatenated key on this path.
         if let Some(entry) = self
             .entries
             .last_mut()
@@ -53,10 +83,16 @@ impl<'a> ExternalTermFrequencies<'a> {
         {
             entry.value = sum(entry.value, value)?;
         } else {
+            // Consider compacting a nonempty batch before crossing the preferred
+            // size. Spilling an empty batch would make no room for an unusually
+            // long first key.
             if !self.entries.is_empty()
                 && self.batch_bytes_with(length) > PREFERRED_BATCH_BYTES as u128
             {
                 self.combine_batch()?;
+                // Combination sorts the old entries and removes duplicate keys.
+                // The incoming key may now match anywhere in the retained batch,
+                // so fold it there without another slot or disk write.
                 if let Some(entry) = self
                     .entries
                     .iter_mut()
@@ -66,19 +102,33 @@ impl<'a> ExternalTermFrequencies<'a> {
                     self.failed = false;
                     return Ok(());
                 }
+                // Recalculate the projected size after duplicate keys have been
+                // freed. Spill only when the compacted batch still cannot meet the
+                // preference with this term included.
                 if self.batch_bytes_with(length) > PREFERRED_BATCH_BYTES as u128 {
                     self.spill_inner()?;
                 }
             }
+            // Try to make room without creating a run: combining duplicate keys may
+            // free both slots and key storage. Spill and retry only for a memory
+            // refusal; an invalid sum or an I/O failure cannot be fixed by using a
+            // smaller batch.
             if let Err(error) = self.insert(parts, length, value) {
                 if !is_memory_budget_error(&error) {
                     return Err(error);
                 }
+                // An empty vector can still own slots from an earlier batch. Retry
+                // insertion only if releasing that array actually returned some
+                // credit. With nothing to release there is no smaller in-memory
+                // state to try.
                 if self.entries.is_empty() {
                     if !self.release_empty_capacity() {
                         return Err(error);
                     }
                     self.insert(parts, length, value)?;
+                // Under memory pressure, try the same reduction even for a batch
+                // below its preferred size. Looking up the incoming key after
+                // combination may remove the need for a new allocation altogether.
                 } else {
                     self.combine_batch()?;
                     if let Some(entry) = self
@@ -87,6 +137,8 @@ impl<'a> ExternalTermFrequencies<'a> {
                         .find(|entry| key_matches(&entry.key, parts))
                     {
                         entry.value = sum(entry.value, value)?;
+                    // Propagate other errors from this allocation attempt
+                    // directly.
                     } else if let Err(error) = self.insert(parts, length, value) {
                         if !is_memory_budget_error(&error) {
                             return Err(error);
@@ -97,6 +149,9 @@ impl<'a> ExternalTermFrequencies<'a> {
                 }
             }
         }
+        // Reopen the accumulator only after the new contribution is represented
+        // exactly once, either in an old count or in a new entry. All fallible
+        // exits above keep it unavailable.
         self.failed = false;
         Ok(())
     }
@@ -104,6 +159,9 @@ impl<'a> ExternalTermFrequencies<'a> {
     fn batch_bytes_with(&self, length: usize) -> u128 {
         self.key_bytes as u128
             + length as u128
+            // Include unused slots already allocated to the batch, or one new slot
+            // if the array is full. This predicts the next batch size separately
+            // from the peak of replacing the slot array.
             + self.entries.capacity().max(self.entries.len() + 1) as u128
                 * std::mem::size_of::<Entry>() as u128
     }
@@ -112,7 +170,13 @@ impl<'a> ExternalTermFrequencies<'a> {
         let slot = std::mem::size_of::<Entry>();
         let old = self.entries.capacity();
         let growing = self.entries.len() == old;
+        // With spare capacity the resident slot array can accept this entry in
+        // place. Only a full array requires a separate replacement large enough
+        // for all old entries and the incoming one.
         let minimum_slots = if growing { self.entries.len() + 1 } else { 0 };
+        // Prefer geometric growth within the batch target to amortize slot
+        // allocation. A required extra entry establishes a floor even if that
+        // target is already full.
         let preferred_slots = if growing {
             old.saturating_mul(2)
                 .max(4)
@@ -122,9 +186,15 @@ impl<'a> ExternalTermFrequencies<'a> {
         };
         // During array growth old and new backing allocations coexist.
         let old_bytes = old as u128 * slot as u128;
+        // During growth the new slots overlap first with the old slots and later
+        // with the incoming key. The old slots are freed before that key is
+        // allocated, so reserve the larger of those two overlaps.
         let overlap = if growing {
             old_bytes.max(length as u128)
         } else {
+            // Appending in place keeps the slot array resident while allocating
+            // the key. Both belong in the minimum even though no replacement slots
+            // are requested.
             old_bytes + length as u128
         };
         let base = self.key_bytes as u128 + overlap;
@@ -134,26 +204,39 @@ impl<'a> ExternalTermFrequencies<'a> {
             "operation_scratch",
         )?;
         if growing {
+            // Derive the number of new slots from the actual grant. Any bytes left
+            // after dividing by the slot width cannot fund another entry.
             let capacity = ((granted as u128 - base) / slot as u128) as usize;
             let mut replacement = Vec::new();
             replacement
                 .try_reserve_exact(capacity)
                 .map_err(allocation_error)?;
+            // Keep the observed allocation within the admitted slot capacity. An
+            // allocator mismatch is an I/O error and must not be retried by
+            // spilling a batch.
             if replacement.capacity() != capacity {
                 return Err(std::io::Error::other("sort batch exceeds admitted capacity").into());
             }
+            // Move entries so each existing key keeps its own heap buffer.
+            // Replacing the drained vector then frees the old slot storage before
+            // the incoming key is allocated.
             replacement.append(&mut self.entries);
             self.entries = replacement;
         }
         let mut key = Vec::new();
         key.try_reserve_exact(length).map_err(allocation_error)?;
         check_key_capacity(&key, length)?;
+        // Concatenate the caller's byte slices directly into the admitted buffer.
+        // Key equality uses this same byte sequence, independent of the number of
+        // slices.
         for part in parts {
             key.extend_from_slice(part);
         }
         self.key_bytes += key.capacity();
         self.entries.push(Entry {
             key,
+            // Frequency runs reuse the reference-sort header. They carry a checked
+            // count as the value and have no source-line position to retain.
             line: 0,
             value,
         });
@@ -161,6 +244,9 @@ impl<'a> ExternalTermFrequencies<'a> {
         Ok(())
     }
 
+    // Charge actual key capacities and the entire slot array, including any empty
+    // positions. A temporary grant for overlapping arrays must end when only the
+    // replacement is live.
     fn retain_batch(&mut self) {
         self.work
             .retain(self.key_bytes + self.entries.capacity() * std::mem::size_of::<Entry>());
@@ -172,6 +258,9 @@ impl<'a> ExternalTermFrequencies<'a> {
     }
 
     fn release_empty_capacity(&mut self) -> bool {
+        // An empty but reusable slot array can still tie up the bytes needed for
+        // the next key. Return true only if this call actually surrendered such
+        // storage.
         if !self.entries.is_empty() || self.entries.capacity() == 0 {
             return false;
         }
@@ -183,9 +272,15 @@ impl<'a> ExternalTermFrequencies<'a> {
     fn combine_batch(&mut self) -> Result<()> {
         self.entries
             .sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        // The prefix before count holds one combined entry per distinct sorted
+        // key. The read index scans the original length, so compaction needs no
+        // second array.
         let mut count = 0;
         for read in 0..self.entries.len() {
             if count != 0 && self.entries[count - 1].key == self.entries[read].key {
+                // Use the same checked addition as a cross-run merge. Silent
+                // wraparound here would make a term's total depend on where the
+                // batch happened to spill.
                 self.entries[count - 1].value =
                     sum(self.entries[count - 1].value, self.entries[read].value)?;
             } else {
@@ -193,6 +288,9 @@ impl<'a> ExternalTermFrequencies<'a> {
                 count += 1;
             }
         }
+        // Drop duplicate keys before recalculating live key capacity. Truncating
+        // preserves the slot array, which remains fully charged for subsequent
+        // insertions.
         self.entries.truncate(count);
         self.key_bytes = self.entries.iter().map(|entry| entry.key.capacity()).sum();
         self.retain_batch();
@@ -201,9 +299,14 @@ impl<'a> ExternalTermFrequencies<'a> {
 
     pub(crate) fn spill(&mut self) -> Result<bool> {
         self.check_healthy()?;
+        // Return false when there is no resident data to spill. Existing runs, if
+        // any, stay available to the final merge.
         if self.entries.is_empty() {
             return Ok(false);
         }
+        // Once a spill consumes entries or a previous level, retrying could omit
+        // their counts. Restore the healthy state only after the new run is safely
+        // placed.
         self.failed = true;
         self.spill_inner()?;
         self.failed = false;
@@ -219,6 +322,9 @@ impl<'a> ExternalTermFrequencies<'a> {
             self.work.context(),
             "operation_scratch",
         )?;
+        // Start with zero buffering. File management has its own workspace cost,
+        // so an optional I/O buffer must wait until the file exists and remaining
+        // headroom is known.
         Ok(RunWriter::from_file(file, guard, 0))
     }
 
@@ -226,18 +332,29 @@ impl<'a> ExternalTermFrequencies<'a> {
         self.combine_batch()?;
         let mut io = self.work.context().workspace_reservation();
         let mut output = self.writer()?;
+        // A zero grant is valid. Frequency aggregation can write directly to the
+        // file even when the current batch leaves no room for buffered I/O.
         let capacity = io.grow_to(0, IO_BYTES, "operation_scratch")?;
         output.enable_buffer(capacity)?;
         for entry in &self.entries {
             output.write_entry(entry)?;
         }
+        // Finish the run before releasing its buffer and replacing the entry
+        // array. The following binary merges need that headroom for their two
+        // input keys and a new output file.
         let mut run = output.finish()?;
         io.retain(0);
         self.entries = Vec::new();
         self.key_bytes = 0;
         self.work.retain(0);
+        // Keep at most one sorted run per level. When a level is occupied, merge its
+        // old run with the new one and carry the result to the next level. This
+        // keeps the number of open runs bounded as input grows.
         for level in 0..self.levels.len() {
             match self.levels[level].take() {
+                // An occupied level represents another set of already-combined
+                // batches. Merge both runs' counts before placing their result at
+                // the next level.
                 Some(previous) => run = self.merge(previous, run)?,
                 None => {
                     self.levels[level] = Some(run);
@@ -245,16 +362,25 @@ impl<'a> ExternalTermFrequencies<'a> {
                 }
             }
         }
+        // If the carry runs past every level, fail instead of silently discarding
+        // the remaining run and its terms.
         Err(Error::new(
             ErrorCode::FileFormatError,
             "term frequency run count overflow",
         ))
     }
 
+    // Merge two sorted frequency runs into one new run. Keep both input owners
+    // alive while writing so their disk usage remains charged even if writing the
+    // result fails.
     fn merge(&self, left: Run, right: Run) -> Result<Run> {
         let left_max = left.max_key;
         let right_max = right.max_key;
+        // The two heads are required even with unbuffered I/O. Size each to its
+        // own run and reuse it on advance, including when equal keys are summed.
         let mut heads = self.work.context().workspace_reservation();
+        // Use wide arithmetic for the sum of two potentially large key capacities.
+        // Admit both before allocating either head.
         heads.grow_to_wide(
             left_max as u128 + right_max as u128,
             left_max as u128 + right_max as u128,
@@ -263,26 +389,40 @@ impl<'a> ExternalTermFrequencies<'a> {
         let mut a = empty_head(left_max)?;
         let mut b = empty_head(right_max)?;
         let mut io = self.work.context().workspace_reservation();
+        // Start cursors and output with no I/O buffering. This leaves the two
+        // compulsory key slots covered before optional buffers compete for memory.
         let left = RunCursor::with_capacity(left, left_max, 0)?;
         let right = RunCursor::with_capacity(right, right_max, 0)?;
         let mut output = self.writer()?;
+        // Allow any grant down to zero for I/O buffering. Give capacity to the
+        // left reader, right reader and writer in that order, with at most one
+        // buffer-sized share each.
         let capacity = io.grow_to(0, 3 * IO_BYTES, "operation_scratch")?;
         let mut left = left.enable_buffer(capacity.min(IO_BYTES));
         let mut right = right.enable_buffer(capacity.saturating_sub(IO_BYTES).min(IO_BYTES));
         output.enable_buffer(capacity.saturating_sub(2 * IO_BYTES))?;
         let mut x = left.read_next(&mut a.key, true)?;
         let mut y = right.read_next(&mut b.key, true)?;
+        // The loop maintains one pending key per input. Once a cursor is
+        // exhausted, emit from the other until its own extent and checksum have
+        // also been checked.
         while x.is_some() || y.is_some() {
             let order = match (x, y) {
                 (Some(_), Some(_)) => a.key.cmp(&b.key),
                 (Some(_), None) => Ordering::Less,
                 _ => Ordering::Greater,
             };
+            // Both inputs contain at most one entry per key. Emit their checked sum
+            // once and advance both heads, preserving the same property in the
+            // merged output.
             if order == Ordering::Equal {
                 a.value = sum(x.unwrap().1, y.unwrap().1)?;
                 output.write_entry(&a)?;
                 x = left.read_next(&mut a.key, true)?;
                 y = right.read_next(&mut b.key, true)?;
+            // For distinct keys, advance only the input whose key was emitted.
+            // Keeping the other head unchanged preserves lexicographic order in
+            // the output.
             } else if order == Ordering::Less {
                 a.value = x.unwrap().1;
                 output.write_entry(&a)?;
@@ -293,6 +433,9 @@ impl<'a> ExternalTermFrequencies<'a> {
                 y = right.read_next(&mut b.key, true)?;
             }
         }
+        // Finish the output only after both readers returned verified exhaustion.
+        // A truncated or corrupt input leaves the partial output under temporary
+        // cleanup.
         output.finish()
     }
 
@@ -301,6 +444,9 @@ impl<'a> ExternalTermFrequencies<'a> {
         self.finish_batch(visit)
     }
 
+    // Visit one sorted total per key and reset the batch on success. Once
+    // visitation or consuming a run begins, a failure leaves this accumulator
+    // unusable.
     pub(crate) fn finish_batch(
         &mut self,
         mut visit: impl FnMut(&[u8], u64) -> Result<()>,
@@ -308,22 +454,35 @@ impl<'a> ExternalTermFrequencies<'a> {
         self.check_healthy()?;
         // A later checksum or visitor failure must not replay consumed entries.
         self.failed = true;
+        // With no spilled runs, combine duplicate keys in the existing vector and
+        // deliver it directly. Avoid opening a temporary file for an otherwise
+        // memory-only batch.
         if self.levels.iter().all(Option::is_none) {
             self.combine_batch()?;
             for entry in &self.entries {
                 visit(&entry.key, entry.value)?;
             }
+            // Drop key allocations after the final callback succeeds, keeping
+            // reusable vector slot capacity and its charge for another batch.
             self.entries.clear();
             self.key_bytes = 0;
             self.retain_batch();
             self.failed = false;
             return Ok(());
         }
+        // Spill residual entries before folding the levels. Their frequencies must
+        // participate in the same duplicate-key reduction as previous spills.
         if !self.entries.is_empty() {
             self.spill_inner()?;
         }
+        // Runs at different levels may still share keys. Merge them before starting
+        // the final visitor so each key reaches it once with the sum over every
+        // batch.
         let mut combined = None;
         for level in 0..self.levels.len() {
+            // Take each run as it is folded so the same extent cannot be consumed
+            // twice. A merge failure drops its partial output and leaves the
+            // failed flag set.
             if let Some(run) = self.levels[level].take() {
                 combined = Some(match combined {
                     Some(previous) => self.merge(previous, run)?,
@@ -332,12 +491,17 @@ impl<'a> ExternalTermFrequencies<'a> {
             }
         }
         if let Some(run) = combined {
+            // Admit one reusable key slot for the final pass. The visitor borrows
+            // the key only for the current call, then the cursor can overwrite it.
             let mut key_work = self.work.context().workspace_reservation();
             key_work.grow_to(run.max_key, run.max_key, "operation_scratch")?;
             let mut entry = empty_head(run.max_key)?;
             let mut io = self.work.context().workspace_reservation();
             let capacity = io.grow_to(0, IO_BYTES, "operation_scratch")?;
             let mut cursor = RunCursor::with_capacity(run, entry.key.capacity(), capacity)?;
+            // The visitor may already have consumed earlier keys when verification
+            // reaches a bad tail. The sticky failure flag prevents retrying a
+            // partially emitted batch.
             while let Some((_, value)) = cursor.read_next(&mut entry.key, true)? {
                 visit(&entry.key, value)?;
             }
@@ -346,6 +510,9 @@ impl<'a> ExternalTermFrequencies<'a> {
         Ok(())
     }
 
+    // Reject reuse after a failure that may have consumed inputs or called the
+    // visitor. Callers must discard the accumulator and choose how to handle any
+    // partial output.
     fn check_healthy(&self) -> Result<()> {
         if self.failed {
             Err(Error::new(
@@ -364,6 +531,8 @@ fn key_matches(key: &[u8], parts: &[&[u8]]) -> bool {
         .eq(parts.iter().flat_map(|part| part.iter().copied()))
 }
 
+// Allocate a head whose key can hold the run's largest entry. The caller owns the
+// workspace lease; this helper verifies allocation capacity before returning it.
 fn empty_head(capacity: usize) -> Result<Entry> {
     let mut key = Vec::new();
     key.try_reserve_exact(capacity).map_err(allocation_error)?;
@@ -375,6 +544,8 @@ fn empty_head(capacity: usize) -> Result<Entry> {
     })
 }
 
+// Reject frequency overflow in both batch reduction and run merging. Wrapping
+// would silently lower a high-frequency term's total.
 fn sum(left: u64, right: u64) -> Result<u64> {
     left.checked_add(right)
         .ok_or_else(|| Error::new(ErrorCode::FileFormatError, "text term frequency overflow"))

@@ -1,3 +1,6 @@
+//! Publish a benchmark result from a staged file while protecting the dataset
+//! inputs, measured database and writer lock. Check the destination during setup
+//! and again around the potentially lengthy write.
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -9,17 +12,29 @@ use crate::temporary::create_temporary_file_in;
 use crate::{Error, ErrorCode, Result};
 
 pub(super) struct BenchmarkOutput {
+    // Final output name under a canonicalized parent. Recheck it before publishing
+    // the report.
     path: PathBuf,
+    // Dataset inputs, measured database and lock path that the output must never
+    // alias.
     sources: Vec<PathBuf>,
 }
 
+// Resolve the parent even when the leaf does not exist. Keeping the final filename
+// separate allows a fresh result to be staged beside its eventual destination.
 fn destination_path(path: &Path) -> Result<PathBuf> {
+    // Require a filename before resolving the directory. A root path or a path
+    // ending in a parent-directory component cannot supply the leaf of a new
+    // output file.
     let name = path.file_name().ok_or_else(|| {
         Error::new(
             ErrorCode::IoError,
             "benchmark output must name a regular file",
         )
     })?;
+    // A bare filename has an empty parent in Path's representation. Resolve it
+    // against the current directory now so later checks agree on its absolute
+    // parent.
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -28,6 +43,9 @@ fn destination_path(path: &Path) -> Result<PathBuf> {
 }
 
 impl BenchmarkOutput {
+    // Start with the inputs discovered during dataset loading. The database and
+    // its writer lock need protection too, even when one of those paths has not
+    // yet been created.
     pub(super) fn new(path: &Path, database: &Path, mut inputs: Vec<PathBuf>) -> Result<Self> {
         inputs.push(database.to_path_buf());
         inputs.push(crate::lock::lock_path(database));
@@ -35,13 +53,22 @@ impl BenchmarkOutput {
             path: destination_path(path)?,
             sources: inputs,
         };
+        // Reject an alias while setting up the benchmark, before opening or
+        // modifying the measured database. The stored paths let the publisher
+        // repeat the same checks against the later filesystem state.
         output.validate()?;
         Ok(output)
     }
 
     fn validate(&self) -> Result<()> {
+        // Follow a live destination symlink for the initial type and identity
+        // checks. When following it reports NotFound, inspect the directory entry
+        // itself before assuming a fresh name is available.
         let output_metadata = match fs::metadata(&self.path) {
             Ok(metadata) => {
+                // Only an existing regular file is eligible for replacement.
+                // Directories and other file kinds cannot serve as a prior
+                // benchmark result.
                 if !metadata.is_file() {
                     return Err(Error::new(
                         ErrorCode::IoError,
@@ -51,6 +78,9 @@ impl BenchmarkOutput {
                 Some(metadata)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink also causes metadata to report NotFound. If a
+                // directory entry is still visible, reject it instead of treating
+                // the leaf as unused.
                 if fs::symlink_metadata(&self.path).is_ok() {
                     return Err(Error::new(
                         ErrorCode::PermissionDenied,
@@ -61,14 +91,23 @@ impl BenchmarkOutput {
             }
             Err(error) => return Err(error.into()),
         };
+        // For an existing file, use its resolved identity; otherwise keep the
+        // canonical parent plus requested filename. That second form works even
+        // before the measured database or its lock appears.
         let output_path = if output_metadata.is_some() {
             fs::canonicalize(&self.path)?
         } else {
             self.path.clone()
         };
+        // Canonical names catch paths reached through symlinks, including a future
+        // filename under an existing parent. On Unix, compare device and inode as
+        // well: a hard link can give the same input two different canonical names.
         for source in &self.sources {
             let source_path = match fs::canonicalize(source) {
                 Ok(path) => path,
+                // A protected source can legitimately be absent at setup. Resolve
+                // the parent and compare its intended filename so claiming that
+                // path for output still fails.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     destination_path(source)?
                 }
@@ -79,6 +118,10 @@ impl BenchmarkOutput {
             let same_file = {
                 use std::os::unix::fs::MetadataExt;
                 same_file
+                    // Only compare device and inode when metadata exists on both
+                    // sides. Two distinct names for the same regular file can have
+                    // identical identity even when canonicalization preserved both
+                    // spellings.
                     || match (&output_metadata, fs::metadata(source)) {
                         (Some(output), Ok(source)) => {
                             output.dev() == source.dev() && output.ino() == source.ino()
@@ -86,6 +129,8 @@ impl BenchmarkOutput {
                         _ => false,
                     }
             };
+            // A collision with any one protected source disqualifies the result
+            // path. Return before staging or replacing anything at that location.
             if same_file {
                 return Err(Error::new(
                     ErrorCode::PermissionDenied,
@@ -96,16 +141,25 @@ impl BenchmarkOutput {
         Ok(())
     }
 
+    // Stream the pretty JSON used for the execution journal's result digest. The
+    // formatter includes its final newline, so a consumer can hash the complete
+    // file and compare the two.
     pub(super) fn write(
         self,
         value: &JsonValue,
         context: &JsonOperationContext,
         retained: &mut JsonReservation,
     ) -> Result<()> {
+        // The report tree is already charged to retained. Reserve the buffered
+        // writer separately because its memory overlaps both the tree and the
+        // serializer's traversal workspace.
         let mut buffer_work = context.reservation();
         buffer_work.grow(8192, JsonInputKind::BenchmarkArtifact)?;
         self.write_with(|file| {
             let mut output = BufWriter::with_capacity(8192, file);
+            // Serialize directly to the staged file under the benchmark-artifact
+            // schema. Avoid building another full copy of a report that may
+            // already occupy much of the operation's budget.
             let result = value
                 .write_pretty_retained_in(
                     &mut output,
@@ -113,6 +167,9 @@ impl BenchmarkOutput {
                     context,
                     retained,
                 )
+                // Include flush in the write result. A successful traversal can
+                // still leave unwritten data in the buffer or encounter an I/O
+                // error when draining it.
                 .and_then(|()| output.flush().map_err(Error::from));
             // Do not retry buffered output after a failed serialization or flush.
             let _ = output.into_parts();
@@ -121,19 +178,33 @@ impl BenchmarkOutput {
     }
 
     fn write_with(self, write: impl FnOnce(&mut fs::File) -> Result<()>) -> Result<()> {
+        // Recheck the destination after the benchmark has run. Its relationship to
+        // the source files may have changed since the output object was first
+        // validated.
         self.validate()?;
         let parent = self
             .path
             .parent()
             .expect("output path has a canonical parent");
+        // Stage in the destination's parent so the final rename stays within one
+        // filesystem. The exclusively created file can be discarded after a
+        // serialization, sync or validation error.
         let (file, staged) = create_temporary_file_in(parent, "benchmark-result", "json")?;
         {
             // Close the handle before the cleanup guard removes it, including on unwind.
             let mut file = file;
             write(&mut file)?;
+            // Flush of the buffered writer transfers data to the file descriptor.
+            // Sync that file before moving its name into the public result
+            // location.
             file.sync_all()?;
         }
+        // A link may have been created while the staged result was being written.
+        // Check again before replacing a path that might now name an input.
         self.validate()?;
+        // Rename the synced file into place. One rename installs a new result or
+        // replaces the previous result without exposing a partially written JSON
+        // document.
         staged.persist(&self.path)
     }
 }

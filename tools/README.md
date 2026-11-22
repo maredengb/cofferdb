@@ -66,7 +66,7 @@ supervising long builds. An absent final manifest is not a complete build.
 Static inspection and a successful build do not prove installation on macOS 15
 or the declared minimum Linux distribution. Install and exercise the exact
 artifact in each actual target environment. See the
-[versioned installation guide](../docs/python-v0.1.5.md).
+[versioned installation guide](../docs/python.md).
 
 After building, exercise malformed source and artifact rejection paths without
 installing a package or loading its native extension:
@@ -74,7 +74,7 @@ installing a package or loading its native extension:
 ```sh
 python3.12 -B tools/check_python_builder.py /tmp/cofferdb-builder-checks \
   --source /tmp/cofferdb-prepared \
-  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.1.5-cp312-cp312-macosx_15_0_arm64.whl \
+  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.2.0-cp312-cp312-macosx_15_0_arm64.whl \
   --python /absolute/path/to/python3.12
 ```
 

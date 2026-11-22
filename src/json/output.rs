@@ -5,6 +5,9 @@ use crate::{Error, Result};
 // values have already been checked at their own roots before DTO construction.
 #[derive(Clone, Copy)]
 pub(crate) enum JsonOutputSchema {
+    // A value fixes the error category for its subtree. The other variants mark
+    // positions within library-built search and diagnostic envelopes until
+    // traversal reaches an individually validated business value.
     Value(JsonInputKind),
     SearchEnvelope,
     WhyNotEnvelope,
@@ -25,11 +28,17 @@ impl JsonOutputSchema {
     }
 
     pub(super) fn field(self, key: &str) -> Self {
+        // Interpret a member name together with the parent path. A user object
+        // with a key named expression must not be classified as a filter unless it
+        // is the expression of an actual filter-result wrapper.
         match (self, key) {
             (Self::SearchEnvelope, "result") => Self::Search,
             (Self::WhyNotEnvelope, "result") => Self::WhyNot,
             (Self::Search, "results") => Self::SearchItems,
             (Self::SearchItem, "explain") => Self::Explain,
+            // Search explanations place the filter under explain.filter, while a
+            // why-not report uses filter_result. Both carry the original predicate
+            // under expression and need the same classification there.
             (Self::Explain, "filter") | (Self::WhyNot, "filter_result") => Self::FilterResult,
             (Self::FilterResult, "expression") => Self::Value(JsonInputKind::Filter),
             _ => Self::Value(self.kind()),
@@ -38,12 +47,18 @@ impl JsonOutputSchema {
 
     pub(super) fn element(self) -> Self {
         match self {
+            // Only the results array gives its elements search-item structure.
+            // Unrelated arrays inherit the enclosing value kind even if their
+            // elements happen to contain fields named explain.
             Self::SearchItems => Self::SearchItem,
             _ => Self::Value(self.kind()),
         }
     }
 }
 
+// Budgeted writers can use the active schema kind to report an output error
+// against the correct business field. Unmetered formatting sinks need no per-field
+// state transition.
 pub(super) trait JsonWrite: std::fmt::Write {
     fn set_kind(&mut self, _kind: JsonInputKind) {}
 }
@@ -51,6 +66,9 @@ pub(super) trait JsonWrite: std::fmt::Write {
 impl JsonWrite for String {}
 
 #[derive(Clone, Copy)]
+// Borrow already validated fields for one output row. In particular, a vector can
+// be streamed from native coordinates without constructing a JSON array of number
+// nodes.
 pub(crate) enum JsonFieldValue<'a> {
     Json(&'a JsonValue),
     String(Option<&'a str>),
@@ -65,7 +83,13 @@ pub(crate) fn write_validated_jsonl_fields<W: std::io::Write, const N: usize>(
     context: &JsonOperationContext,
 ) -> Result<()> {
     use std::fmt::Write;
+    // Sorting the fixed-size field list puts the row in canonical key order
+    // without allocating a map. It also makes duplicate names adjacent for the
+    // pre-write validation.
     fields.sort_unstable_by_key(|(key, _)| *key);
+    // Reject duplicate names and nonfinite native coordinates before even the
+    // opening brace is written. The output stream cannot roll back a row prefix
+    // once it has reached the destination.
     if fields.windows(2).any(|pair| pair[0].0 == pair[1].0)
         || fields.iter().any(|(_, value)| {
             matches!(value, JsonFieldValue::Vector(values) if values.iter().any(|value| !value.is_finite()))
@@ -75,6 +99,9 @@ pub(crate) fn write_validated_jsonl_fields<W: std::io::Write, const N: usize>(
     }
     let mut scratch = context.reservation();
     let mut frames = Vec::new();
+    // Reserve traversal frames before writing any bytes. The validated JSON fields
+    // share this stack serially, so one deep field does not require each sibling
+    // to reserve a stack of its own.
     scratch.reserve_vec(
         &mut frames,
         super::MAX_JSON_DEPTH + 1,
@@ -93,6 +120,9 @@ pub(crate) fn write_validated_jsonl_fields<W: std::io::Write, const N: usize>(
             super::write_string(key, &mut writer)?;
             writer.write_char(':')?;
             match value {
+                // Serialize the validated field's DOM with compact punctuation.
+                // Its source allocations remain borrowed, and only the traversal
+                // frames are shared with this row writer.
                 JsonFieldValue::Json(value) => super::write_json_with_frames(
                     value,
                     &mut writer,
@@ -102,14 +132,22 @@ pub(crate) fn write_validated_jsonl_fields<W: std::io::Write, const N: usize>(
                     JsonOutputSchema::Value(JsonInputKind::StoredJson),
                 )?,
                 JsonFieldValue::String(Some(value)) => super::write_string(value, &mut writer)?,
+                // A missing borrowed string has a defined on-wire value. Emit null
+                // while keeping the field name, preserving the distinction from
+                // both an empty string and an omitted member.
                 JsonFieldValue::String(None) => writer.write_str("null")?,
                 JsonFieldValue::Vector(values) => {
                     write_f32_array(values, &mut writer)?;
                 }
             }
         }
+        // Emit the newline as part of the JSONL row, including for an empty
+        // object. The artifact hash and the temporary file's disk accounting
+        // include that byte.
         writer.write_str("}\n")
     })();
+    // Finish through the adapter so a destination failure retains the original I/O
+    // error.
     writer.finish(written)
 }
 
@@ -119,31 +157,50 @@ fn write_f32_array(values: &[f32], writer: &mut impl std::fmt::Write) -> std::fm
         if index != 0 {
             writer.write_char(',')?;
         }
+        // Widen each f32 exactly before applying the common JSON number spelling.
+        // Formatting directly at f32 precision can choose a different decimal
+        // representation for the same stored coordinate.
         super::write_number(f64::from(*value), writer)?;
     }
     writer.write_char(']')
 }
 
 pub(crate) fn write_vector_json(output: &mut impl std::io::Write, values: &[f32]) -> Result<()> {
+    // Scan all coordinates before emitting the opening bracket. A non-finite value
+    // near the end of the vector is a validation error and must not leave a
+    // partially written JSON array.
     if values.iter().any(|value| !value.is_finite()) {
         return Err(super::json_error(
             "JSON vectors must contain finite numbers",
         ));
     }
+    // This entry writes just a JSON array to the supplied stream. It adds no row
+    // terminator, so a caller embedding the vector in an enclosing format owns the
+    // surrounding punctuation.
     let mut writer = JsonIoWriter {
         output,
         error: None,
     };
+    // Stream the borrowed f32 slice with the same numeric spelling used for JSONL
+    // vector fields. An empty vector still emits a valid empty array without
+    // allocating a JsonValue per entry.
     let written = write_f32_array(values, &mut writer);
     writer.finish(written)
 }
 
 struct JsonIoWriter<'a, W> {
+    // Destination receiving serialized UTF-8. It may already contain a partial
+    // document if an I/O operation fails.
     output: &'a mut W,
+    // Original I/O error saved while returning fmt::Error through the formatter.
+    // finish recovers its detailed cause.
     error: Option<std::io::Error>,
 }
 
 impl<W: std::io::Write> JsonIoWriter<'_, W> {
+    // Formatting errors do not carry their I/O cause. Prefer the saved destination
+    // error, including a partial-write failure, before classifying a plain
+    // formatter failure as a JSON error.
     fn finish(self, written: std::fmt::Result) -> Result<()> {
         if let Some(error) = self.error {
             return Err(error.into());
@@ -154,9 +211,15 @@ impl<W: std::io::Write> JsonIoWriter<'_, W> {
 
 impl<W: std::io::Write> std::fmt::Write for JsonIoWriter<'_, W> {
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        // Once a destination write has failed, stop sending further fragments and
+        // preserve the first error. The formatter may know only that a previous
+        // call returned fmt::Error.
         if self.error.is_some() {
             return Err(std::fmt::Error);
         }
+        // A sink can legally accept only a prefix of this UTF-8 fragment.
+        // write_all drives the remaining bytes or records an error, so a short
+        // success cannot truncate a string unnoticed.
         self.output.write_all(value.as_bytes()).map_err(|error| {
             self.error = Some(error);
             std::fmt::Error
@@ -169,7 +232,11 @@ impl<W: std::io::Write> JsonWrite for JsonIoWriter<'_, W> {}
 // Batch admission validates immutable values first. This lease covers one
 // serialization at a time, including repeated digest/output passes.
 pub(crate) struct JsonEncodingWorkspace {
+    // Maximum number of serializer stack entries covered by the preflight for these
+    // immutable values.
     frames: usize,
+    // Charge for that many frames, retained across a digest pass and an output pass
+    // that use the workspace in succession.
     _work: JsonReservation,
 }
 
@@ -180,10 +247,16 @@ impl JsonEncodingWorkspace {
         context: &JsonOperationContext,
     ) -> Result<Self> {
         let mut work = context.reservation();
+        // The preflight supplies a frame count, while the shared budget is in
+        // bytes. Reject overflow during conversion before creating a workspace
+        // that would claim fewer bytes than one real stack requires.
         let bytes = frames
             .checked_mul(std::mem::size_of::<super::WriteFrame<'_>>())
             .ok_or_else(|| context.limit_error(kind))?;
         work.grow(bytes, kind)?;
+        // Retain the measured count and its grant here, not a shared mutable
+        // stack. Returning this workspace does not start a serialization or
+        // allocate an output buffer.
         Ok(Self {
             frames,
             _work: work,
@@ -196,10 +269,19 @@ impl JsonEncodingWorkspace {
         kind: JsonInputKind,
         output: &mut impl std::io::Write,
     ) -> Result<()> {
+        // The lease survives across passes, but each serialization allocates its
+        // own frame Vec on entry. Its allocation is covered by the caller's
+        // one-at-a-time use of this workspace.
         let mut frames = Vec::new();
+        // Allocate the native frame storage before attaching the writer to the
+        // destination. An allocator failure at this point has not emitted a
+        // partial document.
         frames
             .try_reserve_exact(self.frames)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        // try_reserve_exact permits capacity larger than requested. Reject such an
+        // allocation before writing the first byte because the reusable lease
+        // covers only the preflight frame count.
         if frames.capacity() != self.frames {
             return Err(std::io::Error::other("JSON frame capacity exceeds reservation").into());
         }
@@ -207,6 +289,9 @@ impl JsonEncodingWorkspace {
             output,
             error: None,
         };
+        // Use bounded traversal for the previously measured tree. A caller
+        // supplying a deeper tree can encounter a frame error during output, so
+        // the workspace must correspond to the values being serialized.
         let written = super::write_json_frames(
             value,
             &mut writer,
@@ -216,6 +301,9 @@ impl JsonEncodingWorkspace {
             JsonOutputSchema::Value(kind),
             true,
         );
+        // With a failed underlying write the destination can contain a prefix.
+        // Surface that original I/O error rather than interpreting it as a
+        // shortage of traversal frames.
         writer.finish(written)
     }
 }
@@ -229,7 +317,13 @@ impl JsonValue {
         retained: &mut JsonReservation,
         pretty: bool,
     ) -> Result<()> {
+        // Treat this retained value as its own business unit. An enclosing library
+        // result containing several prevalidated units is reconciled through the
+        // separate output-schema path below.
         let schema = JsonOutputSchema::Value(kind);
+        // This path already owns the value's JSON reservation. Reconcile that
+        // owner while checking canonical size and nesting so validation does not
+        // charge a second copy of the live tree.
         let layout = self.validate_tree_layout(
             Some(super::MAX_JSON_DEPTH),
             0,
@@ -237,18 +331,30 @@ impl JsonValue {
             Some(retained),
             true,
         )?;
+        // Traversal storage has a shorter lifetime than the retained JSON. Admit
+        // it under a separate scratch reservation before sending any bytes to a
+        // potentially non-rewindable destination.
         let mut scratch = context.reservation();
         let mut frames = Vec::new();
+        // Reserve one frame beyond maximum container depth for the leaf value. The
+        // same preflight suffices for compact and pretty output because
+        // indentation does not change traversal depth.
         scratch.reserve_vec(&mut frames, layout.depth + 1, kind)?;
         let mut writer = JsonIoWriter {
             output,
             error: None,
         };
+        // The compact or pretty writer reuses the prepared frames. Pretty
+        // whitespace affects emitted byte count while the admission check above
+        // measured the value's canonical compact size.
         let written =
             super::write_json_with_frames(self, &mut writer, 0, pretty, &mut frames, schema);
         writer.finish(written)
     }
 
+    // Reconcile the retained tree after assembly using the output schema. This
+    // path updates the tree's reservation without allocating a serialization
+    // buffer.
     pub(crate) fn reconcile_output_retained_in(
         &self,
         schema: JsonOutputSchema,
@@ -258,6 +364,9 @@ impl JsonValue {
         Ok(())
     }
 
+    // Returns a pretty representation and the reservation that owns its capacity.
+    // Callers retaining the representation must retain both values for the same
+    // lifetime.
     pub(crate) fn pretty_retained_in(
         &self,
         schema: JsonOutputSchema,
@@ -265,16 +374,25 @@ impl JsonValue {
         retained: &mut JsonReservation,
     ) -> Result<(String, JsonReservation)> {
         use std::fmt::Write;
+        // Validate the output tree before formatting. Bound the write stack from
+        // observed depth and charge scratch separately from the serialized string,
+        // which survives this call.
         let layout = self.validate_tree_layout(None, 0, Some(schema), Some(retained), false)?;
         let mut scratch = context.reservation();
         let mut frames = Vec::new();
+        // Allow one more frame than the measured container depth for the
+        // traversal's current value.
         scratch.reserve_vec(&mut frames, layout.depth + 1, schema.kind())?;
+        // Use the same writer for the trailing newline. Its capacity must fit the
+        // output budget just like the JSON text.
         let mut out = JsonTextWriter::new(context, schema.kind());
         let written = super::write_json_with_frames(self, &mut out, 0, true, &mut frames, schema)
             .and_then(|()| out.write_char('\n'));
         out.finish(written)
     }
 
+    // Validates the tree and reserves traversal memory before touching the
+    // destination. An I/O failure can leave a prefix in the caller's writer.
     pub(crate) fn write_pretty_retained_in(
         &self,
         output: &mut impl std::io::Write,
@@ -287,25 +405,40 @@ impl JsonValue {
         let mut scratch = context.reservation();
         let mut frames = Vec::new();
         scratch.reserve_vec(&mut frames, layout.depth + 1, schema.kind())?;
+        // Adapt std::io::Write to the formatter while retaining the original I/O
+        // error for reporting. This path streams bytes and has no retained String
+        // reservation.
         let mut writer = JsonIoWriter {
             output,
             error: None,
         };
         let written =
             super::write_json_with_frames(self, &mut writer, 0, true, &mut frames, schema)
+                // Emit the record terminator only after the document was written.
+                // A newline failure still goes through the same I/O error adapter.
                 .and_then(|()| writer.write_char('\n'));
         writer.finish(written)
     }
 }
 
 pub(crate) struct JsonTextWriter {
+    // Owned serialized text accumulated so far, whose capacity must remain admitted
+    // as it grows.
     value: String,
+    // JSON bytes backing the String. On success this reservation leaves the writer
+    // alongside the result.
     work: JsonReservation,
+    // Current output field's kind for attributing a growth refusal during
+    // traversal.
     kind: JsonInputKind,
+    // Structured failure retained behind a fmt::Error, returned to the caller
+    // before any generic formatting failure.
     error: Option<Error>,
 }
 
 impl JsonTextWriter {
+    // Start with zero output capacity. Growth is admitted as the serializer
+    // requests each fragment.
     pub(crate) fn new(context: &JsonOperationContext, kind: JsonInputKind) -> Self {
         Self {
             value: String::new(),
@@ -321,20 +454,32 @@ impl JsonTextWriter {
     }
 
     pub(crate) fn finish(self, written: std::fmt::Result) -> Result<(String, JsonReservation)> {
+        // Prefer the saved failure when the formatter returns its generic error.
+        // On success, move the text and its capacity charge out together.
         if let Some(error) = self.error {
             return Err(error);
         }
+        // Map formatter failures lacking a saved structured error to the generic
+        // serialization error. This also covers failures originating outside
+        // String growth.
         written.map_err(|_| super::json_error("JSON serialization failed"))?;
         Ok((self.value, self.work))
     }
 
     // Used for diagnostic labels of values already validated at a business root.
     pub(crate) fn write_validated_value(&mut self, value: &JsonValue) -> std::fmt::Result {
+        // Keep the first failure as the diagnostic. A second request on the same
+        // writer must leave that error and the incomplete text in place.
         if self.error.is_some() {
             return Err(std::fmt::Error);
         }
+        // Scratch frames are temporary even though the diagnostic string can
+        // outlive this call. The input was already validated, so the policy
+        // ceiling bounds the stack here.
         let mut scratch = self.work.scratch();
         let mut frames = Vec::new();
+        // Reject the diagnostic before appending any of its bytes when the
+        // traversal slots cannot be reserved.
         if let Err(error) = scratch.reserve_vec(&mut frames, super::MAX_JSON_DEPTH + 1, self.kind) {
             self.error = Some(error);
             return Err(std::fmt::Error);
@@ -343,6 +488,8 @@ impl JsonTextWriter {
             value,
             self,
             0,
+            // Render diagnostic labels in compact form. Pretty printing is
+            // reserved for the output paths that explicitly request it.
             false,
             &mut frames,
             JsonOutputSchema::Value(self.kind),
@@ -351,6 +498,8 @@ impl JsonTextWriter {
 }
 
 impl std::fmt::Write for JsonTextWriter {
+    // Every fragment passes through the same fallible admission path. Append only
+    // after capacity is available, then reuse that capacity on subsequent calls.
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
         if self.error.is_some() {
             return Err(std::fmt::Error);
@@ -365,6 +514,8 @@ impl std::fmt::Write for JsonTextWriter {
 }
 
 impl JsonWrite for JsonTextWriter {
+    // The output traversal updates kind as it enters each schema field. A refusal
+    // while growing the String uses the active field's error classification.
     fn set_kind(&mut self, kind: JsonInputKind) {
         self.kind = kind;
     }

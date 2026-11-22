@@ -1,6 +1,7 @@
 """Check the actual installed package, its stubs and its public owned shapes."""
 
 import ast
+import doctest
 import importlib
 import importlib.metadata
 import importlib.resources
@@ -11,6 +12,12 @@ import unittest
 from typing import get_args, get_origin
 
 import cofferdb
+
+
+def load_tests(loader, tests, pattern):
+    """Run the installed package's API examples with the SDK regression tests."""
+    tests.addTests(doctest.DocTestSuite(cofferdb))
+    return tests
 
 
 class PublicTypesTests(unittest.TestCase):
@@ -69,7 +76,7 @@ class PublicTypesTests(unittest.TestCase):
         package = importlib.resources.files("cofferdb")
         self.assertTrue(package.joinpath("py.typed").is_file())
         stub = ast.parse(package.joinpath("__init__.pyi").read_text())
-        self.assertEqual(cofferdb.__version__, "0.1.5")
+        self.assertEqual(cofferdb.__version__, "0.2.0")
         self.assertIsInstance(cofferdb.engine_version, str)
         for name in cofferdb.__all__:
             self.assertTrue(hasattr(cofferdb, name), name)

@@ -1,9 +1,37 @@
+//! An open database ties the catalog, data file and optional indexes to one
+//! view. Opening replays committed records to reconstruct the catalog before
+//! deciding whether the on-disk checkpoint covers that view. Searches can
+//! recall candidates from the checkpoint or score visible records directly.
+//! Result rows use the catalog and its references to stored payloads.
+//!
+//! For writes, the order runs the other way: plan against the current catalog,
+//! append the data, then install its new references and refresh derived indexes.
+//! This is why a write error and a missing checkpoint need different recovery
+//! decisions. A read-only handle keeps the file generation that it opened.
+//! Three identifiers locate a committed view: the batch ID in the catalog, the
+//! sequence number of the commit frame, and the byte offset immediately after that
+//! frame. The checkpoint must cover the same primary view. The physical file can
+//! extend beyond that offset after an index write or an interrupted append.
+//!
+//! Handle clones share a connection mutex and work ledgers. A returned result can
+//! keep its reservation after giving up the connection guard. A historical reader
+//! similarly keeps the descriptor for the generation it opened across replacement
+//! of the writer's pathname.
+//!
+//! The methods below use the storage scanner for physical integrity and catalog
+//! replay for visibility. Checkpoint recall, its optional resident caches and
+//! score completion are separate stages built from that view. Evicting memory can
+//! change the source of search work without changing the committed records against
+//! which the request is evaluated.
 use std::cell::Cell;
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -42,12 +70,11 @@ use crate::query::{
     SearchQueryContextInput, SearchResult, SearchResults, WhyNotDiagnosis,
 };
 use crate::storage::{
-    copy_collection_in, copy_document_in, rewrite_database_retained_in,
-    scan_file_with_retained_records_in, CachedVectorSegment, CheckIssue, CheckpointSegment,
-    CompactMarker, IndexCheckpointMetadata, IndexSegmentSource, IndexSuffixReport,
-    OwnedRecordBatch, PayloadReader, RecordPayload, RecordReservation, RetainedChunk,
-    RetainedEmbedding, RewritePlan, ScanReport, Storage, TextCheckpoint, VectorCache,
-    VectorIndexSegmentPayload, VectorRecordSegment, FORMAT_VERSION,
+    copy_collection_in, copy_document_in, rewrite_database_retained_in, CachedVectorSegment,
+    CheckIssue, CheckpointSegment, CompactMarker, IndexCheckpointMetadata, IndexSegmentSource,
+    IndexSuffixReport, OwnedRecordBatch, PayloadReader, RecordPayload, RecordReservation,
+    RetainedChunk, RetainedEmbedding, RewritePlan, ScanReport, Storage, TextCheckpoint,
+    VectorCache, VectorIndexSegmentPayload, VectorRecordSegment, FORMAT_VERSION,
 };
 #[cfg(test)]
 use crate::storage::{IndexCheckpointPayload, VectorIndexEntry};
@@ -60,6 +87,8 @@ mod models;
 use models::ModelAdmission;
 mod read;
 mod scoring;
+mod snapshot;
+mod why_not;
 use coverage::catalog_index_coverage_hash;
 pub(crate) use import::{ImportBatchMetrics, ImportDocument, ImportRow, ManifestImportOptions};
 pub(crate) use read::RecordKey;
@@ -67,50 +96,93 @@ use read::{read_visible_chunk_text, read_visible_embedding_vector};
 #[cfg(test)]
 use scoring::fuse_candidates;
 use scoring::{filter_candidates, fuse_completed_candidates, supplement_scores};
+pub(crate) use why_not::DiagnosisTarget;
 
+/// Access mode and resource overrides for opening an existing database. The default requests a
+/// writer.
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseOpenOptions {
+    /// Open a fixed reader view. The default, false, requests the cross-process writer lock.
     pub read_only: bool,
+    /// Override the resource profile used for this connection.
     pub resource_profile: Option<ResourceProfile>,
+    /// Override the cache budget in units of 1,048,576 bytes. Zero enables on-demand text indexing.
     pub cache_budget_mb: Option<usize>,
+    /// Request background compaction. Setting this to true returns an unsupported-feature error.
     pub background_compaction: Option<bool>,
+    /// Override the policy used to flush committed writes.
     pub durability: Option<Durability>,
+    /// Select how the connection accesses database bytes.
     pub io_mode: IoMode,
 }
 
+/// Controls the optional index verification performed during a read-only consistency check.
 #[derive(Clone, Debug, Default)]
 pub struct CheckOptions {
+    /// Request verification of the persisted index in addition to the normal scan. Check the
+    /// reported outcome when a checkpoint is unavailable.
+    /// The normal scan still checks a recovered suffix against the visible
+    /// catalog. This option controls the reported index-check outcome and its
+    /// reason.
     pub verify_indexes: bool,
 }
 
+/// Controls index construction after a successful rewrite of the main file.
 #[derive(Clone, Debug, Default)]
 pub struct CompactOptions {
+    /// Attempt to create a full index checkpoint after replacing the main file. False leaves it
+    /// for a later rebuild.
     pub rebuild_indexes: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ImportIndexBuildMode {
+    // Both modes commit ordinary primary batches. Inline attempts index
+    // maintenance after each commit. Deferred keeps the first batch's reusable
+    // sources and attempts maintenance once after all batches. A later failure can
+    // leave earlier primary batches visible. Even a successful return can leave
+    // the index marked for rebuilding.
     InlineFullCheckpoint,
     DeferredFullCheckpoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexSuffixState {
+    // Missing covers both a file that has never had a checkpoint and a replacement
+    // for which index rebuilding was disabled. A nonempty main log can therefore
+    // have this state.
     Missing,
+    // The report and coverage checks allow checkpoint-backed recall. An individual
+    // lazy read can still invalidate that source.
     PersistentCheckpoint,
+    // The suffix can identify a covered commit without providing searchable text
+    // and vector segments. Reading its metadata alone does not qualify it for the
+    // persistent query path.
     MetadataRecordOnly,
+    // Coverage or integrity failed, or a primary commit invalidated the previous
+    // index. Ordinary search must obtain candidates another way until an index is
+    // available.
     RebuildNeeded,
 }
 
 impl IndexSuffixState {
+    // This conversion is reached only when a suffix report exists. Its caller also
+    // checks the recovered catalog and index findings. A recognized on-disk status
+    // cannot by itself establish that the checkpoint belongs to this generation.
     fn from_report(report: &IndexSuffixReport) -> Self {
         match report.status.as_str() {
             "persistent_checkpoint" => Self::PersistentCheckpoint,
             "metadata_record_only" => Self::MetadataRecordOnly,
+            // An unfamiliar status must prevent persistent reads. The distinct
+            // Missing state is selected by the caller when there is no suffix
+            // report and no finding that requires a rebuild.
             _ => Self::RebuildNeeded,
         }
     }
 
+    // Expose the same stable labels in check, rebuild and index statistics. In
+    // particular, a readable metadata record can describe a commit while offering
+    // no persistent segments for a query.
     fn as_str(self) -> &'static str {
         match self {
             Self::Missing => "missing",
@@ -121,88 +193,180 @@ impl IndexSuffixState {
     }
 }
 
+/// Findings from inspecting one stable file view. Inspect the status even when the check
+/// returns successfully.
 #[derive(Clone, Debug)]
 pub struct CheckReport {
+    /// The bound reader still names a file generation that the original path no longer selects.
+    pub detached_view: bool,
+    /// Version of the report format, independent of the database file format.
     pub schema_version: String,
+    /// Database path used for this check.
     pub path: PathBuf,
+    /// Highest severity found during the scan, one of `ok`, `warning` or `error`.
     pub status: String,
+    /// Storage format version read from the file header.
     pub format_version: u16,
+    /// Identifier of the last valid committed batch in this view.
     pub last_valid_commit: u64,
+    /// Byte offset immediately after the validated committed data.
     pub critical_end_offset: u64,
+    /// Classification of the derived index data following the committed records.
     pub index_suffix_status: String,
+    /// Checkpoint details when the scan could identify a persisted suffix.
     pub index_suffix: Option<IndexSuffixReport>,
+    /// Individual findings, including location and possible recovery action where known.
     pub issues: Vec<CheckIssue>,
+    /// Whether at least one finding has an available repair.
     pub repair_available: bool,
+    /// Outcome of the requested index verification, including disabled or skipped checks.
     pub index_check: String,
+    /// Reason verification was skipped or could not complete, when supplied.
     pub index_check_reason: Option<String>,
+    /// Number of visible documents in this view.
     pub live_documents: usize,
+    /// Number of visible chunks in this view.
     pub live_chunks: usize,
+    /// Number of deletion records counted by the scan.
     pub tombstones: usize,
 }
 
+/// Space and index outcomes of a completed replacement. Inspect the index outcome before
+/// relying on a persisted checkpoint.
 #[derive(Clone, Debug, Default)]
 pub struct CompactSummary {
+    /// Length of the database file in bytes before the operation.
     pub before_file_size: u64,
+    /// Length of the database file in bytes after the operation.
+    /// Includes any index data written to the replacement. The change in file
+    /// length therefore need not equal the size of the discarded business records.
     pub after_file_size: u64,
+    /// Number of obsolete records omitted when rewriting the file.
+    /// Counts the difference in business-record totals. Commit frames and the
+    /// compact marker are outside the count, and a create/drop pair can survive to
+    /// keep a deleted collection name reserved.
     pub records_removed: usize,
+    /// Number of deletion records eliminated by compaction.
     pub tombstones_removed: usize,
+    /// Number of previously persisted index segments counted as merged during compaction.
+    /// Uses the prior checkpoint's reported text and vector segment counts. A
+    /// suffix with no usable persistent coverage contributes zero even if its
+    /// bytes still occupy space in the file.
     pub segments_merged: usize,
+    /// Outcome for the replacement file: `disabled`, `full_checkpoint_written` or `failed`.
     pub index_rebuild: String,
+    /// Diagnostic detail when optional checkpoint construction failed after compaction.
     pub index_rebuild_reason: Option<String>,
+    /// Elapsed wall-clock time for this operation in milliseconds.
     pub duration_ms: u128,
 }
 
+/// Scope, persistence and coverage of a completed index rebuild.
 #[derive(Clone, Debug)]
 pub struct RebuildIndexSummary {
+    /// Version of the report format, independent of the database file format.
     pub schema_version: String,
+    /// Requested collection name, or `None` when all collections were requested.
     pub collection: Option<String>,
+    /// Actual rebuild scope. A collection request can produce a full visible checkpoint or a
+    /// transient collection index.
     pub rebuild_scope: String,
+    /// Classification of the derived index data following the committed records.
     pub index_suffix_status: String,
+    /// Number of index records in the reported persisted checkpoint.
     pub index_record_count: usize,
+    /// Number of extents in the reported persisted checkpoint.
     pub index_extent_count: usize,
+    /// Number of text segments reported for this rebuild.
     pub text_segment_count: usize,
+    /// Number of vector segments reported for this rebuild.
     pub vector_segment_count: usize,
+    /// Whether the database still requires a persistent index rebuild.
     pub rebuild_needed: bool,
+    /// Commit sequence number covered by the reported persisted index, when available.
     pub last_index_commit_id: Option<u64>,
+    /// Elapsed wall-clock time for this operation in milliseconds.
     pub duration_ms: u128,
 }
 
+/// What a tail repair found and how it changed the length of the main file.
 #[derive(Clone, Debug)]
 pub struct RepairSummary {
+    /// Version of the report format, independent of the database file format.
     pub schema_version: String,
+    /// Repair operation applied or checked, currently `truncate_tail`.
     pub action: String,
+    /// True if the repair actually shortened the file.
     pub repaired: bool,
+    /// Length of the database file in bytes before the operation.
     pub before_file_size: u64,
+    /// Length of the database file in bytes after the operation.
     pub after_file_size: u64,
+    /// Number of bytes truncated from the file.
     pub bytes_removed: u64,
+    /// Byte offset immediately after the validated committed data.
     pub critical_end_offset: u64,
+    /// Number of findings addressed by the truncation.
+    /// A no-op reports zero even if the scanner identified a finding marked as
+    /// repairable.
     pub issues_repaired: usize,
 }
 
+/// Identity and contents of a published snapshot. Record its byte count and SHA-256 when making
+/// a backup.
 #[derive(Clone, Debug)]
 pub struct SnapshotSummary {
+    /// Version of the report format, independent of the database file format.
     pub schema_version: String,
+    /// Path of the source database used to create the snapshot.
     pub source_path: PathBuf,
+    /// Path under which the verified copy was published.
     pub output_path: PathBuf,
+    /// Hexadecimal SHA-256 digest of the snapshot file.
+    pub sha256: String,
+    /// Visible collections and their configuration in the snapshot.
+    pub collections: Vec<CollectionInfo>,
+    /// Size of the snapshot file in bytes.
     pub bytes_copied: u64,
+    /// Identifier of the last valid committed batch in this view.
     pub last_valid_commit: u64,
+    /// Byte offset immediately after the validated committed data.
     pub critical_end_offset: u64,
+    /// Classification of the derived index data following the committed records.
     pub index_suffix_status: String,
 }
 
+/// An open local database. Clones and collection handles share one connection and its close
+/// state. Open a fresh connection in each process.
 #[derive(Clone)]
 pub struct Database {
+    // Creating process ID. Check it before accessing inherited synchronization
+    // primitives, including when a child still holds an Arc cloned before fork.
+    owner_pid: u32,
+    // Connection state shared by all clones. Taking the Inner out under the mutex
+    // closes every handle that points here.
     inner: Arc<Mutex<Option<Inner>>>,
+    // Connection's memory ledger, also reachable without borrowing Inner.
+    // Outstanding operation or output reservations can outlive a particular catalog
+    // guard.
     json_work: Arc<crate::json::WorkLedger>,
+    // Shared temporary disk budget. Concurrent staging, sorting and maintenance on
+    // this connection draw from the same accounting pool.
     temporary_work: Arc<crate::temporary::TemporaryDiskBudget>,
 }
 
+// A guard is issued only after the connection is known to be open. Keeping the
+// mutex guard inside prevents a concurrent close from taking Inner while a caller
+// dereferences it.
 struct InnerGuard<'a>(MutexGuard<'a, Option<Inner>>);
 
 impl Deref for InnerGuard<'_> {
     type Target = Inner;
 
     fn deref(&self) -> &Inner {
+        // InnerGuard is only built by lock() after it has seen Some under the same
+        // mutex. Keeping that mutex held across this borrow prevents close() from
+        // moving the connection state out of the slot.
         self.0.as_ref().expect("open database guard")
     }
 }
@@ -222,24 +386,56 @@ enum QueryOutputStage {
     ResultRow(usize),
 }
 
+// The file, its replayed catalog and the indexes describing that view are protected
+// by the same connection mutex. The primary commit can move forward while the index
+// is marked for rebuilding. Keep these two generations distinct when answering
+// status or choosing a query source.
 struct Inner {
+    // Owner of runtime memory limits and accounting for the catalog, index caches
+    // and active operations.
     work: Arc<crate::json::WorkLedger>,
+    // Disk budget used when producing intermediate files for this open database,
+    // including work that spans several batches.
     temporary_work: Arc<crate::temporary::TemporaryDiskBudget>,
+    // Database path used to reopen or create related files. Operations that must
+    // stay on a specific inode use storage's open handles.
     path: PathBuf,
+    // Access to the primary stream, file locks and I/O boundaries associated with
+    // this connection.
     storage: Storage,
+    // Committed object identities, visibility relationships and payload locations
+    // for the current view.
     catalog: Catalog,
+    // Resident text postings or the available text statistics. A valid persistent
+    // text segment can still be queried without a full resident cache.
     text_index: TextIndex,
+    // Whether to defer building resident text postings. The persisted segment or a
+    // transient source may still serve the query.
     lazy_text: bool,
     #[cfg(test)]
     before_why_not_ranks: Option<Box<dyn FnOnce() + Send>>,
     #[cfg(test)]
     query_output_hook: Option<(QueryOutputStage, Box<dyn FnOnce() + Send>)>,
+    // Optional resident vector segments that fit the connection's cache budget.
+    // Eviction leaves the underlying data and its persistent coverage unchanged.
     persistent_vector_segments: Option<VectorCache>,
+    // Directory describing checkpoint-backed segments. Despite the historical field
+    // name, the same source can be visited for text postings.
     lazy_vector_source: Option<IndexSegmentSource>,
+    // A single retained vector segment obtained lazily. It can be reused or
+    // returned to the cache while the covered view remains valid.
     lazy_vector_segment: Option<CachedVectorSegment>,
+    // Usability of the index suffix for this primary view. A rebuild-needed suffix
+    // cannot be offered as a current persistent checkpoint.
     index_suffix_status: IndexSuffixState,
+    // Main commit sequence number covered by the available checkpoint, when known.
+    // A later primary commit can invalidate that coverage.
     last_index_commit_sequence_no: Option<u64>,
+    // Bytes attributed to the index suffix for statistics on this view, separately
+    // from primary record bytes.
     index_size_bytes: u64,
+    // Sequence number of the latest primary commit. The catalog tracks its batch
+    // ID, which lives in a different numbering scheme.
     last_commit_sequence_no: u64,
     #[cfg(test)]
     fail_next_index_checkpoint_refresh: bool,
@@ -255,19 +451,42 @@ struct Inner {
     compact_file_remaining: Option<usize>,
     #[cfg(test)]
     compact_rewrite_completions: usize,
+    // Effective open-time database settings, including durability and the resource
+    // profile used to derive index budgets.
     config: DatabaseConfig,
 }
 
+// A checkpoint has separate text and vector segments for each collection. These
+// sets name the old segments that cannot be carried forward across a primary
+// commit. Their keys must survive removal of the old suffix and application of the
+// batch.
 struct IndexChanges {
+    // Collection IDs whose text data must be reconsidered for this checkpoint
+    // update.
     text: BTreeSet<String>,
+    // Collection IDs whose vector segments cannot simply be reused for this update.
     vector: BTreeSet<String>,
+    // Workspace retained for the two change sets and their owned keys while more
+    // batches may extend them.
     work: crate::json::WorkspaceReservation,
 }
 
+// A deferred import captures reusable material before the first append can
+// overwrite its source suffix. Later batches add changed collection IDs, even
+// though their primary records may already be committed when the final checkpoint
+// is built.
 struct PendingIndexUpdate {
+    // Whether the old checkpoint supplied a reusable base when preparing this
+    // update. The newly committed primary data is already authoritative.
     reusable_checkpoint: bool,
+    // Resident segments retained from the reusable base, subject to cache admission
+    // and invalidation for changed collections.
     reusable_vectors: VectorCache,
+    // Optional text checkpoint prepared for reusing unaffected collections when
+    // constructing the replacement.
     reusable_text: Option<TextCheckpoint>,
+    // Accumulated collections affected by committed changes, kept until the pending
+    // index update is finalized.
     changes: IndexChanges,
 }
 
@@ -277,13 +496,22 @@ impl IndexChanges {
         work: &mut crate::json::WorkspaceReservation,
         id: &str,
     ) -> Result<()> {
+        // The same collection can occur in many records or in successive batches
+        // of an import. An ID already present owns both its string allocation and
+        // its share of the tree, so adding it again needs no reservation.
         if ids.contains(id) {
             return Ok(());
         }
+        // Charge the change in the estimated size of the tree separately from the
+        // allocation for the ID. An insertion can cross a node-allocation
+        // threshold even when the ID itself is short.
         let nodes = crate::json::btree_workspace::<String, ()>(ids.len() + 1)
             - crate::json::btree_workspace::<String, ()>(ids.len());
         let mut node_work = work.context().workspace_reservation();
         node_work.grow_to(nodes, nodes, "catalog_build")?;
+        // Keep the prospective node credit local while copying the key. If copying
+        // fails, the set still contains the original entries and the temporary
+        // credit is released with this attempt.
         let (id, string_work) =
             crate::json::ReservedString::copy_in(id, work.context(), "catalog_build")?.into_parts();
         ids.insert(id);
@@ -293,6 +521,9 @@ impl IndexChanges {
     }
 
     fn extend(&mut self, other: &Self) -> Result<()> {
+        // Merge each set independently. A budget failure partway through can leave
+        // a prefix in the destination. Retrying this union is safe because insert
+        // recognizes those keys and preserves their existing credit.
         for id in &other.text {
             Self::insert(&mut self.text, &mut self.work, id)?;
         }
@@ -307,6 +538,10 @@ impl IndexChanges {
         records: impl IntoIterator<Item = &'a RecordPayload>,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Self> {
+        // Classify the batch against the catalog that precedes it. A deletion
+        // record can identify a document or chunk solely by its target ID. Look up
+        // its old owner to decide which collection's checkpoint contents may
+        // change.
         let mut changes = Self {
             text: BTreeSet::new(),
             vector: BTreeSet::new(),
@@ -314,6 +549,10 @@ impl IndexChanges {
         };
         for record in records {
             let (collection_id, text_changed) = match record {
+                // Creating even an empty collection changes the checkpoint
+                // directory. Dropping a collection or replacing a parent document
+                // can remove children and their embeddings from visibility without
+                // a separate put for each one.
                 RecordPayload::CollectionCreate(collection) => {
                     (Some(collection.collection_id.as_str()), true)
                 }
@@ -324,11 +563,23 @@ impl IndexChanges {
                     (Some(document.collection_id.as_str()), true)
                 }
                 RecordPayload::ChunkPut(chunk) => (Some(chunk.collection_id.as_str()), true),
+                // Writing an embedding can change vector membership and values
+                // while preserving every indexed word in the chunk. Its old text
+                // segment is still eligible for reuse.
                 RecordPayload::EmbeddingPut(embedding) => {
                     (Some(embedding.collection_id.as_str()), false)
                 }
                 RecordPayload::Tombstone(tombstone) => (
+                    // Tombstones carry the target ID rather than its collection.
+                    // Resolve a document or chunk against the existing catalog
+                    // before its mutation is replayed. If the owner cannot be
+                    // established, the fallback below will include every live
+                    // collection in both kinds of index work.
                     match tombstone.target_type.as_str() {
+                        // A collection tombstone names the owner directly.
+                        // Document and chunk tombstones require the old primary
+                        // maps, which still carry the owning collection even if
+                        // the object has been hidden.
                         "collection" => Some(tombstone.target_id.as_str()),
                         "document" => catalog
                             .documents
@@ -342,6 +593,9 @@ impl IndexChanges {
                     },
                     true,
                 ),
+                // Neither marker identifies an individual collection. Both feed
+                // the same all-collections fallback as a tombstone whose owning
+                // collection could not be resolved.
                 RecordPayload::CompactMarker(_) | RecordPayload::Commit(_) => (None, true),
             };
             if let Some(id) = collection_id {
@@ -370,6 +624,18 @@ impl IndexChanges {
 }
 
 impl Database {
+    /// Create a new database at an unused path and hold writer admission until close or final
+    /// drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an existing file, unsupported settings or writer contention.
+    /// If cleanup after publication fails, the error reports `database_created`. Check
+    /// the database at the requested path before trying to create it again.
+    ///
+    /// # Examples
+    ///
+    /// See the [crate example](crate#examples) for creation, writing and reopening a database.
     pub fn create(path: impl AsRef<Path>, config: DatabaseConfig) -> Result<Self> {
         Self::create_in(
             path.as_ref(),
@@ -383,6 +649,9 @@ impl Database {
         config: DatabaseConfig,
         context: crate::json::JsonOperationContext,
     ) -> Result<Self> {
+        // Reject an unsupported configuration before acquiring the writer or
+        // publishing a header. Once storage creation succeeds, this connection
+        // owns a live database at the requested path.
         config.validate_json_policy()?;
         if config.background_compaction {
             return Err(Error::new(
@@ -390,10 +659,20 @@ impl Database {
                 "background compaction is not implemented; use manual compact",
             ));
         }
+        // Retain the operation's ledger beyond creation. A binding may already
+        // have admitted input against it, and subsequent calls must share the
+        // database's memory limit. Disk staging has its own connection-wide
+        // budget.
         let json_work = context.ledger();
         let temporary_work = Arc::new(crate::temporary::TemporaryDiskBudget::default());
+        // Storage publishes the header under the final name before returning the
+        // descriptor. A later staging cleanup or final-path lookup can therefore
+        // fail with a file already present at the destination.
         let storage = Storage::create_in(path, &context)?;
         let path = storage.path().to_path_buf();
+        // An explicit zero overrides the profile default. Leave the empty text
+        // index on demand in that case, even though the data file itself has
+        // already been created normally.
         let lazy_text = config
             .cache_budget_mb
             .unwrap_or_else(|| config.resource_profile.params().cache_budget_mb)
@@ -401,6 +680,7 @@ impl Database {
         Ok(Self {
             json_work: Arc::clone(&json_work),
             temporary_work: Arc::clone(&temporary_work),
+            owner_pid: std::process::id(),
             inner: Arc::new(Mutex::new(Some(Inner {
                 work: json_work,
                 temporary_work,
@@ -413,6 +693,9 @@ impl Database {
                 before_why_not_ranks: None,
                 #[cfg(test)]
                 query_output_hook: None,
+                // The new file contains only its header. No primary commit or
+                // persistent extent exists yet, so construction needs neither
+                // recovery replay nor a synthetic initial checkpoint.
                 persistent_vector_segments: None,
                 lazy_vector_source: None,
                 lazy_vector_segment: None,
@@ -439,10 +722,14 @@ impl Database {
         })
     }
 
+    /// Open an existing database for writing with default options. A competing writer can cause
+    /// a lock-contention error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(path, DatabaseOpenOptions::default())
     }
 
+    /// Open a fixed read-only view of an existing database. Reopen to pick up later commits or
+    /// a replacement generation.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(
             path,
@@ -453,6 +740,8 @@ impl Database {
         )
     }
 
+    /// Open an existing file using the selected access mode and resource settings. Writer
+    /// admission, unsupported settings and invalid database contents can prevent opening.
     pub fn open_with_options(path: impl AsRef<Path>, options: DatabaseOpenOptions) -> Result<Self> {
         Self::open_in(
             path.as_ref(),
@@ -466,12 +755,24 @@ impl Database {
         options: DatabaseOpenOptions,
         context: crate::json::JsonOperationContext,
     ) -> Result<Self> {
+        Self::open_with_disk_budget(path, options, context, Default::default())
+    }
+
+    pub(crate) fn open_with_disk_budget(
+        path: &Path,
+        options: DatabaseOpenOptions,
+        context: crate::json::JsonOperationContext,
+        disk_budget: crate::temporary::TemporaryDiskBudget,
+    ) -> Result<Self> {
         if options.background_compaction == Some(true) {
             return Err(Error::new(
                 ErrorCode::UnsupportedFeatureFlag,
                 "background compaction is not implemented; use manual compact",
             ));
         }
+        // Resource and durability settings are properties of this open connection.
+        // Apply the caller's overrides before deriving budgets so that an explicit
+        // zero and an unspecified budget retain their distinct meanings.
         let mut config = DatabaseConfig::default();
         if let Some(profile) = options.resource_profile {
             config.resource_profile = profile;
@@ -490,10 +791,21 @@ impl Database {
             .cache_budget_mb
             .unwrap_or_else(|| config.resource_profile.params().cache_budget_mb)
             .saturating_mul(1_048_576);
+        // The scanner receives an encoded-byte allowance. Decoding retained
+        // strings, vectors and lookup tables can need several times their on-disk
+        // size. The full byte limit is still used when attempting to build the
+        // resident text index below.
         let index_budget_bytes = cache_limit as u64 / 8;
         let json_work = context.ledger();
-        let temporary_work = Arc::new(crate::temporary::TemporaryDiskBudget::default());
+        let temporary_work = Arc::new(disk_budget);
+        // Recover into an unpublished catalog. The record visitor can transfer its
+        // allocation credit as committed records are applied, so opening need not
+        // retain a second collection of decoded records to replay afterward.
         let mut catalog = Catalog::new_in(&context);
+        // The retained-record visitor runs during logical replay, after the
+        // storage layer has checked a commit. Construct the catalog from that
+        // prefix, and retain each record's byte locator for later materialization
+        // from this specific open file.
         let (storage, mut scan) = Storage::open_with_retained_records(
             path,
             options.read_only,
@@ -501,26 +813,49 @@ impl Database {
             &context,
             |record, work| catalog.apply_retained(record, work, &context),
         )?;
+        // A scan can return diagnostics together with a valid prefix. A fatal
+        // finding prevents exposing even that partially reconstructed handle.
+        // Warnings can describe a disposable suffix or an interrupted tail and are
+        // classified separately.
         if scan.findings.iter().any(|issue| issue.severity == "error") {
             return Err(Error::new(
                 ErrorCode::RecoveryError,
                 "database scan found recovery errors; run check for diagnostics",
             ));
         }
+        // The catalog records the batch ID, while checkpoint coverage also uses
+        // the sequence number of the commit record. A batch with several records
+        // advances these counters by different amounts.
         catalog.last_commit_id = scan.last_valid_commit;
+        // The record scan supplies the catalog used to check index coverage. A
+        // readable suffix alone is insufficient: its collection and live-record
+        // information also has to describe this recovered catalog.
         let mut index_suffix_status = index_suffix_status_from_scan(&scan, &catalog, &context)?;
+        // Historical model disagreement does not erase the primary rows needed to
+        // diagnose it. Open the catalog with its derived checkpoint disabled. An
+        // unrelated error while examining model state still aborts the open.
         if let Err(error) = catalog.require_consistent_models() {
             if error.code() != ErrorCode::EmbeddingModelMismatch {
                 return Err(error);
             }
             index_suffix_status = IndexSuffixState::RebuildNeeded;
         }
+        // Take the lazy directory only after both coverage and model checks.
+        // Discarding this candidate here prevents a later query from reaching
+        // extents belonging to a different set of visible records.
         let persistent_checkpoint = scan
             .lazy_vector_checkpoint
             .take()
             .filter(|_| index_suffix_status == IndexSuffixState::PersistentCheckpoint);
+        // Opening a read-only handle can keep a validated index directory without
+        // admitting a full text cache. Query preparation can then use the backing
+        // segments within the handle's resource budget.
         let lazy_text = options.read_only || index_budget_bytes == 0;
         let (text_index, lazy_vector_source) = if let Some(checkpoint) = persistent_checkpoint {
+            // Collect global and per-collection term counts from the validated
+            // segments first. Keeping this summary with the directory lets index
+            // and collection statistics remain available without retaining every
+            // posting.
             match TextStatsSummary::from_source(
                 &checkpoint.vectors,
                 &storage,
@@ -529,6 +864,10 @@ impl Database {
                 &context,
             )? {
                 Some(stats) => {
+                    // Read-only handles intentionally skip the resident build even
+                    // under a nonzero budget. Keeping the segment directory allows
+                    // the query to read its collection directly without paying for
+                    // a full postings cache at open.
                     let cached = if lazy_text {
                         TextCacheBuild::Miss
                     } else {
@@ -546,16 +885,27 @@ impl Database {
                         TextCacheBuild::Complete(index) => {
                             (index, Some(checkpoint.vectors.with_text_stats(stats)))
                         }
+                        // A cache miss leaves the verified directory and
+                        // statistics usable. Failure to validate the underlying
+                        // text data takes a different path and discards the
+                        // candidate source for both kinds of segment.
                         TextCacheBuild::Miss => (
                             TextIndex::default(),
                             Some(checkpoint.vectors.with_text_stats(stats)),
                         ),
+                        // A cache builder can discover an invalid record while
+                        // traversing the postings. Retaining just the directory in
+                        // this branch would let a later streamed query reuse the
+                        // same failed extent.
                         TextCacheBuild::Invalid => {
                             index_suffix_status = IndexSuffixState::RebuildNeeded;
                             (TextIndex::default(), None)
                         }
                     }
                 }
+                // No validated statistics could be collected from this directory.
+                // Treat the checkpoint as unusable even if its outer metadata
+                // originally matched the catalog.
                 None => {
                     index_suffix_status = IndexSuffixState::RebuildNeeded;
                     (TextIndex::default(), None)
@@ -564,6 +914,9 @@ impl Database {
         } else {
             (TextIndex::default(), None)
         };
+        // Publish sequence and size from the final classification, after the
+        // optional segment checks. Bytes physically present at the end of the file
+        // do not count as a usable index when validation rejected them.
         let last_index_commit_sequence_no =
             index_commit_sequence_no_from_scan(&scan, index_suffix_status);
         let index_size_bytes = scan
@@ -572,10 +925,15 @@ impl Database {
             .filter(|_| index_suffix_status == IndexSuffixState::PersistentCheckpoint)
             .map(IndexSuffixReport::total_size_bytes)
             .unwrap_or(0);
+        // Use the path returned by Storage for reports and related file
+        // operations. The open descriptor still supplies the file identity for
+        // reads, so a subsequent rename cannot silently change the catalog's
+        // source.
         let path = storage.path().to_path_buf();
         Ok(Self {
             json_work: Arc::clone(&json_work),
             temporary_work: Arc::clone(&temporary_work),
+            owner_pid: std::process::id(),
             inner: Arc::new(Mutex::new(Some(Inner {
                 work: json_work,
                 temporary_work,
@@ -588,6 +946,9 @@ impl Database {
                 before_why_not_ranks: None,
                 #[cfg(test)]
                 query_output_hook: None,
+                // Opening installs at most the vector segment directory. The first
+                // vector query can decide whether one collection's decoded values
+                // fit the active profile or should be streamed.
                 persistent_vector_segments: None,
                 lazy_vector_source,
                 lazy_vector_segment: None,
@@ -614,6 +975,16 @@ impl Database {
         })
     }
 
+    /// Create and persist a collection with the supplied search settings.
+    ///
+    /// # Errors
+    ///
+    /// Requires an open writer, valid search settings and an available name. If a write
+    /// or index update fails, reopen the database and look up the name before retrying.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) configures a collection and writes to it.
     pub fn create_collection(&self, config: CollectionConfig) -> Result<CollectionHandle> {
         let context = self.json_context();
         self.create_collection_retained_in(config, &context, None)
@@ -626,6 +997,10 @@ impl Database {
         context: &crate::json::JsonOperationContext,
         preprocessed: Option<RecordReservation>,
     ) -> Result<(CollectionHandle, RecordReservation)> {
+        // The typed Rust and preprocessed binding paths share a write plan. They
+        // differ in who has already paid for the name and optional model string.
+        // Keep that ownership explicit while validating the same collection
+        // settings on both paths.
         let mut preprocessed = preprocessed;
         // Credit precedes its payload so every early return frees the payload
         // before making the same capacity available to another admission.
@@ -633,6 +1008,9 @@ impl Database {
         let config = config;
         self.attach_json_context(context, crate::json::JsonInputKind::CollectionConfig)?;
         input_work = match preprocessed.as_ref() {
+            // The parser has already admitted the two variable-length fields.
+            // Validate their types and limits with that credit in place, then
+            // carry the original reservation forward as typed workspace.
             Some(_) => {
                 let validation =
                     self.admit_input_reclaiming(|| config.validate_preprocessed_in(context))?;
@@ -642,6 +1020,10 @@ impl Database {
                     .expect("prepared input")
                     .into_workspace()
             }
+            // A direct Rust caller supplies ordinary Strings. Transfer their
+            // capacity out of the validation reservation before dropping its
+            // temporary JSON work. Neither path needs to keep a second copy of the
+            // configuration.
             None => {
                 let mut validation = self.admit_input_reclaiming(|| config.validate_in(context))?;
                 let strings = config.name.capacity()
@@ -652,13 +1034,26 @@ impl Database {
             }
         };
         // Temporary parse buffers are gone; the typed config retains these strings.
+        // Discard excess preparation credit before entering the connection mutex.
+        // Only the string allocations that move into the creation record survive
+        // this handoff.
         input_work.retain(
             config.name.capacity() + config.embedding_model.as_ref().map_or(0, String::capacity),
         );
         let mut inner = self.lock()?;
         let (catalog, mut records) = inner.prepare_write_batch(context);
+        // Test the namespace while holding the catalog used to allocate the ID. A
+        // name still visible has a different error from one permanently reserved
+        // by a dropped collection. Neither collision can consume a new ID.
         catalog.check_collection_name_available(&config.name)?;
+        // The catalog computes the next ID from its high-water mark without
+        // reserving it separately. Keeping the writer locked until append ties
+        // that number to the record that actually advances the mark.
         let collection_id = records.admit(|| catalog.next_id_in("col_", 0, context))?;
+        // The returned handle must own its name and ID independently of the
+        // catalog and of the record batch. Prepare those strings before the
+        // append, so constructing the result cannot fail while copying them after
+        // a successful commit.
         let handle_name = records.admit(|| {
             crate::json::ReservedString::copy_in(&config.name, context, "batch_prepare")
         })?;
@@ -673,12 +1068,22 @@ impl Database {
             vector_index: config.vector_index,
             created_at: records.timestamp(time::unix_millis_now())?,
         };
+        // The new record owns the original configuration strings. Move their
+        // credit into the batch until its append has installed the catalog entry.
+        // The separate handle name and ID remain live outside the batch.
         records.push(RecordPayload::CollectionCreate(collection))?;
         records.retain_workspace(input_work);
         let records = records.into_batch();
+        // Append the full staged record before returning the handle. Its name and
+        // ID allocations belong to the result independently of the catalog's own
+        // copies. In an error path after primary commit the collection can exist
+        // even though no handle was returned.
         inner.append_and_apply(records, context)?;
         let (collection_id, id_work) = collection_id.into_parts();
         let (handle_name, name_work) = handle_name.into_parts();
+        // Bindings can hold the returned identifiers through a subsequent
+        // conversion. Return the reservations alongside the handle so that
+        // transfer has an owner after this mutex guard is released.
         let mut work = RecordReservation::from(context.reservation());
         work.merge_workspace(id_work);
         work.merge_workspace(name_work);
@@ -688,6 +1093,7 @@ impl Database {
         ))
     }
 
+    /// Look up a visible collection by name. The returned handle shares this database connection.
     pub fn collection(&self, name: &str) -> Result<CollectionHandle> {
         let context = self.json_context();
         self.collection_retained_in(name, &context)
@@ -699,6 +1105,10 @@ impl Database {
         name: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<(CollectionHandle, RecordReservation)> {
+        // A binding may have parsed the name before selecting a database. Attach
+        // its operation first, then look up and copy the canonical ID and name in
+        // one catalog view. The handle's database clone shares the original close
+        // state.
         self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
         self.lock()?.read_reclaiming(|inner| {
             let collection = inner.catalog.collection_by_name(name)?;
@@ -723,10 +1133,18 @@ impl Database {
                 &mut work.json,
                 crate::json::JsonInputKind::StoredJson,
             );
+            // Count and walk the visible collections under the same lock. The
+            // builder can reserve the final array once without first collecting
+            // references to every entry. No writer can change the iterator's
+            // length between these two passes.
             let count = inner.catalog.live_collections().count();
             let mut collections = inner.catalog.live_collections();
             let value = builder.array((0..count).map(|_| {
                 collections
+                    // Hold the connection guard while obtaining the exact array
+                    // size and traversing the same live iterator. Neither a
+                    // concurrent drop nor a new collection can change its length
+                    // between those two steps.
                     .next()
                     .expect("fixed catalog view")
                     .build_json(&builder)
@@ -735,9 +1153,14 @@ impl Database {
         })
     }
 
+    /// Return the visible collections and their configurations in the current view.
     pub fn list_collections(&self) -> Result<Vec<CollectionInfo>> {
         let context = self.json_context();
         self.lock()?.read_reclaiming(|inner| {
+            // Retain output credit across the whole copy. A later collection's
+            // metadata must fit alongside all earlier results and the vector's
+            // slots. On a retry the closure owns the partial vector and starts
+            // again under the same catalog lock.
             let mut work = RecordReservation::from(context.reservation());
             let mut collections = crate::json::ReservedVec::with_capacity(
                 inner.catalog.live_collections().count(),
@@ -749,15 +1172,31 @@ impl Database {
                 work.merge(reservation);
                 collections.push(collection);
             }
+            // Hand the owned vector to the Rust caller after the copy has
+            // succeeded. Binding output uses the separate JSON path above, which
+            // carries the reservation through host materialization.
             Ok(collections.into_vec())
         })
     }
 
+    /// Logically delete the named collection. Its name stays reserved after deletion.
+    ///
+    /// # Errors
+    ///
+    /// Requires an open writer and a visible collection. A failure after the commit can
+    /// leave the collection deleted. Reopen and check its visibility before retrying.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) drops a collection from a database populated by import.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         let context = self.json_context();
         let mut inner = self.lock()?;
         let (catalog, mut records) = inner.prepare_write_batch(&context);
         let collection = catalog.collection_by_name(name)?;
+        // A collection drop records the permanent name reservation with its
+        // internal ID. Visibility of the whole subtree follows the collection, so
+        // the batch does not need a tombstone for every document or chunk.
         let record = RecordPayload::CollectionDrop {
             collection_id: records.copy_string(&collection.collection_id)?,
             name: records.copy_string(&collection.name)?,
@@ -766,21 +1205,52 @@ impl Database {
         };
         records.push(record)?;
         let records = records.into_batch();
+        // Use the ordinary write path so replay, commit accounting and checkpoint
+        // invalidation all see this change. A collection drop retires visibility
+        // and the name in the catalog. Physical reclamation belongs to compaction.
         inner.append_and_apply(records, &context)
     }
 
+    /// Read database-wide counts, file sizes and effective resource settings.
     pub fn stats(&self) -> Result<DatabaseStats> {
+        // The file length includes any bytes beyond the current primary boundary.
+        // Read it alongside the locked catalog and effective connection settings
+        // when assembling these counters.
         self.lock()?.database_stats()
     }
 
+    /// Inspect index coverage and rebuild status for the current view.
     pub fn index_stats(&self) -> Result<IndexStats> {
         Ok(self.lock()?.index_stats())
     }
 
+    /// Rebuild derived search data using this writer. Pass `None` for all collections. With a
+    /// named collection, inspect the returned scope to distinguish a persisted checkpoint from
+    /// a transient result.
+    ///
+    /// # Errors
+    ///
+    /// Requires an active writer and a valid collection name when one is supplied. An
+    /// inconsistent model in the requested scope prevents rebuilding. If verification
+    /// fails after writing the checkpoint, check the file before retrying.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) rebuilds a database and checks the compacted copy.
     pub fn rebuild_index(&self, collection: Option<&str>) -> Result<RebuildIndexSummary> {
+        self.rebuild_index_in(collection, self.json_context())
+    }
+
+    pub(crate) fn rebuild_index_in(
+        &self,
+        collection: Option<&str>,
+        context: crate::json::JsonOperationContext,
+    ) -> Result<RebuildIndexSummary> {
         let started = Instant::now();
-        let context = self.json_context();
         let mut inner = self.lock()?;
+        // Validate writer admission even for a request naming just one collection.
+        // Rebuilding can replace the on-disk suffix, and an uncertain writer must
+        // be reopened before starting maintenance.
         inner.storage.require_writer()?;
         let collection = collection
             .map(|name| {
@@ -790,6 +1260,9 @@ impl Database {
                     .map(|info| info.name.clone())
             })
             .transpose()?;
+        // A named request must first resolve and validate that collection's
+        // visible model. A full request has no fallback scope and rejects a
+        // conflict anywhere in the live catalog.
         if let Some(name) = &collection {
             let id = inner
                 .catalog
@@ -799,16 +1272,28 @@ impl Database {
             inner.cache_collection_model(&id)?;
             inner.catalog.visible_model_state(&id)?.validate(None)?;
         } else {
+            // A whole-file rebuild has no transient scope to fall back to when the
+            // catalog contains a model conflict. Require consistency before
+            // allocating checkpoint work for any collection.
             inner.catalog.require_consistent_models()?;
         }
+        // A named rebuild normally writes a whole-file checkpoint too. Check the
+        // remaining collections before using the full path. A model conflict
+        // elsewhere still permits the requested collection to be validated in
+        // isolation.
         if let Err(error) = inner.catalog.require_consistent_models() {
             if error.code() != ErrorCode::EmbeddingModelMismatch {
                 return Err(error);
             }
+            // A conflict elsewhere prevents a whole-file checkpoint. Validate the
+            // requested collection's transient vector segment without rewriting the suffix.
             let name = collection
                 .as_deref()
                 .expect("full rebuild rejected conflicts");
             let target = inner.catalog.collection_by_name(name)?;
+            // Enumerate the target's currently selected embeddings. File-backed
+            // catalog rows can hold only summaries, so pass their record locations
+            // as well as the summaries to the vector encoder.
             let entries = inner
                 .catalog
                 .live_embeddings()
@@ -821,6 +1306,9 @@ impl Database {
                             .record_ref_for_embedding(&embedding.embedding_id),
                     )
                 });
+            // Exercise the same encoder against a sink. Reading and validating the
+            // vectors can fail, but no bytes are appended and no segment is
+            // installed for subsequent queries on this path.
             VectorRecordSegment::new(
                 target,
                 inner.last_commit_sequence_no,
@@ -829,6 +1317,12 @@ impl Database {
                 &context,
             )?
             .validate_transient()?;
+            context.maintenance.update(|state| {
+                state.finished_rebuild(inner.index_suffix_status.as_str(), None, false)
+            });
+            // Report the transient segment separately from on-disk record and
+            // extent counts. The original checkpoint has the same status it had
+            // upon entry, and a persistent rebuild is still needed.
             return Ok(RebuildIndexSummary {
                 schema_version: "0.1".into(),
                 collection,
@@ -843,9 +1337,16 @@ impl Database {
                 duration_ms: started.elapsed().as_millis(),
             });
         }
+        // Start the full rebuild from visible text with no reusable input. Every
+        // live collection contributes to this checkpoint, even when the request
+        // named a particular collection.
         let text = inner.read_reclaiming(|inner| {
             inner.prepare_text_checkpoint(None, &BTreeSet::new(), &context)
         })?;
+        // A lazily indexed handle needs the persistent postings but can skip the
+        // second, resident representation. Otherwise, release the previous
+        // resident cache before building its replacement against the active cache
+        // budget.
         if !inner.lazy_text {
             inner.text_index.clear_cache();
             inner.text_index = inner.read_reclaiming(|inner| {
@@ -858,16 +1359,70 @@ impl Database {
                 )
             })?;
         }
+        // Pass an empty vector cache to build from committed primary records. An
+        // ordinary small write can reuse unaffected collections. A manual rebuild
+        // may have been requested because the old segment contents are damaged.
         let report = inner.refresh_index_checkpoint_prepared(
             VectorCache::new(&context),
             &BTreeSet::new(),
             text,
             &context,
         )?;
-        let index_stats = inner.index_stats();
+        // An untouched database has no committed batch to cover. The writer
+        // returns no report in that case, so there is no installed checkpoint for
+        // the independent scan to verify.
+        if let Some(written) = &report {
+            context.maintenance.update(|state| state.verifying_index());
+            #[cfg(all(feature = "native-test-support", unix))]
+            crate::maintenance_probe::pause("verify_checkpoint")
+                .map_err(|e| e.maintenance_phase("verify_checkpoint", "index_may_need_rebuild"))?;
+            // Verify the result through the same check path used to inspect an
+            // existing database. Successfully writing index bytes does not establish
+            // that the new suffix covers the visible catalog.
+            let checked = build_check_report_reclaiming(
+                &inner.path,
+                Some(inner.storage.descriptor()),
+                CheckOptions {
+                    verify_indexes: true,
+                },
+                &context,
+                || false,
+            )
+            .map_err(|e| e.maintenance_phase("verify_checkpoint", "index_may_need_rebuild"))?;
+            // Compare the sequence number reported by the readback and its
+            // classification. A readable suffix from an older commit or a suffix
+            // demoted to rebuild-needed cannot satisfy this write's verification.
+            if checked
+                .index_suffix
+                .as_ref()
+                .map(|v| v.covered_last_commit_sequence_no)
+                != Some(written.covered_last_commit_sequence_no)
+                || checked.index_suffix_status != written.status
+            {
+                return Err(Error::new(
+                    ErrorCode::IndexCorruption,
+                    "rebuilt checkpoint did not verify",
+                )
+                .maintenance_phase("verify_checkpoint", "index_may_need_rebuild"));
+            }
+        }
+        // Take the covered commit sequence from the report that actually reached
+        // verification. A successful rebuild without a usable persistent
+        // checkpoint returns no index commit ID.
         let last_index_commit_id = report
             .as_ref()
             .and_then(index_commit_sequence_no_from_report);
+        context.maintenance.update(|state| {
+            state.finished_rebuild(
+                inner.index_suffix_status.as_str(),
+                last_index_commit_id,
+                report.is_some(),
+            )
+        });
+        // Segment and extent counts come from the suffix actually written. Rebuild
+        // status comes from the state available to the handle. The two can differ
+        // when there was no primary commit to index.
+        let index_stats = inner.index_stats();
         Ok(RebuildIndexSummary {
             schema_version: "0.1".into(),
             collection,
@@ -895,26 +1450,49 @@ impl Database {
         })
     }
 
+    /// Inspect a consistent view of this handle's file without modifying it. A busy writer can
+    /// prevent the scan. Inspect findings even on success. If compaction replaced the path, a
+    /// reader can report a detached generation.
     pub fn check(&self, options: CheckOptions) -> Result<CheckReport> {
         let mut inner = self.lock()?;
         let Inner {
             path,
+            storage,
             text_index,
             persistent_vector_segments,
             lazy_vector_segment,
             ..
         } = &mut *inner;
-        build_check_report_reclaiming(path, options, &self.json_context(), || {
-            Inner::release_optional_caches(
-                text_index,
-                persistent_vector_segments,
-                lazy_vector_segment,
-                std::iter::empty(),
-            )
-        })
+        // Use the descriptor held by this handle. A pre-compaction reader can
+        // still name the old inode after another handle replaces the path. Looking
+        // up the pathname again here would silently inspect a different
+        // generation.
+        build_check_report_reclaiming(
+            path,
+            Some(storage.descriptor()),
+            options,
+            &self.json_context(),
+            // If checking catalog coverage runs short of memory, only resident
+            // query caches are candidates for eviction. The catalog being checked
+            // and the descriptor selecting the file view must survive the retry.
+            || {
+                Inner::release_optional_caches(
+                    text_index,
+                    persistent_vector_segments,
+                    lazy_vector_segment,
+                    std::iter::empty(),
+                )
+            },
+        )
     }
 
+    /// Inspect the current file at a path without opening it for writing. A stable scan can
+    /// coexist with an idle compatible writer. Retry after an active mutation if a consistent
+    /// view is unavailable.
     pub fn check_path(path: impl AsRef<Path>, options: CheckOptions) -> Result<CheckReport> {
+        // With no bound descriptor, the scanner resolves the current path and
+        // obtains a stable view there. This path-based check has no
+        // connection-specific caches to reclaim for its coverage comparison.
         build_check_report(
             path.as_ref(),
             options,
@@ -922,21 +1500,95 @@ impl Database {
         )
     }
 
+    /// Acquire exclusive writer admission, verify the last committed boundary and truncate only
+    /// a proven repairable tail. Close any active writer first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writer admission fails, the catalog has conflicting models,
+    /// or the scanner cannot prove the tail is safe to discard. An I/O error after
+    /// truncation can leave a shorter file with unconfirmed durability. Reopen and
+    /// check its size and commit before retrying.
+    ///
+    /// # Examples
+    ///
+    /// A healthy database needs no truncation. Inspect `repaired` before reporting a change.
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cofferdb-repair-doc-{}", std::process::id()));
+    /// # std::fs::create_dir(&dir)?;
+    /// # let path = dir.join("sample.coffer");
+    /// use cofferdb::{Database, DatabaseConfig};
+    ///
+    /// let db = Database::create(&path, DatabaseConfig::default())?;
+    /// db.close()?;
+    /// let repair = Database::repair_truncate_tail(&path)?;
+    /// assert!(!repair.repaired);
+    /// assert_eq!(repair.bytes_removed, 0);
+    /// # std::fs::remove_dir_all(dir)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn repair_truncate_tail(path: impl AsRef<Path>) -> Result<RepairSummary> {
+        let context = crate::json::JsonOperationContext::standalone();
+        let mut catalog = Catalog::new_in(&context);
+        // Keep writer admission and the content range lock from the scan through
+        // the size change. Reopening between them would make the proved boundary
+        // describe a potentially different set of bytes.
+        let mut content = None;
         let (mut storage, scan) =
-            Storage::open_summary_with_records(path.as_ref(), false, |_| Ok(()))?;
+            Storage::open_for_repair(path.as_ref(), &context, &mut content, |r, w| {
+                catalog.apply_retained(r, w, &context)
+            })?;
+        // Refuse to trim through a logical model conflict even when the physical
+        // tail looks disposable. Truncation preserves the otherwise committed rows
+        // that carry the conflicting models.
+        catalog.require_consistent_models()?;
+        // A nonfatal finding sufficient for opening or rebuilding an index need
+        // not prove truncation safe. Accept an uncommitted batch tail or
+        // independently verified checkpoint framing. An uncertain critical record
+        // must leave the file intact.
+        if !storage.verified_tail(&scan)? {
+            return Err(Error::new(
+                ErrorCode::RecoveryError,
+                "cannot prove the trailing bytes are safe to truncate",
+            )
+            .with_detail("stage", "validate_tail")
+            .with_detail("effect", "unchanged"));
+        }
+        // Count findings that are repairable or affect only the tail. A clean
+        // checkpoint can occupy bytes after the primary end, so the extra length
+        // alone does not justify discarding it.
         let issues_repaired = scan
             .findings
             .iter()
             .filter(|issue| issue.repair_available || issue.visibility_impact == "tail_only")
             .count();
         let before_file_size = storage.file_size()?;
+        // A finding may be marked repairable even when there are no bytes beyond
+        // the verified boundary. Require both the repairable finding and a
+        // strictly longer physical file before calling the truncation routine.
         let should_truncate = issues_repaired > 0 && before_file_size > scan.critical_end_offset;
         let (before_file_size, after_file_size) = if should_truncate {
-            storage.truncate_to_critical_end(Durability::Commit)?
+            // Request data synchronization for this repair irrespective of a
+            // writer's usual durability setting. Storage rescans the shortened
+            // file and checks that the same committed batch still ends at the
+            // original boundary.
+            storage.truncate_to_critical_end(
+                Durability::Commit,
+                scan.last_valid_commit,
+                &context,
+            )?
         } else {
+            // A file may end in a valid checkpoint after the committed prefix.
+            // Without a qualifying finding, retain the entire suffix and return
+            // the originally measured length on both sides.
             (before_file_size, before_file_size)
         };
+        // Report only an observed reduction in size. A no-op preserves the
+        // previous length and claims zero repaired findings even if the scan
+        // produced an informational diagnostic.
         Ok(RepairSummary {
             schema_version: "0.1".into(),
             action: "truncate_tail".into(),
@@ -953,51 +1605,100 @@ impl Database {
         })
     }
 
+    /// Copy a committed database to a new output path under exclusive writer admission on the
+    /// source. Close the writer first.
+    ///
+    /// # Errors
+    ///
+    /// A competing writer prevents the source scan. A target that already exists prevents
+    /// publication. After publication the directory sync or staging cleanup can still
+    /// fail with `snapshot_published`, leaving a visible copy. Verify it before retrying.
+    /// Platforms without atomic snapshot publication return an unsupported-feature error.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) closes the writer, takes a snapshot and opens the copy.
     pub fn snapshot(
         path: impl AsRef<Path>,
         output_path: impl AsRef<Path>,
     ) -> Result<SnapshotSummary> {
         let context = crate::json::JsonOperationContext::standalone();
-        let mut catalog = Catalog::new_in(&context);
-        let (storage, scan) = Storage::open_summary_with_retained_records(
-            path.as_ref(),
-            false,
+        // Acquire the source as a writer for the full copy and verification. This
+        // first scan supplies the expected batch and sequence. The publisher
+        // rebuilds its own catalog by replaying the staged destination before
+        // exposing it.
+        let (storage, scan) =
+            Storage::open_summary_with_retained_records(path.as_ref(), false, &context, |_, _| {
+                Ok(())
+            })?;
+        snapshot::publish(
+            &storage,
+            output_path.as_ref(),
+            scan.last_valid_commit,
+            scan.last_valid_commit_sequence_no,
             &context,
-            |record, work| catalog.apply_retained(record, work, &context),
-        )?;
-        let source_path = storage.path().to_path_buf();
-        let output_path = output_path.as_ref().to_path_buf();
-        ensure_snapshot_output_path(&source_path, &output_path)?;
-        catalog.last_commit_id = scan.last_valid_commit;
-        let index_suffix_status = index_suffix_status_from_scan(&scan, &catalog, &context)?;
-        let tmp_path = snapshot_temp_path(&output_path)?;
-        let bytes_copied = copy_snapshot_file(&source_path, &tmp_path)?;
-        if output_path.exists() {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(Error::new(
-                ErrorCode::InvalidSearchParams,
-                "snapshot output path already exists",
-            ));
-        }
-        fs::rename(&tmp_path, &output_path)?;
-        sync_parent_dir(&output_path)?;
-        Ok(SnapshotSummary {
-            schema_version: "0.1".into(),
-            source_path,
-            output_path,
-            bytes_copied,
-            last_valid_commit: scan.last_valid_commit,
-            critical_end_offset: scan.critical_end_offset,
-            index_suffix_status: index_suffix_status.as_str().into(),
-        })
+        )
+        .map(|(summary, _, _)| summary)
     }
 
+    pub(crate) fn snapshot_in(
+        &self,
+        output: &Path,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<(SnapshotSummary, RecordReservation, PathBuf)> {
+        // An existing writer already owns the source descriptor and its replayed
+        // catalog. Keep its connection locked while copying, and verify the staged
+        // bytes against both commit identifiers from that particular view.
+        let inner = self.lock()?;
+        inner.storage.require_writer()?;
+        snapshot::publish(
+            &inner.storage,
+            output,
+            inner.catalog.last_commit_id,
+            // The snapshot request contains the commit retained under this guard.
+            // Passing both its batch ID and record sequence lets the copy
+            // verification identify the intended view even when the primary file
+            // also includes a derived suffix.
+            inner.last_commit_sequence_no,
+            context,
+        )
+    }
+
+    /// Rewrite visible records to a validated temporary file and atomically replace the
+    /// database under this writer. Allow space for both generations and take a snapshot first
+    /// if you need the old file.
+    ///
+    /// # Errors
+    ///
+    /// Read-only access, a conflicting embedding model, or insufficient resources can
+    /// prevent replacement. Once replacement succeeds, a later error can leave the new
+    /// generation at the database path. Inspect it before retrying. A successful summary can
+    /// still report a failed index rebuild in its `index_rebuild` field.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) compacts through the writer and inspects the index outcome.
     pub fn compact(&self, options: CompactOptions) -> Result<CompactSummary> {
+        self.compact_in(options, self.json_context())
+    }
+
+    pub(crate) fn compact_in(
+        &self,
+        options: CompactOptions,
+        context: crate::json::JsonOperationContext,
+    ) -> Result<CompactSummary> {
         let started = Instant::now();
-        let context = self.json_context();
         let mut inner = self.lock()?;
         inner.storage.require_writer()?;
+        // The replacement discards obsolete business history. Check model
+        // consistency against the current live catalog before planning the
+        // rewrite, while individual records and their relationships are still
+        // available for diagnosis.
         inner.catalog.require_consistent_models()?;
+        // Capture the source length and counts before dropping any caches or
+        // replacing the file. Segment count refers to a usable persistent
+        // checkpoint in the old generation, irrespective of the optional index
+        // requested for the new one.
         let before = inner.storage.file_size()?;
         let tombstones_removed = inner.catalog.tombstone_count();
         let segments_merged = inner.compacted_persistent_segment_count();
@@ -1007,6 +1708,9 @@ impl Database {
                 "compaction record count overflow",
             )
         };
+        // Count each currently visible collection, document, chunk and embedding
+        // once. This is the number of live objects rewritten, and excludes
+        // bookkeeping that the replacement needs in addition to these objects.
         let records_rewritten = [
             inner.catalog.live_collections().count(),
             inner.catalog.live_documents().count(),
@@ -1017,6 +1721,9 @@ impl Database {
         .try_fold(0usize, |count, n| {
             count.checked_add(n).ok_or_else(count_error)
         })?;
+        // Compaction must preserve deleted collection names. The rewrite emits
+        // both a create and a drop for each such collection, even if no visible
+        // document or chunk remains in it.
         let dropped_count = inner
             .catalog
             .collections
@@ -1028,11 +1735,19 @@ impl Database {
                     .contains(&collection.collection_id)
             })
             .count();
+        // The writer needs the exact number of input records before it starts
+        // consuming them. Include both records for every dropped collection and
+        // one final compaction marker. Fail on overflow before creating a
+        // replacement.
         let record_count = dropped_count
             .checked_mul(2)
             .and_then(|n| records_rewritten.checked_add(n))
             .and_then(|n| n.checked_add(1))
             .ok_or_else(count_error)?;
+        // Compare business history on both sides of the rewrite. For example, a
+        // dropped collection still accounts for two surviving business records.
+        // The marker records rewrite provenance and is excluded from this
+        // comparison.
         let business_records_after = record_count - 1; // CompactMarker is not a business record.
         let records_removed = inner
             .catalog
@@ -1044,15 +1759,26 @@ impl Database {
                     "inconsistent compaction record counts",
                 )
             })?;
+        // Record the source generation and its ID high-water marks. An ID
+        // belonging only to a deleted row may exceed every retained ID of its
+        // kind. Recovery must still allocate beyond that value.
         let marker = RecordPayload::CompactMarker(CompactMarker {
             compact_generation: inner.last_commit_sequence_no,
             source_last_commit_sequence_no: inner.last_commit_sequence_no,
             compacted_at: time::now_rfc3339(),
             records_rewritten,
             id_high_watermarks: inner.catalog.id_high_watermarks.clone(),
+            // The writer fills this placeholder from the encoded primary prefix
+            // before serializing the marker. Its final checksum depends on the
+            // bytes written to the replacement, including the records preceding
+            // the marker.
             compacted_main_checksum: 0,
         });
         let durability = inner.config.durability;
+        // Bound each rewrite batch by a record count and an encoded-byte target.
+        // Even a zero-cache connection needs to make forward progress. The
+        // temporary file consumes the same disk allowance as other work on this
+        // connection.
         let rewrite_plan = RewritePlan {
             records: record_count,
             batch_record_limit: inner.config.resource_profile.params().import_batch_chunks,
@@ -1080,6 +1806,9 @@ impl Database {
         } else {
             None
         };
+        // Prepared checkpoint data and a resident text cache have separate
+        // lifetimes. A lazy connection can request a full checkpoint without
+        // keeping decoded postings in memory after the rewrite.
         let mut text_index = if options.rebuild_indexes && !inner.lazy_text {
             build_text_index_from_checkpoint(
                 text_checkpoint.as_ref(),
@@ -1091,6 +1820,10 @@ impl Database {
         } else {
             TextIndex::default()
         };
+        // Payload references contain file offsets. Replaying the staged replacement
+        // builds references into that file while the current catalog still points
+        // at the source. Swap catalogs only after storage publishes the replacement;
+        // copying the old references would read the wrong records after compaction.
         let mut compacted_catalog = Catalog::new_in(&context);
         // Test pressure is admitted through the real shared ledger at the
         // publication boundary; it does not replace a production operation.
@@ -1103,6 +1836,9 @@ impl Database {
                 )
                 .unwrap()
         });
+        // The staged file will be replayed as a new catalog. Count records during
+        // this replay so the check on its final marker can reject a replacement
+        // that preserved a tombstone or lost business history.
         let mut validated_records = 0usize;
         let scan = {
             let Inner {
@@ -1113,15 +1849,31 @@ impl Database {
                 lazy_vector_segment,
                 ..
             } = &mut *inner;
+            // Read source payloads through the existing descriptor while storage
+            // writes a separate file. Append the marker after every surviving
+            // object so its checksum covers the full preceding data-record stream.
             let reader = storage.payload_reader()?;
             let records = compaction_records(catalog, reader, &context)
+                // The replacement reader follows the source locators while the
+                // writer assigns new ones. Append the marker after the last
+                // retained object so it can summarize the replacement prefix and
+                // carry the high watermarks for IDs removed from the rewrite.
                 .chain(std::iter::once(Ok((marker, context.reservation().into()))));
+            // A storage error can occur on either side of rename. Before
+            // publication the old file is authoritative. After publication,
+            // failure to confirm the handover leaves the writer disabled so it
+            // cannot append using the former offsets.
             rewrite_database_retained_in(
                 storage,
                 records,
                 rewrite_plan,
                 durability,
                 &context,
+                // Creating the staged replacement can require more workspace while
+                // the source and prepared text are still live. Its one-shot
+                // reclaim callback can release either generation's optional
+                // resident text cache. The prepared checkpoint input retains its
+                // own storage.
                 || {
                     let released = text_index.clear_cache();
                     Inner::release_optional_caches(
@@ -1135,6 +1887,11 @@ impl Database {
                     compacted_catalog.apply_retained(record, work, &context)?;
                     validated_records = validated_records.checked_add(1).ok_or_else(count_error)?;
                     // Storage invokes this during validation, before publishing its private file.
+                    // Only after the last expected record can the two catalog
+                    // totals be compared. A create/drop pair is legitimate
+                    // retained history for a reserved collection name. A Tombstone
+                    // record in the result would indicate that obsolete history
+                    // survived.
                     if validated_records == record_count
                         && (compacted_catalog.business_record_count() != business_records_after
                             || compacted_catalog.tombstone_count() != 0)
@@ -1148,6 +1905,10 @@ impl Database {
                 },
             )?
         };
+        // Invalidate old checkpoint state before installing the new in-memory
+        // view. Even an unchanged collection can have different record offsets
+        // after rewriting the file. The following rebuild can only pick sources
+        // from the new file.
         inner.mark_index_checkpoint_rebuild_needed();
         compacted_catalog.last_commit_id = scan.last_valid_commit;
         inner.catalog = compacted_catalog;
@@ -1180,8 +1941,15 @@ impl Database {
                     }
                 })
         };
+        // The replacement has already been published and its catalog installed. From
+        // here a failed index rebuild describes the new file with a missing or
+        // unusable index; restoring the old in-memory catalog would point at
+        // obsolete record offsets.
         let checkpoint_error = if options.rebuild_indexes {
             inner
+                // A requested checkpoint is built against the new primary file's
+                // offsets and sequence. Reuse the preparatory text work, but
+                // supply no vector segments from the old file.
                 .refresh_index_checkpoint_prepared(
                     VectorCache::new(&context),
                     &BTreeSet::new(),
@@ -1190,6 +1958,9 @@ impl Database {
                 )
                 .err()
         } else {
+            // Without an index request the replacement contains only its primary
+            // stream. Report a missing suffix and zero persistent bytes even if
+            // the source generation had a complete checkpoint.
             inner.index_suffix_status = IndexSuffixState::Missing;
             inner.last_index_commit_sequence_no = None;
             inner.index_size_bytes = 0;
@@ -1198,45 +1969,116 @@ impl Database {
         };
         #[cfg(test)]
         drop((file_pressure, checkpoint_pressure));
-        let after = inner.storage.file_size()?;
-        let (index_rebuild, index_rebuild_reason) = if let Some(err) = checkpoint_error {
+        // Treat index construction as a secondary outcome. The compacted primary
+        // file is already in place, so a suffix error is retained in the summary
+        // along with the successful rewrite measurements.
+        let (index_rebuild, index_rebuild_reason) = if let Some(err) = &checkpoint_error {
             (
-                "failed".into(),
+                "failed",
                 Some(format!("index_checkpoint_write_failed: {err}")),
             )
         } else if options.rebuild_indexes {
-            ("full_checkpoint_written".into(), None)
+            ("full_checkpoint_written", None)
         } else {
-            ("disabled".into(), None)
+            ("disabled", None)
         };
+        context
+            .maintenance
+            .update(|state| state.processed_index(index_rebuild, index_rebuild_reason.as_deref()));
+        // Measure the replacement after any index write, since the resulting
+        // length must include that suffix too. A failure here occurs after
+        // publication and can no longer be reported as a failed attempt to replace
+        // the original.
+        let after = (|| {
+            #[cfg(all(feature = "native-test-support", unix))]
+            crate::maintenance_probe::pause("measure_replacement")?;
+            #[cfg(all(test, unix))]
+            crate::maintenance_faults::check(crate::maintenance_faults::Stage::MeasureReplacement)?;
+            inner.storage.file_size()
+        })()
+        .map_err(|e| {
+            let mut error = e
+                .maintenance_phase("measure_replacement", "main_replaced")
+                .with_detail("index_rebuild", index_rebuild);
+            if let Some(reason) = &index_rebuild_reason {
+                error = error.with_detail("index_rebuild_reason", reason);
+            }
+            // A subsequent size error must preserve any outstanding durability
+            // uncertainty from the earlier index write. Knowing which generation
+            // is at the path does not establish whether its changed suffix reached
+            // disk.
+            if let Some((_, durability)) = checkpoint_error
+                .as_ref()
+                .and_then(|error| error.detail().iter().find(|(key, _)| key == "durability"))
+            {
+                error = error.with_detail("durability", durability);
+            }
+            error
+        })?;
+        // Completion here includes a replacement whose optional index build
+        // failed. The summary and the observation carry the index outcome
+        // separately, and a failure to measure the replacement exits before this
+        // completion update.
+        context.maintenance.update(|state| state.complete());
         Ok(CompactSummary {
             before_file_size: before,
             after_file_size: after,
             records_removed,
             tombstones_removed,
             segments_merged,
-            index_rebuild,
+            index_rebuild: index_rebuild.into(),
             index_rebuild_reason,
             duration_ms: started.elapsed().as_millis(),
         })
     }
 
+    /// Flush committed writes and release the connection and its lock, including for all clones
+    /// and collection handles.
+    ///
+    /// # Errors
+    ///
+    /// If flushing fails, the connection has still been closed for all its handles. Open
+    /// the file again to check committed state. A handle inherited by a different process
+    /// is rejected before this operation touches the connection.
+    ///
+    /// # Examples
+    ///
+    /// The [crate example](crate#examples) closes the active writer before taking a snapshot.
     pub fn close(self) -> Result<()> {
+        // Close also requests a data sync from a writer using fast durability. A
+        // read-only connection follows the same cleanup path without issuing that
+        // writer sync.
         self.close_with(Storage::flush_committed)
     }
 
     fn close_with(self, finish: impl FnOnce(&mut Storage) -> Result<()>) -> Result<()> {
+        // Reject a handle inherited across fork before touching the mutex. A child
+        // could otherwise wait on a lock whose owner belonged to another thread in
+        // the parent process.
+        self.require_process()?;
+        // A poisoned mutex bars ordinary database work, but close still has to
+        // release its resources. Recover the guard only to take ownership for
+        // cleanup, and remember to report the poison after a successful flush.
         let (mut slot, poisoned) = match self.inner.lock() {
             Ok(guard) => (guard, false),
             Err(error) => (error.into_inner(), true),
         };
+        // Taking the slot is the single close decision for every clone and
+        // collection handle. An empty slot is an idempotent close. It must not
+        // issue another flush, including after a previous close reported an error.
         let Some(mut inner) = slot.take() else {
             return Ok(());
         };
         // Keep the shared lock until both fallible flushing and resource release finish.
+        // A finish failure still leaves the shared slot empty. Dropping Inner
+        // releases the stored file and its locks, so another caller cannot obtain
+        // that same connection by retrying close.
         let result = finish(&mut inner.storage);
         drop(inner);
         drop(slot);
+        // Preserve the flush error if both flushing and the mutex state indicate
+        // trouble. The slot is already empty on either error and the writer
+        // admission owned by Inner has been released.
         result.and_then(|()| {
             if poisoned {
                 Err(Error::new(
@@ -1250,6 +2092,9 @@ impl Database {
     }
 
     pub(crate) fn json_context(&self) -> crate::json::JsonOperationContext {
+        // Create a fresh per-operation accounting state backed by the same
+        // database ledger. Unrelated calls get separate operation limits while
+        // their combined allocations still compete for the same database memory.
         crate::json::JsonOperationContext::new(Arc::clone(&self.json_work))
     }
 
@@ -1271,6 +2116,9 @@ impl Database {
         context: &crate::json::JsonOperationContext,
         kind: crate::json::JsonInputKind,
     ) -> Result<()> {
+        // Parsed binding arguments may already own JSON and workspace credit on
+        // another ledger. Transfer that live charge as a unit. If the destination
+        // refuses it, the existing reservations retain their original owner.
         self.admit_input_reclaiming(|| context.attach(Arc::clone(&self.json_work), kind))
     }
 
@@ -1281,7 +2129,13 @@ impl Database {
         mut admit: impl FnMut() -> Result<T>,
     ) -> Result<T> {
         match admit() {
+            // Only a memory-budget refusal may improve if resident indexes are
+            // evicted. Schema, size and I/O errors bypass this path and retain
+            // their original classification.
             Err(error) if crate::json::is_memory_budget_error(&error) => {
+                // Reacquire the owner only on the reclamation path. If it closed
+                // or became unusable after the first allocation attempt, propagate
+                // that owner error before attempting another admission.
                 let mut guard = self.lock()?;
                 let inner = &mut *guard;
                 let reclaimed = Inner::release_optional_caches(
@@ -1290,6 +2144,9 @@ impl Database {
                     &mut inner.lazy_vector_segment,
                     std::iter::empty(),
                 );
+                // Drop the guard before repeating input admission. Another handle
+                // may act in between, so this retry may reuse prepared input but
+                // must not rely on any catalog observation made before eviction.
                 drop(guard);
                 if reclaimed {
                     admit()
@@ -1312,17 +2169,33 @@ impl Database {
         let mut input_work = context.reservation();
         // Drop remaining input allocations before their lease on every early return.
         let input = input;
+        // Validate the entire nested document before resolving conflicts. This
+        // admits its owned strings, array and metadata to the operation budget. A
+        // duplicate document marked Skip can therefore still fail input validation.
         input_work.merge(
             self.admit_input_reclaiming(|| input.validate_owned_in(&context, &mut input_strings))?,
         );
+        // Resolve conflicts under the writer's guard, after input admission. The
+        // catalog used to choose replacement IDs cannot change before the staged
+        // records are submitted.
         let mut inner = self.lock()?;
+        // Hold the same catalog view from conflict lookup through the append. IDs
+        // and tombstones below are only a plan until the single batch commits. A
+        // failure while preparing a later chunk cannot publish the staged parent
+        // on its own.
         let (catalog, mut records) = inner.prepare_write_batch(&context);
         let collection = catalog.collection_by_id(collection_id)?;
+        // Only a live alias in the target collection creates a conflict. A deleted
+        // document can leave an external ID in the catalog, and another collection
+        // can use the same external ID independently.
         let existing = catalog
             .document_external_ids
             .get(collection_id, &input.external_id)
             .filter(|id| catalog.is_document_live(id));
         let mut documents_replaced = 0;
+        // The catalog here still describes the old owner of the alias. Replacement
+        // plans can consult its children until the complete batch is submitted,
+        // even after queuing its tombstone.
         if let Some(existing_id) = existing {
             match on_conflict {
                 OnConflict::Error => {
@@ -1331,6 +2204,8 @@ impl Database {
                         format!("document external_id {} already exists", input.external_id),
                     ));
                 }
+                // Skipping the parent accounts for its input children without
+                // planning any of them. There is no batch to append on this return.
                 OnConflict::Skip => {
                     return Ok(InsertSummary {
                         documents_skipped: 1,
@@ -1338,6 +2213,10 @@ impl Database {
                         ..InsertSummary::default()
                     });
                 }
+                // Stage the old parent's tombstone before putting the replacement.
+                // The replacement receives a new internal ID, and its chunks must
+                // refer to that ID. Tombstoning the old parent also hides any old
+                // children that are not reintroduced.
                 OnConflict::Replace => {
                     documents_replaced += 1;
                     records.push_tombstone("document", existing_id, "replace")?;
@@ -1345,6 +2224,9 @@ impl Database {
             }
         }
 
+        // Use one timestamp for the document and all accepted children. Their
+        // internal IDs are derived from the same locked catalog while the record
+        // list is being built.
         let now = time::unix_millis_now();
         let document_id = records.admit(|| catalog.next_id_in("doc_", 0, &context))?;
         let document = Document {
@@ -1357,19 +2239,34 @@ impl Database {
             created_at: records.timestamp(now)?,
             updated_at: records.timestamp(now)?,
         };
+        // A new document is itself a primary record, even if every input chunk is
+        // skipped because its external ID is already visible elsewhere in the
+        // collection. Its summary still reports one inserted document.
         records.push(RecordPayload::DocumentPut(document))?;
         let mut chunks_inserted = 0;
         let mut chunks_skipped = 0;
         let mut chunks_replaced = 0;
         let mut chunk_offset = 0;
         let input_array_bytes = input.chunks.capacity() * std::mem::size_of::<crate::ChunkInput>();
+        // Planning walks the input children in their original order. Allocate each
+        // accepted child a fresh internal ID and attach it to the new parent.
+        // Conflict handling can discard or retire a previous object without
+        // reusing its ID.
         for chunk_input in input.chunks {
+            // Chunk external IDs are unique across the collection, including chunks
+            // owned by other documents. Check the committed catalog here; the
+            // earlier validation has already checked duplicate IDs and ordinals
+            // within this input.
             if let Some(existing_chunk) = catalog
                 .chunk_external_ids
                 .get(collection_id, &chunk_input.chunk_external_id)
                 .filter(|id| catalog.is_chunk_live(id))
             {
                 match on_conflict {
+                    // The document put and any earlier child puts are still
+                    // private to the batch. An already-used chunk alias can
+                    // therefore fail this entire request without leaving the newly
+                    // planned document visible.
                     OnConflict::Error => {
                         return Err(Error::new(
                             ErrorCode::DuplicateExternalId,
@@ -1381,6 +2278,10 @@ impl Database {
                     }
                     OnConflict::Skip => {
                         chunks_skipped += 1;
+                        // The skipped row's strings and metadata were admitted with
+                        // the whole input. Measure both while the row still exists,
+                        // then drop it and refund those two charges. The
+                        // surrounding input array still owns its slots.
                         let bytes = chunk_input.workspace_bytes();
                         let json_bytes = chunk_input.metadata.retained_bytes_in(
                             crate::json::JsonInputKind::ChunkMetadata,
@@ -1391,15 +2292,26 @@ impl Database {
                         input_work.retain(input_work.reserved_bytes() - json_bytes);
                         continue;
                     }
+                    // A conflicting chunk may belong to another visible document.
+                    // Target its old internal ID with the tombstone. The following
+                    // ChunkPut gets a new ID and points at the document being
+                    // inserted.
                     OnConflict::Replace => {
                         chunks_replaced += 1;
                         records.push_tombstone("chunk", existing_chunk, "replace")?;
                     }
                 }
             }
+            // Resolve the source coordinates and token-count hint before moving the
+            // text and metadata into the new row. Only accepted chunks consume an
+            // offset from the catalog's chunk ID high-water mark.
             let source_span = chunk_input.resolved_source_span()?;
             let token_count = records.admit(|| token_count_hint_in(&chunk_input.text, &context))?;
             let chunk_id = records.admit(|| catalog.next_id_in("chk_", chunk_offset, &context))?;
+            // The stored text hash covers the original text bytes. The token count
+            // describes the tokenizer's output and the ordinal comes from the
+            // input. None of them is the running counter used to allocate chunk
+            // IDs.
             let chunk = Chunk {
                 chunk_id: records.retain_string(chunk_id),
                 document_id: records.copy_string(document_id.as_ref())?,
@@ -1410,20 +2322,39 @@ impl Database {
                 text: chunk_input.text,
                 ordinal: chunk_input.ordinal,
                 metadata: chunk_input.metadata,
+                // The new chunk starts without a selected embedding. An older
+                // chunk with the same external ID may have had one, but a later
+                // EmbeddingPut must link a vector to the new internal chunk ID.
                 embedding_id: None,
                 source_span,
                 created_at: records.timestamp(now)?,
             };
             chunk_offset += 1;
             chunks_inserted += 1;
+            // Retain the entire batch until all the input chunks have passed.
+            // Checking a late source span or running out of scratch for
+            // tokenization can still fail after earlier chunk records have been
+            // built.
             records.push(RecordPayload::ChunkPut(chunk))?;
         }
+        // The input iterator has now released its backing array. Transfer the
+        // remaining string and JSON credit alongside the records that took
+        // ownership of those values.
         drop(document_id);
         input_strings.retain(input_strings.reserved_bytes() - input_array_bytes);
         records.retain_json(input_work);
         records.retain_workspace(input_strings);
+        // Finish planning before emitting any records. A refusal for a later child
+        // can still abort the whole operation, even if earlier replacements had
+        // already been selected in memory.
         let records = records.into_batch();
+        // Submit the document, its chunks and any replacement tombstones as one
+        // primary batch. Index maintenance follows that commit, so an error from
+        // this call can arrive after the data became visible.
         inner.append_and_apply(records, &context)?;
+        // The new document put counts as an insertion even when it replaces an
+        // existing document. A replacement can therefore increment both counters
+        // for one supplied document.
         Ok(InsertSummary {
             documents_inserted: 1,
             chunks_inserted,
@@ -1444,6 +2375,9 @@ impl Database {
         let mut input_work = context.workspace_reservation();
         // The input array must be dropped before its workspace lease on failure.
         let embeddings = input;
+        // The outer array owns capacity for every input slot while each row owns
+        // its strings and vector. Charge both before allocating record storage.
+        // Skipping a row later can release its payload independently of the array.
         let input_array_bytes = embeddings.capacity() * std::mem::size_of::<EmbeddingInput>();
         let bytes = input_array_bytes
             + embeddings
@@ -1458,14 +2392,26 @@ impl Database {
         let mut skipped = 0;
         let mut replaced = 0;
         let mut embedding_offset = 0;
+        // Identify repeats within this request separately from an embedding already
+        // stored for a chunk. The conflict policy applies to that stored embedding.
+        // Two input rows for the same chunk are ambiguous under every policy.
+        // The duplicate scan compares target aliases and returns an input index
+        // without consuming rows. Original input order remains available for
+        // structural diagnostics and for assigning IDs to accepted writes.
         let duplicate = records.admit(|| {
             crate::model::first_duplicate_index_by(&embeddings, &context, |left, right| {
                 left.chunk_external_id.cmp(&right.chunk_external_id)
             })
         })?;
+        // Check the structure of every input before reporting a duplicate. A
+        // malformed vector still diagnoses its own error even when the target ID
+        // also occurs twice.
         for input in &embeddings {
             input.validate_structure()?;
         }
+        // The index points into the original input vector, so the duplicate
+        // diagnostic can name the caller's chunk alias without making an owned
+        // copy of every key for the check.
         if let Some(index) = duplicate {
             return Err(Error::new(
                 ErrorCode::DuplicateExternalId,
@@ -1475,10 +2421,23 @@ impl Database {
                 ),
             ));
         }
+        // Use a single model admission state for the batch. An unbound collection
+        // can acquire a model from the first row that reaches the write path, and
+        // later accepted rows must agree with it.
         let mut models = records.admit(|| ModelAdmission::new(catalog, collection, &context))?;
+        // The batch-wide model state carries the result of previously accepted
+        // input rows. A skipped row leaves that state alone, so it cannot choose
+        // the model for a later accepted vector.
         for input in embeddings {
+            // Dimension and chunk membership are required even for a row ultimately
+            // skipped. Model agreement is checked only after resolving the
+            // existing-embedding policy.
             input.validate_target_dimension(collection.embedding_dim)?;
             let chunk = catalog.chunk_by_external_id(collection_id, &input.chunk_external_id)?;
+            // Look up the embedding selected for the live chunk, not any
+            // historical record that mentions its external ID. The decision is
+            // specific to this collection even if the same alias appears in
+            // another one.
             if catalog.embedding_for_chunk(&chunk.chunk_id).is_some() {
                 match on_conflict {
                     OnConflict::Error => {
@@ -1492,6 +2451,10 @@ impl Database {
                     }
                     OnConflict::Skip => {
                         skipped += 1;
+                        // Drop the skipped vector and its strings before refunding
+                        // their capacity. They never move into a record. Keep the
+                        // slot charge until the consuming iterator releases the
+                        // array.
                         let bytes = input.workspace_bytes();
                         drop(input);
                         input_work.retain(input_work.reserved_bytes() - bytes);
@@ -1500,9 +2463,19 @@ impl Database {
                     OnConflict::Replace => replaced += 1,
                 }
             }
+            // Only rows that reach this point are allowed to bind an unbound
+            // model. A model named solely by skipped rows cannot constrain later
+            // writes in the same request.
             records.admit(|| models.validate_write(&input.model_name, None, &context))?;
+            // An accepted replacement gets a fresh embedding ID. Applying its put
+            // record switches the chunk's link to the new embedding, so replacement
+            // needs no separate tombstone here.
             let embedding_id =
                 records.admit(|| catalog.next_id_in("emb_", embedding_offset, &context))?;
+            // Keep the caller's vector in its existing allocation. The new
+            // internal ID distinguishes this version from a previously committed
+            // embedding while the chunk's stable internal ID identifies which link
+            // replay must replace.
             let embedding = Embedding {
                 embedding_id: records.retain_string(embedding_id),
                 chunk_id: records.copy_string(&chunk.chunk_id)?,
@@ -1513,11 +2486,22 @@ impl Database {
                 vector: input.vector,
                 created_at: records.timestamp(time::unix_millis_now())?,
             };
+            // The offset covers rows that actually receive an embedding ID. A
+            // replacement counts as a new put as well as a replacement in the
+            // summary.
             embedding_offset += 1;
             inserted += 1;
             records.push(RecordPayload::EmbeddingPut(embedding))?;
         }
+        // The final credit can still cover accepted vectors already moved into the
+        // batch. Subtract only the capacity of the now-consumed input array before
+        // handing that credit to the record owner.
         input_work.retain(input_work.reserved_bytes() - input_array_bytes);
+        // An empty or all-skipped input has no primary records to append. Otherwise
+        // the batch takes the remaining input credit and owns the accepted vectors
+        // through encoding and commit.
+        // No new records means there is no commit to write. This includes an input
+        // for which every row was accepted as a conflict skip.
         if !records.records().is_empty() {
             records.retain_workspace(input_work);
             let records = records.into_batch();
@@ -1538,6 +2522,10 @@ impl Database {
     ) -> Result<Document> {
         let context = self.json_context();
         self.lock()?.read_reclaiming(|inner| {
+            // An internal document ID is global, but the handle is scoped to one
+            // collection. Apply the collection and visibility checks before
+            // copying its metadata. The caller gets an owned document independent
+            // of this guard.
             let document = inner
                 .catalog
                 .document_by_id_ref(collection_id, document_id)?;
@@ -1561,6 +2549,10 @@ impl Database {
         external_id: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<(Document, RecordReservation)> {
+        // Resolve the external alias and copy its current document under the same
+        // lock. The returned reservation permits the binding to move the
+        // document's strings and metadata into its JSON output after the lookup
+        // returns.
         self.lock()?.read_reclaiming(|inner| {
             let document = inner
                 .catalog
@@ -1575,6 +2567,9 @@ impl Database {
         document_id: &str,
     ) -> Result<Vec<Chunk>> {
         let context = self.json_context();
+        // Listing children first validates the parent and orders its live chunks
+        // by ordinal, preserving their original order on ties. Materialize each
+        // payload in that order while the same generation is locked.
         self.lock()?.read_reclaiming(|inner| {
             inner.materialize_document_chunks_in(collection_id, document_id, &context)
         })
@@ -1587,6 +2582,10 @@ impl Database {
     ) -> Result<Vec<Chunk>> {
         let context = self.json_context();
         self.lock()?.read_reclaiming(|inner| {
+            // A replacement document can reuse the external alias and receive a
+            // different internal ID. Resolve the parent and enumerate its children
+            // in this one read so an alias change cannot switch generations
+            // halfway through the result.
             let document = inner
                 .catalog
                 .document_by_external_id(collection_id, external_id)?;
@@ -1601,6 +2600,10 @@ impl Database {
     ) -> Result<Chunk> {
         let context = self.json_context();
         self.lock()?.read_reclaiming(|inner| {
+            // Materialization accepts only a global chunk ID. First reject an ID
+            // from another collection, a deleted chunk, or a chunk hidden by its
+            // parent. The lookup of stored text alone cannot establish these
+            // conditions.
             inner.catalog.chunk_by_id(collection_id, chunk_id)?;
             inner
                 .materialize_chunk_in(chunk_id, &context)
@@ -1615,6 +2618,9 @@ impl Database {
     ) -> Result<Chunk> {
         let context = self.json_context();
         self.lock()?.read_reclaiming(|inner| {
+            // Resolve the visible internal ID through this collection's alias map
+            // before looking up payload bytes. Replacing a chunk can leave its old
+            // on-disk text intact while directing the alias to a different record.
             let chunk = inner
                 .catalog
                 .chunk_by_external_id(collection_id, chunk_external_id)?;
@@ -1644,19 +2650,33 @@ impl Database {
     ) -> Result<(crate::model::ChunkContent, RecordReservation)> {
         self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
         self.lock()?.read_reclaiming(|inner| {
+            // The external flag selects the key namespace. A caller-supplied alias
+            // could itself look like a generated chunk ID, so do not try one form
+            // and then the other on a miss.
             let visible = if external {
                 inner.catalog.chunk_by_external_id(collection_id, id)?
             } else {
                 inner.catalog.chunk_by_id(collection_id, id)?
             };
+            // Materialize from the internal ID selected in this view. A later
+            // failure copying the document would drop this retained chunk and its
+            // credit, so a successful return always includes the matching pair.
             let (payload, mut work) = inner.materialize_chunk_in(&visible.chunk_id, context)?;
             // Drop the owned payload before its credit if a later read fails.
             let chunk = payload;
+            // Join the materialized chunk to its own parent ID within this locked
+            // view. Fetching the parent in a separate public lookup could pair
+            // text from an old chunk with a document observed after a concurrent
+            // replacement.
             let document = inner
                 .catalog
                 .document_by_id_ref(collection_id, &chunk.document_id)?;
             let (payload, document_work) = copy_document_in(document, context)?;
             let document = payload;
+            // The returned content owns copies of both records. Merge the parent
+            // credit before passing the pair to output conversion, which may
+            // retain their strings and JSON together after the lock has been
+            // released.
             work.merge(document_work);
             let result = crate::model::ChunkContent { chunk, document };
             Ok((result, work))
@@ -1680,7 +2700,14 @@ impl Database {
     ) -> Result<()> {
         self.attach_json_context(context, crate::json::JsonInputKind::JsonlRecord)?;
         let mut inner = self.lock()?;
+        // The target is resolved in the current catalog before the batch reaches
+        // storage's writer check. A missing or hidden ID can therefore fail here
+        // without attempting a physical write.
         let (catalog, mut records) = inner.prepare_write_batch(context);
+        // Require a visible document in the addressed collection before emitting a
+        // tombstone. Visibility checks on its descendants consult this document,
+        // so one committed deletion also hides its chunks and their selected
+        // embeddings.
         catalog.document_by_id_ref(collection_id, document_id)?;
         records.push_tombstone("document", document_id, "delete_document")?;
         let records = records.into_batch();
@@ -1705,6 +2732,10 @@ impl Database {
         self.attach_json_context(context, crate::json::JsonInputKind::JsonlRecord)?;
         let mut inner = self.lock()?;
         let (catalog, mut records) = inner.prepare_write_batch(context);
+        // A chunk tombstone affects this child and the visibility of its selected
+        // embedding. Its siblings and parent remain live. Test collection
+        // membership before emitting it so a foreign internal ID cannot delete
+        // another collection's chunk.
         catalog.chunk_by_id(collection_id, chunk_id)?;
         records.push_tombstone("chunk", chunk_id, "delete_chunk")?;
         let records = records.into_batch();
@@ -1713,6 +2744,9 @@ impl Database {
 
     pub(crate) fn collection_stats_by_id(&self, collection_id: &str) -> Result<CollectionStats> {
         let context = self.json_context();
+        // The statistics record copies the collection name. Hold its credit until
+        // the typed result leaves the database operation, then let the caller own
+        // that string independently of the catalog.
         let (stats, _work) = self
             .lock()?
             .read_reclaiming(|inner| inner.collection_stats_retained(collection_id, &context))?;
@@ -1724,8 +2758,14 @@ impl Database {
         collection_id: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<(JsonValue, RecordReservation)> {
+        // Attach the operation budget before locking for the read. If admission
+        // needs to evict optional caches, it may acquire the connection mutex
+        // itself.
         self.attach_json_context(context, crate::json::JsonInputKind::StoredJson)?;
         self.lock()?.read_reclaiming(|inner| {
+            // The collection name in the typed stats owns memory. Transfer that
+            // workspace charge into the conversion so the returned JSON can retain
+            // the name without a second copy.
             let (stats, retained) = inner.collection_stats_retained(collection_id, context)?;
             let mut work = RecordReservation::new(context.reservation(), retained);
             let value = stats.into_json_retained(&mut work)?;
@@ -1737,6 +2777,9 @@ impl Database {
         &self,
         read: impl FnOnce(&Catalog, &Storage) -> Result<T>,
     ) -> Result<T> {
+        // A catalog row can refer to a payload by file offset. Hold the connection
+        // guard through the callback so both references describe the same file and
+        // catalog view.
         let inner = self.lock()?;
         read(&inner.catalog, &inner.storage)
     }
@@ -1754,6 +2797,9 @@ impl Database {
             lazy_vector_segment,
             ..
         } = &mut *guard;
+        // Give the reader access to eviction without lending out the entire
+        // connection. The callback can make space while it still holds catalog
+        // rows and file offsets from this view.
         let mut reclaim = || {
             Inner::release_optional_caches(
                 text_index,
@@ -1762,6 +2808,9 @@ impl Database {
                 std::iter::empty(),
             )
         };
+        // Invoke the reader once. The export path may already have emitted rows
+        // when it asks for memory, so it decides which local preparation steps are
+        // safe to repeat.
         read(catalog, storage, &mut reclaim)
     }
 
@@ -1779,6 +2828,9 @@ impl Database {
         profile_override: Option<ResourceProfile>,
         prepared_context: Option<crate::json::JsonOperationContext>,
     ) -> Result<(SearchResults, RecordReservation)> {
+        // Measured and ordinary searches use the same recall, scoring and output
+        // paths. Leaving the trace absent skips instrumentation while preserving
+        // the query's own execution statistics.
         self.search_in_collection_traced(
             collection_id,
             text,
@@ -1795,6 +2847,11 @@ impl Database {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // Each retrieval branch produces a bounded window. Surviving IDs from either
+    // window may need the other branch's score before fusion. Score completion
+    // must preserve which branch actually recalled each ID: the diagnostic output
+    // reports that membership even when both scores are available. Only after
+    // fusion can the caller's final top_k limit be applied.
     pub(crate) fn search_in_collection_traced(
         &self,
         collection_id: &str,
@@ -1809,9 +2866,18 @@ impl Database {
         prepared_context: Option<crate::json::JsonOperationContext>,
         trace: Option<&crate::search_cost::SearchCostTrace>,
     ) -> Result<(SearchResults, RecordReservation)> {
+        // Finish the optional trace on every return, including invalid requests.
+        // Reservations and cache entries can carry copies of its handle beyond the
+        // search and must stop recording after its scope ends.
         let _trace_scope = trace.map(crate::search_cost::SearchCostTrace::scope);
         let text = normalize_search_text(text);
+        // Reject an invalid limit before checking for a missing retrieval input.
+        // Both errors can apply to the same request, and callers use the field
+        // detail to distinguish them.
         crate::query::validate_search_top_k(top_k)?;
+        // Treat whitespace-only text as absent before testing the available
+        // routes. A vector can still make this request valid. A predicate or boost
+        // configuration by itself supplies no candidates.
         if text.is_none() && vector.is_none() {
             return Err(Error::new(
                 ErrorCode::InvalidSearchParams,
@@ -1821,6 +2887,9 @@ impl Database {
             .with_detail("embedding_present", false));
         }
 
+        // A prepared context comes with caller-held input reservations. An
+        // ordinary builder supplies borrowed inputs whose storage must be admitted
+        // here for the duration of the search.
         let preprocessed = prepared_context.is_some();
         let context = prepared_context.unwrap_or_else(|| self.json_context());
         let context = match trace {
@@ -1829,6 +2898,9 @@ impl Database {
         };
         let phase_timer = context.search_cost_timer();
         if preprocessed {
+            // Attaching the context can fail before recall starts. Identify that
+            // failure with the prepared boost when present, the vector for an
+            // unrestricted vector request, or the filter for other requests.
             let kind = if metadata_boost_config.is_some() {
                 crate::json::JsonInputKind::MetadataBoost
             } else if vector.is_some()
@@ -1851,13 +2923,22 @@ impl Database {
                 })
             })
             .transpose()?;
+        // Hold the connection guard while choosing sources and materializing hits.
+        // The catalog membership checked by recall, the payload offsets used for
+        // each row and the final filter explanations must describe one view.
         let mut guard = self.lock()?;
         let inner = &mut *guard;
         let (mut collection, mut collection_work) = inner.read_reclaiming(|inner| {
             copy_collection_in(inner.catalog.collection_by_id(collection_id)?, &context)
         })?;
+        // The stored model is relevant only to vector scoring. A text-only search
+        // can read the collection without asking the catalog to establish an
+        // embedding model.
         if let Some(query_embedding) = &vector {
             query_embedding.validate_structure(&collection)?;
+            // The collection can have a model established by visible embeddings
+            // even when its configuration has no model name. Check that binding
+            // after validating the vector shape and before scoring any candidates.
             inner.cache_collection_model(collection_id)?;
             inner
                 .catalog
@@ -1866,10 +2947,16 @@ impl Database {
         }
         let profile = profile_override.unwrap_or(inner.config.resource_profile);
         let params = profile.params();
+        // An explicit database cache setting still applies when the query
+        // overrides its resource profile. The profile can change the candidate
+        // windows without changing that byte allowance.
         let cache_budget_mb = inner
             .config
             .cache_budget_mb
             .unwrap_or(params.cache_budget_mb);
+        // A query can request a profile with a smaller cache allowance than a
+        // previous call. Bring optional caches within that allowance before
+        // computing the recall limits or preparing another index.
         if inner.optional_cache_bytes() > cache_budget_mb.saturating_mul(1_048_576) {
             Inner::release_optional_caches(
                 &mut inner.text_index,
@@ -1878,11 +2965,17 @@ impl Database {
                 std::iter::empty(),
             );
         }
+        // top_k is a result limit. Widen every intermediate window as needed so
+        // the profile cannot discard a possible result solely because its default
+        // window is smaller than the request.
         let limits = CandidateLimits {
             bm25: params.bm25_candidates.max(top_k),
             vector: params.vector_candidates.max(top_k),
             fusion: params.fusion_candidates.max(top_k),
         };
+        // Keep the compiled predicate and its reservation for the whole pipeline.
+        // Recall evaluates it as a boolean and the returned rows later use it to
+        // explain their individual matches.
         let (filter_expr, _compiled_filter_work) = inner.read_reclaiming(|_| {
             FilterExpr::parse_validated_in(
                 filter_json,
@@ -1896,6 +2989,9 @@ impl Database {
             .unwrap_or(0);
         let mut result_work =
             RecordReservation::new(context.reservation(), context.workspace_reservation());
+        // Record the supplied rule identity even when boosting was disabled. The
+        // digest and rule count describe the configuration, while the effective
+        // weights use only enabled, nonempty rules.
         let boost_config_hash = metadata_boost_config
             .as_ref()
             .map(|config| result_work.copy_string(config.hash(), &context))
@@ -1914,6 +3010,9 @@ impl Database {
             // Queries cannot reuse the text cache retained for a failed or deferred update.
             inner.text_index = TextIndex::default();
         }
+        // Budget a transient scan by its estimated peak workspace before opening a
+        // payload reader. The query report accounts separately for cumulative
+        // payload bytes read during the scan.
         let scratch_bytes = (!checkpoint_ready).then(|| {
             transient_query_scratch_bytes(
                 &inner.catalog,
@@ -1924,6 +3023,10 @@ impl Database {
                 limits.vector,
             )
         });
+        // The request context travels with the results and constrains
+        // interpretation of the counters. Build it from the requested inputs and
+        // admitted limits before search execution adds the observed candidate
+        // counts.
         let query_context_input = SearchQueryContextInput {
             text_present: text.is_some(),
             embedding_present: vector.is_some(),
@@ -1937,6 +3040,10 @@ impl Database {
             profile,
             candidate_limits: limits,
             cache_budget_mb,
+            // Seed the transient scan count with the collection's live chunk
+            // population. A resident index supplies the same count without walking
+            // the catalog. The context suppresses this measurement when the final
+            // source is persistent.
             chunks_scanned: if checkpoint_ready && inner.text_index.has_resident_cache() {
                 inner.text_index.collection_chunk_count(collection_id)
             } else {
@@ -1951,6 +3058,9 @@ impl Database {
         if let Some(scratch_bytes) = scratch_bytes {
             ensure_transient_rebuild_budget(scratch_bytes, cache_budget_mb, profile)?;
         }
+        // Cache preparation is optional and can itself discover an invalid
+        // segment. Recheck the source after the reads below before deciding which
+        // results or scan budget to use.
         if text.is_some() && checkpoint_ready {
             inner.prepare_text_index(cache_budget_mb, &context)?;
         }
@@ -1959,9 +3069,15 @@ impl Database {
         }
         #[cfg(test)]
         inner.run_query_output_hook(QueryOutputStage::CheckpointCandidates);
+        // End the input-and-index preparation timer before starting recall. Stage
+        // contexts share the operation's ledger, but elapsed time and work are
+        // attributed to their own trace stages.
         drop(phase_timer);
         let context = context.search_cost_stage(crate::search_cost::Stage::Recall);
         let phase_timer = context.search_cost_timer();
+        // A hybrid query with a resident vector segment performs text recall first
+        // so its temporary text workspace can be reused during vector scoring.
+        // Either the multi-collection cache or the single lazy entry qualifies.
         let cached_hybrid = text.is_some()
             && vector.is_some()
             && (inner
@@ -1974,6 +3090,9 @@ impl Database {
                     .is_some_and(|segment| segment.collection_id == collection_id));
         let mut streamed_text = if cached_hybrid {
             let query = text.unwrap();
+            // The checkpoint helper may score resident postings or stream the text
+            // extent. Some(empty) is a completed recall with no hits. None leaves
+            // the caller responsible for finding another usable path.
             let hits = inner.search_checkpoint_text_index(
                 collection_id,
                 query,
@@ -1998,9 +3117,15 @@ impl Database {
         } else {
             None
         };
+        // Keep vector work outside the candidate table. Validation can discard
+        // provisional hits and a later attempt can repeat comparisons, but that
+        // work still belongs to this search.
         let mut vector_work = VectorWork::default();
         let mut streamed_vectors = if let Some(query) = vector {
             inner.search_checkpoint_vector_index_with_work(
+                // Vector recall records its own row checks and distance work. A
+                // valid vector result can still describe the current primary view
+                // if text validation later rules out use of the common checkpoint.
                 &collection,
                 &query.vector,
                 limits.vector,
@@ -2012,6 +3137,9 @@ impl Database {
             None
         };
         if !cached_hybrid {
+            // When no resident vector segment dictated the text-first order,
+            // perform text recall after the first vector attempt. Both lookups can
+            // reclaim caches or discover that the checkpoint is unusable.
             streamed_text = if let Some(query) = text {
                 inner.search_checkpoint_text_index(
                     collection_id,
@@ -2023,6 +3151,9 @@ impl Database {
                 None
             };
         }
+        // Only an absent vector result is reconsidered after the text lookup. Zero
+        // matches from a validated vector source already constitute a complete
+        // result, including when the filter rejected every entry.
         if let Some(query) = vector.filter(|_| streamed_vectors.is_none()) {
             streamed_vectors = inner.search_checkpoint_vector_index_with_work(
                 &collection,
@@ -2037,12 +3168,25 @@ impl Database {
             // Lazy vector validation can invalidate the checkpoint after query preflight.
             inner.text_index = TextIndex::default();
         }
+        // Choose the score source after lazy validation. A text lookup may have
+        // succeeded before the vector lookup invalidated the checkpoint. Discard
+        // those text hits too and check the estimated cost of a transient scan
+        // against the cache budget before reading payloads.
+        // A text-only request can read an available resident index later. A
+        // request with a vector needs a completed vector window before the query
+        // can claim the persistent path.
         let use_persistent_checkpoint = inner.index_suffix_status
             == IndexSuffixState::PersistentCheckpoint
             && (vector.is_none() || streamed_vectors.is_some());
+        // Drop the provisional text window before reserving transient scratch so
+        // its IDs and term explanations no longer compete with the replacement
+        // scan.
         if !use_persistent_checkpoint {
             drop(streamed_text.take());
         }
+        // Create the report after the initial source decision. Later, a
+        // supplemental text lookup can still force fallback and must update this
+        // same context before any hit explanation copies it.
         let mut query_context = SearchQueryContext::from_checkpoint_with(
             query_context_input,
             use_persistent_checkpoint,
@@ -2064,6 +3208,10 @@ impl Database {
         }
 
         let mut transient_bytes_read = 0u64;
+        // A text window can already be available at this point. Reuse its scores
+        // and explanations instead of reading the same postings again. With no
+        // usable checkpoint the primary catalog provides the collection
+        // population.
         let mut bm25_hits = if let Some(query) = &text {
             if use_persistent_checkpoint {
                 if let Some(hits) = streamed_text {
@@ -2077,6 +3225,10 @@ impl Database {
                     )?
                 }
             } else {
+                // A transient text search can visit the same primary record
+                // separately for statistics and scoring. Count its encoded payload
+                // length on each storage-backed read. Text already held in the
+                // catalog contributes no file bytes.
                 let mut reader = inner.storage.payload_reader()?;
                 TextIndex::search_from_snapshot(
                     &inner.catalog.visible_snapshot(),
@@ -2097,10 +3249,17 @@ impl Database {
         } else {
             Bm25Hits::empty(&context)
         };
+        // Vector selection tests eligibility while scanning. Text recall has already
+        // bounded its window before the common metadata filter runs. Moving that
+        // filter across either limit changes which chunks can enter fusion.
         let include_vector = |id: &str| {
             matches_vector_filter(&inner.catalog, collection_id, filter_expr.as_ref(), id)
         };
         let mut vector_hits = if let Some(query_embedding) = &vector {
+            // Text validation can invalidate the checkpoint after vector recall
+            // has returned a completed window. Its vector hits remain usable here
+            // while the text path falls back. Without a vector window, exact
+            // recall loads primary vectors only for eligible chunk IDs.
             if let Some(hits) = streamed_vectors {
                 hits
             } else {
@@ -2126,14 +3285,23 @@ impl Database {
                         )
                     },
                 )?;
+                // Add the primary scan to any earlier checkpoint attempts. A visit
+                // counts as a scan even when no distance is evaluated. The
+                // component counter grows only for scored vectors.
                 vector_work.add(work);
                 hits
             }
         } else {
             VectorHits::empty(&context)
         };
+        // Keep row checks and scored components as separate counters. A filtered
+        // row can increment the first without increasing the second. Score
+        // completion adds its own observed values after recall has finished.
         let vector_scan_count = vector_work.scans;
         if !use_persistent_checkpoint {
+            // The byte count measures cumulative payload reads. For a vector-only
+            // fallback, the work unit is a visited embedding, so replace the
+            // initial count of all live chunks with the observed vector visits.
             query_context.transient_rebuild.bytes_read = Some(transient_bytes_read);
             if text.is_none() {
                 query_context.transient_rebuild.chunks_scanned = Some(vector_scan_count);
@@ -2141,6 +3309,9 @@ impl Database {
         }
         let distance_ops = vector_work.distance_ops;
 
+        // The text window is filtered after recall. All its rows might be removed
+        // even though a surviving vector hit matches the query text. Preserve the
+        // pre-filter fact so score completion can look up that hit's BM25 score.
         let text_has_matches = !bm25_hits.is_empty();
         filter_candidates(
             &inner.catalog,
@@ -2153,6 +3324,10 @@ impl Database {
         context.search_cost_count(crate::search_cost::Count::Bm25Recall, bm25_hits.len());
         context.search_cost_count(crate::search_cost::Count::VectorRecall, vector_hits.len());
         if trace.is_some() {
+            // Compute the union for the trace without allocating another
+            // identifier set. Text IDs are already sorted and a hit from both
+            // windows counts once. The untraced search avoids this extra
+            // membership pass.
             let union = bm25_hits.len()
                 + vector_hits
                     .iter()
@@ -2169,9 +3344,16 @@ impl Database {
         let phase_timer = context.search_cost_timer();
         #[cfg(test)]
         inner.run_query_output_hook(QueryOutputStage::Fusion);
+        // Recall has fixed the union of candidate IDs. Supplementary lookups fill in
+        // the other score for members of that union. They can add read and distance
+        // work, but cannot admit a chunk missed by both windows.
         let mut supplementary_work = VectorWork::default();
         let mut supplementary_bytes_read = 0;
         let mut supplement_fallback = false;
+        // Reclamation may repeat the completion pass with new temporary score
+        // tables. Preserve its work counters and the text invalidation flag across
+        // attempts so repeated reads are counted and an invalidated source cannot
+        // be selected on retry.
         let supplement = inner.read_reclaiming(|inner| {
             supplement_scores(
                 inner,
@@ -2189,6 +3371,9 @@ impl Database {
             )
         })?;
         if supplement.invalidated_text {
+            // A checkpoint that supplied recall can fail when completing the text
+            // scores of vector hits. Keep the already selected candidate IDs and
+            // record that their missing scores came from the primary snapshot.
             inner.mark_index_checkpoint_rebuild_needed();
             query_context.index_source.clear();
             query_context.index_source.push_str("transient_rebuild");
@@ -2196,6 +3381,9 @@ impl Database {
                 Some(result_work.copy_string("in_memory_index_from_committed_snapshot", &context)?);
             query_context.transient_rebuild.started = true;
             query_context.transient_rebuild.completed = true;
+            // Fallback during score completion records the collection population
+            // for the transient text pass. The candidate limits and recall counts
+            // continue to describe the original windows.
             query_context.transient_rebuild.chunks_scanned = Some(
                 inner
                     .catalog
@@ -2207,6 +3395,9 @@ impl Database {
         drop(phase_timer);
         let context = context.search_cost_stage(crate::search_cost::Stage::NormalizationFusion);
         let phase_timer = context.search_cost_timer();
+        // Keep the two bounded recall lists as the source of candidate IDs. The
+        // supplementary tables supply scores on lookup; passing them as recall
+        // lists would give a hit spurious route provenance.
         let completed = inner.read_reclaiming(|inner| {
             fuse_completed_candidates(
                 &inner.catalog,
@@ -2221,8 +3412,15 @@ impl Database {
                 &context,
             )
         })?;
+        // Normalization uses the distinct candidates before the fusion cutoff. The
+        // retained count below can be smaller, and top_k can reduce it again.
+        // Preserve all three quantities for the result and its explanations.
         let normalization_candidate_count = completed.candidate_count;
         let bm25_max = text.map(|_| completed.bm25_max);
+        // Fusion owns the bounded set of ranked candidates. Keep the complete set
+        // until final materialization, where top_k limits how many entries are
+        // consumed, rather than capping either retrieval branch at that same
+        // value.
         let fused = completed.hits;
         let fused_scores = fused.as_slice();
         let fusion_candidate_count = fused_scores.len();
@@ -2230,12 +3428,21 @@ impl Database {
             crate::search_cost::Count::FusionRetained,
             fusion_candidate_count,
         );
+        // Report all vector work, including reads and distances needed to complete
+        // scores. The count of recalled candidates alone omits chunks whose
+        // embedding was read only because BM25 selected them.
         let vector_scan_count = vector_scan_count + supplement.vector_scans;
         let distance_ops = distance_ops + supplement.distance_ops;
+        // A persistent recall followed by transient score completion must still
+        // report payload reads. The completion counter starts separately from
+        // recall, so joining them here counts each phase once.
         if !use_persistent_checkpoint || supplement.invalidated_text {
             query_context.transient_rebuild.bytes_read =
                 Some(transient_bytes_read + supplement.bytes_read);
         }
+        // Record each route's surviving window before applying the final page
+        // size. An ID can contribute to both route counts. The fusion count
+        // includes only distinct IDs retained after scoring.
         query_context.candidate_counts = CandidateLimits {
             bm25: bm25_hits.len(),
             vector: vector_hits.len(),
@@ -2252,6 +3459,9 @@ impl Database {
         let _phase_timer = context.search_cost_timer();
         #[cfg(test)]
         inner.run_query_output_hook(QueryOutputStage::ResultArray);
+        // Reserve the row slots using the smaller of the fusion result count and
+        // top_k. Preparation of a row may need additional credit for IDs, metadata
+        // and its explanation, even after its slot fits.
         let mut results = inner.read_reclaiming(|_| {
             crate::json::ReservedVec::with_capacity(
                 fused_scores.len().min(top_k),
@@ -2260,6 +3470,9 @@ impl Database {
             )
         })?;
         for (rank_index, &score) in fused_scores.iter().take(top_k).enumerate() {
+            // A lexical explanation can come from the original text window or from
+            // the later lookup of a vector hit. Use the score's chunk ID to borrow
+            // the matching table. An absent match leaves the term details empty.
             let matched_terms = bm25_hits
                 .binary_search_by(|hit| hit.chunk_id.as_str().cmp(score.chunk_id))
                 .map(|index| bm25_hits[index].matched_terms.as_slice())
@@ -2294,6 +3507,9 @@ impl Database {
                 )?;
                 Ok((result, row_work))
             })?;
+            // Use the position in the fused window as the public rank. A candidate
+            // found missing or no longer live by row materialization contributes
+            // no row or credit, and the window is not refilled past top_k.
             if let Some(result) = result {
                 results.push(SearchResult {
                     rank: rank_index + 1,
@@ -2302,11 +3518,17 @@ impl Database {
                 result_work.merge(row_work);
             }
         }
+        // The output rows now own their strings and explanations. Release the
+        // candidate tables before transferring the result array and the retained
+        // collection name to the caller's reservation.
         drop(fused);
         drop(vector_hits);
         drop(bm25_hits);
         let (results, array_work) = results.into_parts();
         result_work.merge_workspace(array_work);
+        // Only the collection name survives in the result wrapper. Move it out of
+        // the descriptor, release the descriptor's remaining JSON and workspace
+        // credit, then transfer the surviving string's capacity to the result.
         let name = std::mem::take(&mut collection.name);
         drop(collection);
         collection_work.json.retain(0);
@@ -2315,6 +3537,9 @@ impl Database {
         let results = SearchResults {
             schema_version: result_work.copy_string("0.1", &context)?,
             collection: name,
+            // Return the same trimmed text used for retrieval. The owned copy lets
+            // the search result outlive the caller's input; a vector-only request
+            // keeps the field absent.
             query: text
                 .map(|value| result_work.copy_string(value, &context))
                 .transpose()?,
@@ -2323,10 +3548,26 @@ impl Database {
             query_context,
             results,
         };
+        // Measure the number of rows actually materialized. The returned
+        // reservation covers both the report wrapper and all retained rows until
+        // the caller consumes or releases it.
         context.search_cost_count(crate::search_cost::Count::Returned, results.results.len());
         Ok((results, result_work))
     }
 
+    /// Diagnose the target chunk for the supplied text/vector query, filter, weights, top-k and
+    /// resource profile. To reproduce a ranking, use the original query parameters and the
+    /// same read-only view. On a shared writer, a commit can occur between the ordinary
+    /// search and the diagnostic replay because each takes the database lock separately.
+    /// This entry point supplies no boost rule set. To reproduce a search that
+    /// used explicit rules, call
+    /// [`why_not_debug_with_metadata_boost`](Self::why_not_debug_with_metadata_boost)
+    /// with its original configuration.
+    ///
+    /// # Errors
+    ///
+    /// In addition to ordinary search errors, computing ranks outside the retrieval
+    /// windows can exceed the work budget even if the original search succeeded.
     #[allow(clippy::too_many_arguments)]
     pub fn why_not_debug(
         &self,
@@ -2354,6 +3595,8 @@ impl Database {
         )
     }
 
+    /// Diagnose a target as in [Self::why_not_debug], with an explicit metadata boost
+    /// configuration. Use the original query's boost rules when comparing rankings.
     #[allow(clippy::too_many_arguments)]
     pub fn why_not_debug_with_metadata_boost(
         &self,
@@ -2368,9 +3611,13 @@ impl Database {
         top_k: usize,
         profile: Option<ResourceProfile>,
     ) -> Result<WhyNotDiagnosis> {
+        // The public string form does not specify which kind of chunk ID the
+        // caller supplied. Keep its legacy lookup order here. Callers with an
+        // explicitly typed target can pass that choice to the shared
+        // implementation.
         self.why_not_debug_with_metadata_boost_in(
             collection,
-            expected_chunk_id,
+            DiagnosisTarget::Legacy(expected_chunk_id),
             text,
             vector,
             filter,
@@ -2380,6 +3627,7 @@ impl Database {
             top_k,
             profile,
             None,
+            |_| Ok(()),
         )
         .map(|(diagnosis, _)| diagnosis)
     }
@@ -2388,7 +3636,7 @@ impl Database {
     pub(crate) fn why_not_debug_with_metadata_boost_in(
         &self,
         collection: &str,
-        expected_chunk_id: &str,
+        key: DiagnosisTarget<'_>,
         text: Option<String>,
         vector: Option<QueryEmbeddingInput>,
         filter: JsonValue,
@@ -2398,9 +3646,13 @@ impl Database {
         top_k: usize,
         profile: Option<ResourceProfile>,
         prepared_context: Option<crate::json::JsonOperationContext>,
+        observe_results: impl FnOnce(&SearchResults) -> Result<()>,
     ) -> Result<(WhyNotDiagnosis, RecordReservation)> {
         let preprocessed = prepared_context.is_some();
         let context = prepared_context.unwrap_or_else(|| self.json_context());
+        // Admit a caller's unprepared inputs once for both passes. Pass that same
+        // context to the ordinary search so it can reuse the reservation while
+        // diagnosis still owns the original filter, vector and rules.
         let _input_work = (!preprocessed)
             .then(|| {
                 self.admit_input_reclaiming(|| {
@@ -2413,6 +3665,9 @@ impl Database {
                 })
             })
             .transpose()?;
+        // Run the ordinary search first so returned_rank describes what the caller
+        // could actually retrieve with this top_k and profile. The wider diagnosis
+        // below is a separate catalog read; a write can occur between the two.
         let handle = self.collection(collection)?;
         let (mut results, mut result_work) = self.search_in_collection(
             &handle.collection_id,
@@ -2426,14 +3681,26 @@ impl Database {
             profile,
             Some(context.clone()),
         )?;
-        let returned_rank = results
+        // The supplied key may name either kind of chunk ID. Capture both positions
+        // while the original rows are available. Later identity resolution selects
+        // the applicable one after checking the target's collection and deletion
+        // state.
+        let expected_chunk_id = key.value();
+        let internal_rank = results
             .results
             .iter()
-            .find(|result| {
-                result.chunk_id == expected_chunk_id
-                    || result.chunk_external_id == expected_chunk_id
-            })
-            .map(|result| result.rank);
+            .find(|row| row.chunk_id == expected_chunk_id)
+            .map(|row| row.rank);
+        let external_rank = results
+            .results
+            .iter()
+            .find(|row| row.chunk_external_id == expected_chunk_id)
+            .map(|row| row.rank);
+        // The observer gets the original ranked rows while their leases are live.
+        // A report writer can consume them here, before they are discarded to make
+        // room for the larger replay. A failing observer ends the operation before
+        // replay.
+        observe_results(&results)?;
         results.discard_rows(&mut result_work);
         #[cfg(test)]
         {
@@ -2444,6 +3711,9 @@ impl Database {
         }
         let mut guard = self.lock()?;
         let inner = &mut *guard;
+        // Carry over the cache allowance actually used by the original search.
+        // Another operation on this handle could have populated optional caches
+        // between the two locks.
         let cache_limit = results
             .query_context
             .transient_rebuild
@@ -2457,12 +3727,18 @@ impl Database {
                 std::iter::empty(),
             );
         }
+        // Look up the original handle's collection ID again after reacquiring the
+        // guard. A concurrent drop can make this lookup fail even though the
+        // bounded search already returned rows.
         let (collection, _collection_work) = inner.read_reclaiming(|inner| {
             copy_collection_in(
                 inner.catalog.collection_by_id(&handle.collection_id)?,
                 &context,
             )
         })?;
+        // Revalidate a vector against the collection in this view. A newly visible
+        // or conflicting embedding model can invalidate the assumptions of the
+        // earlier search even though the supplied vector has not changed.
         if let Some(query) = vector.as_ref() {
             query.validate_structure(&collection)?;
             inner.cache_collection_model(&collection.collection_id)?;
@@ -2474,8 +3750,27 @@ impl Database {
         let (filter_expr, _compiled_work) = inner.read_reclaiming(|_| {
             FilterExpr::parse_validated_in(&filter, &context, crate::json::JsonInputKind::Filter)
         })?;
-        let expected =
-            resolve_expected_chunk(&inner.catalog, &collection.collection_id, expected_chunk_id);
+        // Resolve the target on the newly locked catalog. A chunk that disappeared
+        // after the ordinary search cannot supply current filter or score evidence
+        // just because its ID occurred in the earlier page.
+        let expected = resolve_expected_chunk(&inner.catalog, &collection.collection_id, key);
+        // Do not match a rank by the spelling alone. The same string can name one
+        // chunk internally and another externally. Use the identity resolved in
+        // this view to choose the earlier rank, and suppress it for a deleted or
+        // wrong-collection target.
+        let returned_rank = expected
+            .chunk
+            .filter(|_| expected.collection_matches && !expected.deleted)
+            .and_then(|chunk| {
+                if chunk.chunk_id == expected_chunk_id {
+                    internal_rank
+                } else {
+                    external_rank
+                }
+            });
+        // Load the full payload only for a live target in the requested
+        // collection. A catalog summary is enough to report the identity of a
+        // deleted or foreign row, without turning it into a search result.
         let materialized = if expected.collection_matches && !expected.deleted {
             expected
                 .chunk
@@ -2485,10 +3780,16 @@ impl Database {
         } else {
             None
         };
+        // An absent materialized payload does not erase a known foreign or deleted
+        // identity. Keep its catalog summary available for the target fields
+        // without admitting it to the rank replay.
         let materialized_chunk = materialized
             .as_ref()
             .map(|(chunk, _)| chunk)
             .or(expected.chunk);
+        // Distinguish a missing target from a located chunk that has no embedding.
+        // With no linked vector there is also no measured dimension, so keep the
+        // two diagnostic facts separate.
         let missing_embedding = materialized_chunk
             .as_ref()
             .map(|chunk| chunk.embedding_id.is_none())
@@ -2504,11 +3805,21 @@ impl Database {
             filter,
             &context,
         )?;
+        // Capture the boolean before moving the filter trace into JSON. Use that
+        // same result both to decide whether the full replay is warranted and to
+        // explain the miss.
         let filter_matched = filter_result.matched;
         let (filter_result, mut filter_work) = filter_result.into_json_retained(filter_work)?;
         let mut invalidated_text = false;
+        // Full candidate ranks explain the ranking of an eligible chunk. Missing,
+        // deleted, wrong-collection and filtered targets are diagnosed from their
+        // own evidence without paying for that larger search.
         let ranks = if expected.collection_matches && !expected.deleted && filter_matched {
             if let Some(chunk) = materialized_chunk.as_ref() {
+                // The wider ranking needs the canonical internal chunk ID, not the
+                // incoming lookup string. Replay the effective boost choice from
+                // the ordinary query, including when a supplied configuration was
+                // explicitly disabled.
                 let mut rank = |inner: &Inner| {
                     why_not_candidate_ranks(
                         inner,
@@ -2525,6 +3836,10 @@ impl Database {
                         &mut invalidated_text,
                     )
                 };
+                // The diagnostic scan owns no published rows yet. On a memory
+                // refusal one retry can use space freed by optional caches.
+                // Repeating the ordinary search here would replace the returned-rank
+                // evidence from the first phase.
                 match rank(inner) {
                     Err(error) if crate::json::is_memory_budget_error(&error) => {
                         if Inner::release_optional_caches(
@@ -2546,8 +3861,14 @@ impl Database {
         } else {
             Ok(WhyNotRanks::default())
         };
+        // Keep a failure building the diagnosis as a value until the index state is
+        // settled below. A failed result allocation does not make a text segment
+        // that failed validation usable again.
         let diagnosis = (|| {
             let ranks = ranks?;
+            // The filter trace already has charged JSON allocations. Build the
+            // target, limits and weight analysis against the same reservation so
+            // they can be returned as one owned report.
             let builder =
                 JsonBuilder::budgeted(&mut filter_work, crate::json::JsonInputKind::StoredJson);
             let limit_analysis = why_not_limit_analysis(
@@ -2577,6 +3898,9 @@ impl Database {
                 &ranks,
                 top_k,
             );
+            // The report carries the ordinary search context as well as the replay
+            // evidence. Its debug_full_scan flag identifies this diagnostic mode
+            // even for an ineligible target that never needed a full ranking.
             let diagnosis = WhyNotDiagnosis {
                 schema_version: results.schema_version,
                 diagnosis_scope: result_work.copy_string("debug_exact", &context)?,
@@ -2585,6 +3909,10 @@ impl Database {
                 result: builder.object([
                     (
                         "expected_chunk",
+                        // When lookup found no row, echo the caller's key as the
+                        // missing target and leave the external ID absent. For a
+                        // located row, report the catalog's two identities
+                        // separately.
                         builder.object([
                             (
                                 "chunk_id",
@@ -2614,6 +3942,10 @@ impl Database {
                                 "embedding_dim_matches",
                                 JsonValue::Bool(embedding_dim.matches),
                             ),
+                            // Keep the stored dimension and the number of
+                            // components side by side. Either can disagree with
+                            // the collection and absence of any embedding leaves
+                            // both measurements null.
                             (
                                 "embedding_dim",
                                 builder.object([
@@ -2637,6 +3969,32 @@ impl Database {
                             ),
                         ])?,
                     ),
+                    (
+                        "outcome",
+                        // Classify the outcome against the actual returned page as
+                        // well as the replay ranks. An eligible target replayed
+                        // inside top_k but absent from that page is inconsistent
+                        // evidence and makes this projection fail.
+                        why_not::outcome(
+                            &expected,
+                            filter_matched,
+                            if missing_embedding {
+                                Some("missing_embedding")
+                            } else if !embedding_dim.matches {
+                                Some("embedding_dim_mismatch")
+                            } else {
+                                None
+                            },
+                            returned_rank,
+                            &ranks,
+                            &results.query_context,
+                            &builder,
+                        )?,
+                    ),
+                    // Expose the actual predicate trace even when a different
+                    // cause, such as deletion, determines the outcome. Its matched
+                    // flag alone does not establish that the target could have
+                    // ranked.
                     ("filter_result", filter_result),
                     ("candidate_ranks", ranks.build_json(&builder)?),
                     (
@@ -2644,6 +4002,10 @@ impl Database {
                         candidate_limits_json_in(results.query_context.candidate_limits, &builder)?,
                     ),
                     ("limit_analysis", limit_analysis),
+                    // Use the weights saved by the ordinary search for this
+                    // explanation. The default-weight counterfactual affects the
+                    // diagnosis flag alone and must not replace the effective
+                    // weights being explained.
                     (
                         "fusion_analysis",
                         builder.object([
@@ -2675,6 +4037,9 @@ impl Database {
                             ),
                         ])?,
                     ),
+                    // The exact replay provides evidence for BM25 and exact vector
+                    // search only. Its full scan cannot establish a miss caused by
+                    // an approximate-neighbor index.
                     (
                         "ann_diagnosis",
                         builder.object([
@@ -2702,6 +4067,9 @@ impl Database {
                 query_text: results.query,
                 query_context: results.query_context,
             };
+            // Only part of the ordinary result survives in the diagnosis. Transfer
+            // credit for the query text and context that moved into it, then add the
+            // workspace owned by the diagnostic fields.
             drop(results.collection);
             result_work.retain_workspace(
                 diagnosis.schema_version.capacity()
@@ -2712,6 +4080,9 @@ impl Database {
             result_work.merge(filter_work);
             Ok((diagnosis, result_work))
         })();
+        // Propagate a failed extent check to future queries even if this report
+        // could not be constructed. The completed ordinary query context continues
+        // to describe the source it observed before replay.
         if invalidated_text {
             inner.mark_index_checkpoint_rebuild_needed();
         }
@@ -2740,11 +4111,28 @@ impl Database {
         }
     }
 
+    fn require_process(&self) -> Result<()> {
+        if self.owner_pid != std::process::id() {
+            return Err(Error::new(
+                ErrorCode::LockContention,
+                "inherited database handles must be reopened after fork",
+            ));
+        }
+        Ok(())
+    }
+
     fn lock(&self) -> Result<InnerGuard<'_>> {
+        // Reject a handle inherited across fork before touching its mutex. A
+        // vanished thread in the parent may have held that mutex, so checking only
+        // after lock acquisition could leave the child waiting indefinitely.
+        self.require_process()?;
         let guard = self
             .inner
             .lock()
             .map_err(|_| Error::new(ErrorCode::LockContention, "database lock poisoned"))?;
+        // Every clone shares this optional slot. An empty slot records an explicit
+        // close and has a different public error from a poisoned mutex. Keep the
+        // guard through every subsequent dereference.
         if guard.is_none() {
             return Err(Error::from(std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
@@ -2756,6 +4144,9 @@ impl Database {
     }
 }
 
+// Trimming decides whether the lexical route was requested. A nonblank string made
+// entirely of stop words still selects that route even if tokenization later
+// yields no searchable terms.
 fn normalize_search_text(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -2766,6 +4157,9 @@ fn reserve_query_json_inputs(
     filter: &JsonValue,
     boost: Option<&MetadataBoostConfig>,
 ) -> Result<crate::json::JsonReservation> {
+    // One lease accounts for the borrowed vector and model data, the compiled rule
+    // configuration and the retained JSON filter. If any component fails
+    // admission, the partial reservation is released before the caller retries.
     let mut work = context.reservation();
     if let Some(embedding) = vector {
         work.merge(embedding.reserve_json_work_in(context)?);
@@ -2773,6 +4167,9 @@ fn reserve_query_json_inputs(
     if let Some(boost) = boost {
         work.merge(boost.reserve_json_work_in(context)?);
     }
+    // This pass charges the borrowed JSON tree and enforces input shape limits.
+    // The search still has to compile and validate the filter operators against
+    // the same operation budget.
     work.merge(
         filter
             .guard_in(crate::json::JsonInputKind::Filter, context)
@@ -2784,26 +4181,53 @@ fn reserve_query_json_inputs(
 
 #[derive(Clone, Debug, Default)]
 struct ExpectedChunkLookup<'a> {
+    // Catalog row found by the requested identifier and fallback rules. A row in
+    // another collection can explain a miss without becoming a result.
     chunk: Option<&'a Chunk>,
+    // Whether the lookup located any row, even one hidden by deletion or owned by a
+    // different collection.
     exists: bool,
+    // Whether the located row fails the current catalog's liveness check, including
+    // deletion of a parent.
     deleted: bool,
+    // Whether the located row belongs to the collection named by the query. Missing
+    // rows have no matching collection.
     collection_matches: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 struct WhyNotRanks {
+    // One-based position in the full text list after applying the filter, if the
+    // target obtained a text score.
     bm25_rank: Option<usize>,
+    // Position in the text retrieval list before post-retrieval filtering. This is
+    // the rank compared with the bounded text window.
     bm25_retrieval_rank: Option<usize>,
+    // One-based position in the eligible vector list. An absent vector score leaves
+    // this rank unknown.
     vector_rank: Option<usize>,
+    // Target's position after fusing the actual bounded recall windows with
+    // completed scores. Widening a window for diagnosis must not replace this rank.
     fusion_rank: Option<usize>,
+    // Fusion rank exposed for the retrieval-stage explanation. It currently records
+    // the rank of the same bounded candidate union.
     fusion_retrieval_rank: Option<usize>,
+    // True if expanding one eligible source window alone brings the target into the
+    // requested top k.
     candidate_limit_improves: bool,
+    // Name of the source window for the successful counterfactual. Leave absent
+    // when neither isolated expansion establishes that cause.
     candidate_limit_stage: Option<&'static str>,
+    // Counterfactual rank with default weights on the actual candidate union,
+    // available when user-supplied weights and a target row permit the comparison.
     default_weight_rank: Option<usize>,
 }
 
 impl WhyNotRanks {
     fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // Expose ranks from the full eligible lists. The lexical rank used at the
+        // earlier truncation point and the counterfactual ranks are inputs to
+        // separate limiting-stage and weight explanations.
         builder.object([
             ("bm25_rank", rank_to_json(self.bm25_rank)),
             ("vector_rank", rank_to_json(self.vector_rank)),
@@ -2815,8 +4239,12 @@ impl WhyNotRanks {
 fn resolve_expected_chunk<'a>(
     catalog: &'a Catalog,
     collection_id: &str,
-    expected_chunk_id: &str,
+    key: DiagnosisTarget<'_>,
 ) -> ExpectedChunkLookup<'a> {
+    let expected_chunk_id = key.value();
+    // External IDs are scoped to the collection while internal IDs are
+    // database-wide. The two lookups can legitimately resolve the same supplied
+    // string to different chunks.
     let collection_external = catalog
         .chunk_external_ids
         .get(collection_id, expected_chunk_id)
@@ -2825,16 +4253,29 @@ fn resolve_expected_chunk<'a>(
         .chunks
         .get(expected_chunk_id)
         .filter(|chunk| chunk.collection_id == collection_id);
+    // If the requested collection has no match, keep a database-wide candidate as
+    // diagnostic evidence. The external fallback takes the first matching
+    // collection in key order when several collections use that name.
     let any_internal = catalog.chunks.get(expected_chunk_id);
     let any_external = catalog
         .chunk_external_ids
         .find_external(expected_chunk_id)
         .and_then(|chunk_id| catalog.chunks.get(chunk_id));
-    let chunk = collection_external
-        .or(collection_internal)
-        .or(any_internal)
-        .or(any_external)
-        .map(Box::as_ref);
+    // An explicit target kind gives that namespace first choice, even if the
+    // matching internal row belongs elsewhere. The legacy form tries both
+    // collection-local identities before falling back to a foreign row.
+    let chunk = match key {
+        DiagnosisTarget::Internal(_) => any_internal.or(collection_external).or(any_external),
+        DiagnosisTarget::External(_) => collection_external.or(any_external).or(any_internal),
+        DiagnosisTarget::Legacy(_) => collection_external
+            .or(collection_internal)
+            .or(any_internal)
+            .or(any_external),
+    }
+    .map(Box::as_ref);
+    // Record visibility separately from identity. A tombstone on the chunk or a
+    // parent can hide a row that still exists in the catalog. Only a missing
+    // lookup makes all three flags false.
     let exists = chunk.is_some();
     let deleted = chunk
         .as_ref()
@@ -2854,9 +4295,16 @@ fn resolve_expected_chunk<'a>(
 
 #[derive(Clone, Copy, Debug)]
 struct EmbeddingDimDiagnosis {
+    // Embedding dimension required by the collection.
     expected: usize,
+    // Dimension declared by the target embedding, absent when the chunk has no
+    // linked embedding.
     actual_dim: Option<usize>,
+    // Number of components actually read from the target embedding. This can expose
+    // a malformed record even if its declared dimension matches.
     actual_vector_len: Option<usize>,
+    // True when declared and actual lengths both match, or when no linked embedding
+    // exists to contradict the expected dimension.
     matches: bool,
 }
 
@@ -2867,6 +4315,9 @@ fn expected_embedding_dim_diagnosis(
     context: &crate::json::JsonOperationContext,
 ) -> Result<EmbeddingDimDiagnosis> {
     let Some(embedding_id) = chunk.and_then(|chunk| chunk.embedding_id.as_deref()) else {
+        // No linked embedding means there is no dimension mismatch to diagnose.
+        // Preserve the absent actual measurements so the report can still
+        // distinguish that case from a matching vector.
         return Ok(EmbeddingDimDiagnosis {
             expected: collection.embedding_dim,
             actual_dim: None,
@@ -2874,12 +4325,19 @@ fn expected_embedding_dim_diagnosis(
             matches: true,
         });
     };
+    // A chunk with a dangling embedding ID is different from a chunk without a
+    // link. The former promises a catalog record and a failed lookup must surface
+    // as an error.
     let summary = inner.catalog.embeddings.get(embedding_id).ok_or_else(|| {
         Error::new(
             ErrorCode::EmbeddingMissing,
             format!("embedding {embedding_id} not found"),
         )
     })?;
+    // A catalog embedding can keep just a reference to its payload on disk. Read
+    // that payload when present so an unloaded vector is not mistaken for a
+    // zero-length vector. A fully resident embedding already contains the
+    // evidence.
     let retained = inner
         .catalog
         .record_ref_for_embedding(embedding_id)
@@ -2913,9 +4371,15 @@ fn why_not_filter_result(
     filter_json: JsonValue,
     context: &crate::json::JsonOperationContext,
 ) -> Result<(FilterExplain, crate::json::JsonReservation)> {
+    // An absent predicate imposes no restriction, even when the target itself is
+    // missing. The caller uses visibility and collection membership separately
+    // from this boolean.
     let Some(expr) = filter_expr else {
         return Ok((FilterExplain::matched(filter_json), context.reservation()));
     };
+    // An unavailable target provides no metadata to evaluate usefully. Return one
+    // reason for the failed precondition, giving collection mismatch precedence
+    // over deletion for a foreign row.
     let reason = match chunk {
         None => "expected chunk does not exist",
         Some(_) if !collection_matches => {
@@ -2924,6 +4388,9 @@ fn why_not_filter_result(
         Some(_) if deleted => "expected chunk is deleted",
         Some(chunk) => return expr.evaluate_for_chunk_in(catalog, chunk, filter_json, context),
     };
+    // For a target whose metadata cannot be evaluated, the explanation still owns
+    // its single reason string and its array slot. Return their reservation with
+    // the trace.
     let mut work = context.reservation();
     let mut reasons = Vec::new();
     work.reserve_vec(&mut reasons, 1, crate::json::JsonInputKind::Filter)?;
@@ -2951,6 +4418,10 @@ fn why_not_candidate_ranks(
     context: &crate::json::JsonOperationContext,
     invalidated_text: &mut bool,
 ) -> Result<WhyNotRanks> {
+    // Use the weights and recall limits chosen by the ordinary search. The
+    // diagnostic pass can inspect the full collection to locate a target outside
+    // those limits. Its extra reads do not change the execution counters already
+    // reported for the ordinary search.
     let weights = &query_context.weights;
     let limits = query_context.candidate_limits;
     let live_chunk_count = inner
@@ -2959,6 +4430,10 @@ fn why_not_candidate_ranks(
         .filter(|chunk| chunk.collection_id == collection.collection_id)
         .count()
         .max(1);
+    // The collection's live chunk count is an upper bound on the number of lexical
+    // hits. Keep scores without per-term explanations for these full rankings. The
+    // minimum of one keeps an empty collection from turning this pass into a
+    // zero-window request.
     let text_options = TextSearchOptions::scores_only(live_chunk_count);
     if inner.index_suffix_status != IndexSuffixState::PersistentCheckpoint {
         // Debug retains full ranks, so a bounded normal query does not authorize its larger workspace.
@@ -2975,6 +4450,9 @@ fn why_not_candidate_ranks(
             query_context.profile,
         )?;
     }
+    // The ranking must reflect the current visible records even if the derived
+    // index is unavailable. The resident index, streamed text extent and transient
+    // scan all score against collection-local text statistics.
     let mut bm25_hits = text
         .map(|query| -> Result<Bm25Hits> {
             if inner.index_suffix_status != IndexSuffixState::PersistentCheckpoint {
@@ -2991,6 +4469,9 @@ fn why_not_candidate_ranks(
                     },
                 )
             } else if !inner.text_index.has_resident_cache() {
+                // A checkpoint can supply its text postings without a resident
+                // cache. Use the directory to stream just this collection. An empty
+                // hit list from a valid extent is a completed search.
                 let source = inner
                     .lazy_vector_source
                     .as_ref()
@@ -3005,7 +4486,15 @@ fn why_not_candidate_ranks(
                 )? {
                     return Ok(hits);
                 }
+                // An unavailable extent has supplied no usable ranking. Record its
+                // invalidation for the outer operation before checking the cost of
+                // the replacement scan. An error returned by the segment reader
+                // itself propagates through the preceding call.
                 *invalidated_text = true;
+                // Preflight at the start saw a persistent checkpoint and could
+                // skip the fallback estimate. Size the text-only recovery here
+                // using the diagnostic window before attempting the full primary
+                // scan.
                 ensure_transient_rebuild_budget(
                     transient_query_scratch_bytes(
                         &inner.catalog,
@@ -3018,6 +4507,10 @@ fn why_not_candidate_ranks(
                     query_context.transient_rebuild.budget_mb,
                     query_context.profile,
                 )?;
+                // The primary payload reader now supplies text for the same visible
+                // snapshot. Its byte counter is local to diagnosis. Charging those
+                // bytes to the earlier query would misstate the observed cost of
+                // that query.
                 let mut reader = inner.storage.payload_reader()?;
                 let mut bytes_read = 0;
                 TextIndex::search_from_snapshot(
@@ -3039,6 +4532,9 @@ fn why_not_candidate_ranks(
         .transpose()?
         .unwrap_or_else(|| Bm25Hits::empty(context));
     let mut vector_hits = if let Some(query_embedding) = query_embedding {
+        // Compute the full vector ranking from visible primary embeddings. It needs
+        // the target's exact position even if the ordinary query found enough
+        // candidates in a bounded window.
         let mut payload_reader = inner.storage.payload_reader()?;
         let mut bytes_read = 0;
         ExactVectorIndex
@@ -3049,6 +4545,9 @@ fn why_not_candidate_ranks(
                 VectorSearchOptions {
                     metric: collection.distance_metric,
                     vectors_normalized: collection.vectors_normalized,
+                    // Size this diagnostic window from live embeddings. Chunks
+                    // without an embedding count toward lexical ranking but never
+                    // require a vector slot.
                     limit: inner
                         .catalog
                         .live_embeddings()
@@ -3056,6 +4555,10 @@ fn why_not_candidate_ranks(
                         .count()
                         .max(1),
                 },
+                // Apply the collection and metadata predicate before loading each
+                // vector. The vector rank is therefore among eligible embeddings,
+                // while the lexical retrieval rank below can include rows that will
+                // fail the same filter.
                 |id| {
                     matches_vector_filter(
                         &inner.catalog,
@@ -3081,6 +4584,12 @@ fn why_not_candidate_ranks(
 
     // BM25 truncates before metadata filtering; its limit must use the earlier rank.
     let bm25_retrieval_rank = rank_bm25(&bm25_hits, expected_chunk_id);
+    // Keep separate, budgeted copies of the rank-ordered prefixes. Filtering a full
+    // lexical list before copying its prefix would promote later matches past the
+    // ordinary recall cutoff.
+    // For example, with a lexical window of two, filtering out the first of three
+    // hits leaves only the second in that window. The third remains available to
+    // an expanded-window replay.
     let mut limited_bm25 = bm25_hits.copy_prefix(limits.bm25)?;
     let mut limited_vector = vector_hits.copy_prefix(limits.vector)?;
     filter_candidates(
@@ -3089,6 +4598,9 @@ fn why_not_candidate_ranks(
         &mut limited_vector,
         filter_expr.as_ref(),
     );
+    // The full lists must obey the same eligibility filter before providing scores
+    // or expanded-window candidates. Keep them separate from the bounded copies,
+    // including when the filter removes every row from a prefix.
     filter_candidates(
         &inner.catalog,
         &mut bm25_hits,
@@ -3097,8 +4609,14 @@ fn why_not_candidate_ranks(
     );
     let bm25_rank = rank_bm25(&bm25_hits, expected_chunk_id);
     let vector_rank = rank_vector(&vector_hits, expected_chunk_id);
+    // Save both one-based branch ranks before sorting the full hits by ID for score
+    // lookup. The sorted tables still contain the raw scores but their positions no
+    // longer represent retrieval order.
     bm25_hits.sort_by_id();
     vector_hits.sort_by_id();
+    // Fuse the bounded windows with scores completed from the full lists. The wider
+    // scan supplies missing scores and diagnostic ranks; using all its IDs for
+    // fusion would answer a different query.
     let actual = fuse_completed_candidates(
         &inner.catalog,
         &limited_bm25,
@@ -3111,25 +4629,42 @@ fn why_not_candidate_ranks(
         live_chunk_count,
         context,
     )?;
+    // The diagnostic fusion limit was the live chunk count, so this rank can extend
+    // past the ordinary fusion limit or top-k. Absence here instead means neither
+    // filtered recall prefix admitted the target.
     let fusion_rank = rank_fused(actual.hits.as_slice(), expected_chunk_id);
+    // For an explicit weight override, keep the same candidates and normalization
+    // while testing the defaults. Otherwise a changed rank could be caused by a
+    // different recall window as well as by weights.
     let default_weight_rank = if weights.source == "user_override" {
         let default = crate::query::default_weights_for(
             text.is_some(),
             query_embedding.is_some(),
             metadata_boost_config.is_some_and(|boost| boost.rule_count() > 0),
         );
+        // Only a target already in this candidate union can be diagnosed by
+        // changing the weights alone. Reuse its completed component scores and
+        // every rival's scores under the same normalization.
         actual
             .hits
             .as_slice()
             .iter()
             .find(|score| score.chunk_id == expected_chunk_id)
             .map(|target| {
+                // Keep a missing vector component at zero under the alternative
+                // weights as in ordinary fusion. The default scores can then be
+                // compared without loading vectors or changing the candidate
+                // union.
                 let score = |row: &CandidateScore<'_>| {
                     default.bm25 * row.bm25_norm
                         + default.vector * row.vector_norm.unwrap_or(0.0)
                         + default.metadata * row.metadata_boost
                 };
                 let target_score = score(target);
+                // One plus the number of rows that precede the target gives its
+                // exact rank without materializing another sorted result. Equal
+                // weighted scores use the ordinary fusion order on internal chunk
+                // IDs.
                 1 + actual
                     .hits
                     .as_slice()
@@ -3144,8 +4679,12 @@ fn why_not_candidate_ranks(
         None
     };
     // A window cause is established only by an executed one-window counterfactual.
-    // Neither its U nor its M replaces the actual ordinary-query ranks above.
+    // The expanded candidate union and its new BM25 maximum do not replace the
+    // actual ordinary-query ranks above.
     let mut candidate_limit_stage = None;
+    // A target with a fusion rank already entered a bounded recall window. Only a
+    // missing target can have been excluded by both. Test each route on which the
+    // full ranking places it beyond the corresponding limit.
     if fusion_rank.is_none() {
         for (eligible, stage) in [
             (
@@ -3160,6 +4699,10 @@ fn why_not_candidate_ranks(
             if !eligible {
                 continue;
             }
+            // Expand one recall list to the full filtered population and retain the
+            // other original prefix. Fusion recomputes its lexical maximum over
+            // this alternative union, so merely comparing the target's branch rank
+            // with top-k cannot predict the outcome.
             let expanded = fuse_completed_candidates(
                 &inner.catalog,
                 if stage == "bm25" {
@@ -3180,6 +4723,9 @@ fn why_not_candidate_ranks(
                 live_chunk_count,
                 context,
             )?;
+            // A window explains a miss only if changing it actually brings the
+            // target into top-k. When both isolated changes would work, the
+            // traversal order records the lexical route first.
             if rank_fused(expanded.hits.as_slice(), expected_chunk_id)
                 .is_some_and(|rank| rank <= query_context.top_k)
             {
@@ -3194,6 +4740,9 @@ fn why_not_candidate_ranks(
         bm25_retrieval_rank,
         vector_rank,
         fusion_rank,
+        // The effective-weight fusion order supplies both the displayed rank and
+        // the position tested against the fusion limit. A rank computed by an
+        // expanded recall window never replaces either one.
         fusion_retrieval_rank: fusion_rank,
         candidate_limit_improves,
         candidate_limit_stage,
@@ -3209,8 +4758,17 @@ fn why_not_limit_analysis(
     can_be_limited: bool,
     builder: &JsonBuilder<'_>,
 ) -> Result<JsonValue> {
+    // Report limiting stages only for an eligible target that the ordinary query
+    // did not return. Missing data, deletion, collection mismatch and filtering
+    // have their own explanations.
     let limiting = if returned_rank.is_none() && can_be_limited {
         if let Some(rank) = ranks.fusion_retrieval_rank {
+            // A fusion rank proves at least one recall route admitted the target.
+            // Only the fusion cutoff is relevant at this point. A target within
+            // that cutoff may still rank below the requested top-k.
+            // Since the fusion limit is at least top_k, enlarging that cutoff
+            // alone cannot promote an already ranked chunk into the page. The
+            // observed cutoff can still be reported as a limiting stage.
             (rank > limits.fusion).then_some((
                 Some(rank),
                 limits.fusion,
@@ -3218,6 +4776,9 @@ fn why_not_limit_analysis(
                 "fusion_candidates",
             ))
         } else {
+            // With no fusion rank, inspect the rank used by each route at
+            // truncation. The lexical route uses its pre-filter rank, whereas
+            // vector ranking already accounts for the filter.
             [
                 (
                     ranks.bm25_retrieval_rank,
@@ -3233,6 +4794,10 @@ fn why_not_limit_analysis(
                 ),
             ]
             .into_iter()
+            // If expanding a single window succeeded, report that route. With no
+            // such proof, the first observed out-of-window rank can still identify
+            // a limiting parameter without asserting that raising it would return
+            // the target.
             .find(|(rank, limit, stage, _)| {
                 rank.is_some_and(|rank| rank > *limit)
                     && ranks
@@ -3243,6 +4808,9 @@ fn why_not_limit_analysis(
     } else {
         None
     };
+    // Keep the stage observation separate from the causal flag. The latter requires
+    // both an observed limit and the successful counterfactual recorded by the rank
+    // pass.
     builder.object([
         (
             "missed_due_to_candidate_limit",
@@ -3272,6 +4840,9 @@ fn why_not_missed_due_to_weights(
     filter_matched: bool,
     results: &SearchResults,
 ) -> bool {
+    // A weight explanation requires the same eligible target to cross top_k when
+    // only the coefficients change. Missing candidates, filtered targets and an
+    // absent counterfactual rank supply no evidence for that claim.
     returned_rank.is_none()
         && filter_matched
         && results.query_context.weights.source == "user_override"
@@ -3293,6 +4864,9 @@ fn why_not_diagnosis_codes(
     top_k: usize,
 ) -> Vec<&'static str> {
     let mut codes = Vec::new();
+    // Start with a single identity or visibility cause in lookup order. A foreign
+    // row can also be deleted, but its collection already prevents it from
+    // satisfying this query.
     if !expected.exists {
         codes.push("expected_chunk_not_found");
     } else if !expected.collection_matches {
@@ -3300,15 +4874,23 @@ fn why_not_diagnosis_codes(
     } else if expected.deleted {
         codes.push("deleted");
     }
+    // Embedding findings can coexist with a returned text hit on a hybrid request.
+    // Suppress them when the caller requested no vector search.
     if missing_embedding && embedding_present {
         codes.push("missing_embedding");
     }
     if !embedding_dim_matches && embedding_present {
         codes.push("embedding_dim_mismatch");
     }
+    // Only label an eligible row as filtered when its predicate failed. A missing
+    // or foreign target can also have a false filter result without any metadata
+    // having been evaluated.
     if expected.exists && expected.collection_matches && !expected.deleted && !filter_matched {
         codes.push("filtered_by_metadata");
     }
+    // Choose one ranking outcome after collecting any independent findings. A
+    // proved window or weight cause takes precedence over the observed low rank.
+    // Emit the generic miss only when no specific finding exists.
     if returned_rank.is_some() {
         codes.push("returned");
     } else if limit_analysis
@@ -3347,11 +4929,16 @@ fn rank_fused(scores: &[CandidateScore<'_>], chunk_id: &str) -> Option<usize> {
 }
 
 fn rank_to_json(rank: Option<usize>) -> JsonValue {
+    // Ranks in all three lists are one-based. Use JSON null for a target with no
+    // rank, preserving the distinction from any numerical position.
     rank.map(|rank| JsonValue::Number(rank as f64))
         .unwrap_or(JsonValue::Null)
 }
 
 fn transient_rebuild_exceeds_budget(bytes_required: u64, budget_mb: usize) -> bool {
+    // Compare against binary MiB. Equality passes the estimate, including an
+    // empty-work estimate under a zero budget; subsequent allocations still need
+    // their own credit.
     let budget_bytes = (budget_mb as u64).saturating_mul(1_048_576);
     bytes_required > budget_bytes
 }
@@ -3361,6 +4948,10 @@ fn ensure_transient_rebuild_budget(
     budget_mb: usize,
     profile: ResourceProfile,
 ) -> Result<()> {
+    // The profile check governs whether a transient index can serve this query.
+    // Report that source and its estimate under IndexCorruption when it cannot
+    // fit. The ordinary allocation ledger can still reject individual allocations
+    // after this check succeeds.
     if transient_rebuild_exceeds_budget(bytes_required, budget_mb) {
         Err(Error::new(
             ErrorCode::IndexCorruption,
@@ -3389,6 +4980,10 @@ fn transient_query_scratch_bytes(
 ) -> u64 {
     #[cfg(test)]
     tests::record_transient_estimate();
+    // Estimate the scratch needed to search the visible collection before
+    // attempting any payload reads. Each requested route contributes its bounded
+    // candidate storage. Saturating arithmetic prevents very large lengths from
+    // wrapping to a small estimate.
     let mut bytes = 0u64;
     let mut max_text_payload = 0u64;
     let mut chunks = 0usize;
@@ -3398,6 +4993,10 @@ fn transient_query_scratch_bytes(
             .filter(|chunk| chunk.collection_id == collection_id)
         {
             chunks = chunks.saturating_add(1);
+            // A replayed catalog row can retain a record reference in place of its
+            // text. Use the encoded payload length in that case and the resident
+            // text length otherwise. Only the largest row is needed for the
+            // per-row part of the estimate.
             max_text_payload = max_text_payload.max(
                 catalog
                     .record_ref_for_chunk(&chunk.chunk_id)
@@ -3409,12 +5008,19 @@ fn transient_query_scratch_bytes(
         // Covers normalized query terms, counters, and bounded candidate term copies.
         // The 256-byte factor covers token splitting/lowercase expansion and per-term overhead.
         let query_workspace = (query.len() as u64).saturating_mul(256);
+        // Scores-only diagnosis keeps the query term workspace but omits
+        // per-winner term details. An ordinary result must allow for an
+        // explanation for each retained lexical candidate.
         let candidate_terms = if text_options.explanations {
             query_workspace
         } else {
             0
         };
         bytes = bytes.saturating_add(query_workspace).saturating_add(
+            // Cap the term-copy and fixed per-hit costs by both the live chunk
+            // count and the lexical window. Enlarging top_k can raise this
+            // estimate even when the collection's text payload lengths stay
+            // unchanged.
             (chunks.min(text_options.limit) as u64)
                 .saturating_mul(candidate_terms.saturating_add(512)),
         );
@@ -3422,6 +5028,9 @@ fn transient_query_scratch_bytes(
     bytes = bytes.saturating_add(max_text_payload.saturating_mul(64));
     if vector {
         let mut count = 0usize;
+        // Count only embeddings belonging to this collection. Use the encoded
+        // record length for on-disk payloads or the bytes in the f32 components
+        // for a resident vector.
         let mut max_vector_payload = 0u64;
         for embedding in catalog
             .live_embeddings()
@@ -3438,6 +5047,9 @@ fn transient_query_scratch_bytes(
             );
         }
         // Only one decoded vector and bounded top-k candidates are resident during exact scan.
+        // Retained vector candidates add per-hit overhead only up to the requested
+        // vector window. Add this to any lexical allowance because both sets of
+        // candidate rows can survive until score completion.
         bytes = bytes
             .saturating_add(max_vector_payload.saturating_mul(3))
             .saturating_add((count.min(vector_limit) as u64).saturating_mul(512));
@@ -3462,32 +5074,50 @@ fn build_result(
     context: &crate::json::JsonOperationContext,
     result_work: &mut RecordReservation,
 ) -> Result<Option<SearchResult>> {
+    // Candidate scores identify chunks. Consult the live catalog again before
+    // reading the payload so a missing or deleted chunk cannot become a result
+    // solely because it has a score.
     let Some(chunk_summary) = inner.catalog.chunks.get(score.chunk_id) else {
         return Ok(None);
     };
     if !inner.catalog.is_chunk_live(&chunk_summary.chunk_id) {
         return Ok(None);
     }
+    // Materialization resolves the primary record and reconciles its embedding
+    // link with the live catalog. Once a live chunk is found, failure to read its
+    // payload or resolve its parent is an error in the result construction.
     let (payload, mut chunk_work) = inner.materialize_chunk_in(score.chunk_id, context)?;
     let mut chunk = payload;
     let document = inner
         .catalog
         .document_by_id_ref(&chunk.collection_id, &chunk.document_id)?;
+    // Document metadata belongs to the catalog and can be needed by many hits.
+    // Clone it under this row's reservation. The full chunk has already been
+    // materialized into owned storage and can give up its own metadata later.
     let (doc_metadata, work) = document
         .metadata
         .try_clone_in(crate::json::JsonInputKind::StoredJson, context)?
         .into_parts();
     result_work.merge(work);
+    // The explanation owns its copy of the predicate and its evaluation trace. Merge
+    // both charges into the result since those values outlive the call that
+    // evaluated the filter.
     let (filter_copy, work) = filter_json
         .try_clone_in(crate::json::JsonInputKind::Filter, context)?
         .into_parts();
     result_work.merge(work);
+    // Recall used boolean eligibility checks. Returning a row also requires the
+    // per-condition reasons for this chunk and its parent. Keep the original
+    // predicate with that trace, including an unrestricted predicate.
     let (filter, trace_work) = match filter_expr {
         Some(expr) => expr.evaluate_for_chunk_in(&inner.catalog, &chunk, filter_copy, context)?,
         None => (FilterExplain::matched(filter_copy), context.reservation()),
     };
     let (filter, trace_work) = filter.into_json_retained(trace_work)?;
     result_work.merge(trace_work);
+    // Build the explanation while chunk coordinates, document metadata and term
+    // details are still available to borrow. Its scoring inputs come from the
+    // completed fusion row and the final query-wide counts.
     let explain = build_explain_in(
         ExplainInput {
             collection_name: &collection.name,
@@ -3509,6 +5139,9 @@ fn build_result(
             weights: &query_context.weights,
             resource_profile: profile,
             candidate_limits: limits,
+            // Each hit carries the query's work counters for use as standalone
+            // evidence. Summing these across hits would count the same query
+            // operations repeatedly.
             vector_scan_count: execution_stats.vector_scan_count,
             distance_ops: execution_stats.distance_ops,
             fusion_candidate_count: execution_stats.fusion_candidate_count,
@@ -3526,11 +5159,17 @@ fn build_result(
         },
         &mut result_work.json,
     )?;
+    // The snippet limit is in Unicode scalar values. Use the byte offset of the next
+    // scalar as the exclusive end so the slice is valid even when the last included
+    // character occupies several bytes.
     let end = chunk
         .text
         .char_indices()
         .nth(240)
         .map_or(chunk.text.len(), |(offset, _)| offset);
+    // The parent IDs and snippet borrow storage that will not survive this row.
+    // Copy them under the chunk's reservation while the source text is still
+    // available. The result can take the chunk IDs and metadata without copying.
     let [document_id, document_external_id, snippet] = chunk_work.copy_strings(
         [
             &document.document_id,
@@ -3539,6 +5178,9 @@ fn build_result(
         ],
         context,
     )?;
+    // Leave the rank for the caller, which knows this row's position in the fused
+    // ordering. Preserve raw and normalized scores independently so a missing
+    // component stays distinguishable from a measured zero.
     let result = SearchResult {
         rank: 0,
         chunk_id: std::mem::take(&mut chunk.chunk_id),
@@ -3559,6 +5201,9 @@ fn build_result(
         },
         explain,
     };
+    // The result now owns the selected identifiers and metadata, while the
+    // materialized chunk still holds its full text. Drop the chunk before shrinking
+    // its reservation to the string capacities that escape in the result.
     drop(chunk);
     chunk_work.retain_workspace(
         result.chunk_id.capacity()
@@ -3588,16 +5233,28 @@ fn plan_import_batches(
     .collect()
 }
 
+// Planning is lazy: a successful constructor has not yet validated any records.
+// Import exhausts one plan to check all atomic groups before writing, then uses
+// fresh iterators over its staged input.
 fn plan_record_batches(
     records: impl Iterator<Item = Result<(crate::storage::BatchRecordKind, u64)>>,
     byte_target: u64,
     max_records: usize,
 ) -> Result<impl Iterator<Item = Result<usize>>> {
+    // Plan counts from encoded lengths and record kinds so the planner can look
+    // ahead without decoding payloads. Include the commit record in every batch's
+    // byte estimate, although it is excluded from the returned count.
     let commit_bytes = crate::storage::COMMIT_RECORD_BYTES;
     let mut count = 0;
+    // Group lengths are checked as u64; the running sum also includes the commit
+    // and can exceed u64 before deciding to split. Widen before adding so a large
+    // group cannot wrap below the target.
     let mut bytes = u128::from(commit_bytes);
     let mut records = records.peekable();
     let mut finished = false;
+    // The iterator may need to consume the first group of the next batch before
+    // reporting the current count. Its saved count and byte total describe that
+    // consumed group on the next call.
     Ok(std::iter::from_fn(move || {
         if finished {
             return None;
@@ -3606,6 +5263,10 @@ fn plan_record_batches(
             let group = (|| {
                 let (record, mut group_bytes) = record?;
                 // Replacement tombstone and its new value must never straddle commits.
+                // Look ahead by one kind only. A replacement pairs with the
+                // immediately following put of the expected type. A peeked error
+                // supplies no second record and will propagate if the iterator
+                // reaches it.
                 let replacement = records
                     .peek()
                     .and_then(|next| next.as_ref().ok())
@@ -3618,6 +5279,10 @@ fn plan_record_batches(
                             Error::new(ErrorCode::FileFormatError, "import record length overflow")
                         })?;
                 }
+                // The profile supplies a hard record-count cap for this plan. A
+                // pair that cannot fit even an empty batch must fail planning,
+                // independently of whether its encoded size would fit the
+                // preferred byte target.
                 if group_count > max_records {
                     return Err(Error::new(
                         ErrorCode::FileFormatError,
@@ -3629,6 +5294,10 @@ fn plan_record_batches(
             })();
             let (group_count, group_bytes) = match group {
                 Ok(group) => group,
+                // An error terminates this plan permanently. Do not return the
+                // count accumulated since the previous yield as a partial success,
+                // or a caller could treat a malformed suffix as a complete final
+                // batch.
                 Err(error) => {
                     finished = true;
                     return Some(Err(error));
@@ -3640,20 +5309,31 @@ fn plan_record_batches(
                 && (group_count > max_records - count
                     || bytes + u128::from(group_bytes) > u128::from(byte_target))
             {
+                // The group causing the overflow belongs in the next batch and has
+                // already been consumed from the source. Carry its complete size
+                // forward and report only the preceding count.
                 let previous = count;
                 count = group_count;
                 bytes = u128::from(commit_bytes) + u128::from(group_bytes);
                 return Some(Ok(previous));
             }
+            // Equality with either limit still fits. When the byte preference is
+            // zero the first indivisible group can nevertheless make progress; any
+            // subsequent group forces a new batch.
             count += group_count;
             bytes += u128::from(group_bytes);
         }
+        // Emit a final count once if at least one record remains. An empty source
+        // never produces a commit-only batch.
         finished = true;
         (count > 0).then_some(Ok(count))
     }))
 }
 
 fn batch_byte_target(cache_budget_mb: usize) -> u64 {
+    // Keep the preferred batch size below the entire cache allowance and cap it
+    // for large profiles. The planner can still accept one indivisible group
+    // larger than this target when the record-count limit permits it.
     (cache_budget_mb as u64)
         .saturating_mul(1_048_576)
         .saturating_div(8)
@@ -3668,6 +5348,10 @@ impl Inner {
         &'a Catalog,
         crate::storage::ReclaimingRecordBatch<impl FnMut() -> bool + 'a>,
     ) {
+        // Planning needs an immutable catalog while the batch builder may need to
+        // evict optional index data. Split the borrows here so reclamation cannot
+        // change the catalog used to resolve IDs or the records already in the
+        // batch.
         let Self {
             catalog,
             text_index,
@@ -3690,9 +5374,16 @@ impl Inner {
 
     // The attempt owns and drops its partial output before retry. Keep Inner
     // locked across both reads so reclamation cannot change the data snapshot.
+    // Only replayable reads belong here. Callers that have already written to an
+    // external sink keep control of their retry point so reclaiming memory cannot
+    // emit the same records twice.
     fn read_reclaiming<T>(&mut self, mut read: impl FnMut(&Self) -> Result<T>) -> Result<T> {
         match read(self) {
             Err(error) if crate::json::is_memory_budget_error(&error) => {
+                // Retry only a memory-budget refusal and only when optional cache
+                // storage was actually reclaimed. Propagate I/O, validation and
+                // other errors immediately. Values left outside the closure, such
+                // as work counters, survive either attempt.
                 if Self::release_optional_caches(
                     &mut self.text_index,
                     &mut self.persistent_vector_segments,
@@ -3725,10 +5416,19 @@ impl Inner {
         mut prepared: crate::storage::PreparedRecords,
         context: &crate::json::JsonOperationContext,
     ) -> Result<ImportBatchMetrics> {
+        // The direct API promises a single commit for this staged input. Its
+        // expected record count includes every put or tombstone, even when several
+        // records describe one caller-visible item.
         let count = prepared.remaining_records();
         context.expect_write_records(count);
         let mut metrics = ImportBatchMetrics::default();
+        // An empty input leaves the current checkpoint as it was. Do not
+        // manufacture an empty commit or charge an index cycle merely to report
+        // its readiness below.
         if count != 0 {
+            // Admission may evict optional index entries to fit all staged
+            // summaries at once. Taking a shorter prefix here would turn one
+            // atomic call into a sequence of independently visible writes.
             let batch = prepared.take_atomic_batch_reclaiming(|| {
                 Self::release_optional_caches(
                     &mut self.text_index,
@@ -3737,6 +5437,9 @@ impl Inner {
                     std::iter::empty(),
                 )
             })?;
+            // The batch length is a record count, whereas this metric counts only
+            // chunk puts. A replacement tombstone, its put and an embedding can
+            // contribute three records but only one chunk.
             metrics.max_batch_chunks = batch
                 .records()
                 .filter(|record| matches!(record, RecordPayload::ChunkPut(_)))
@@ -3745,6 +5448,9 @@ impl Inner {
             let pending = self.commit_prepared_batch_tracking(batch, None)?;
             metrics.commit_time = started.elapsed();
             metrics.committed_batches = 1;
+            // Time index work after the main batch has returned its receipt. A
+            // completed refresh cycle can leave the suffix awaiting rebuild, so
+            // count readiness separately.
             let started = Instant::now();
             self.finish_index_update(pending, context)?;
             metrics.checkpoint_time = started.elapsed();
@@ -3757,27 +5463,48 @@ impl Inner {
         Ok(metrics)
     }
 
+    // The staging files hold one input stream that can span several commits.
+    // Planning looks at the stored kinds and lengths. Execution materializes only
+    // the summaries admitted for the next commit and keeps already confirmed
+    // batches visible on a later failure.
     fn append_import_batches(
         &mut self,
         mut prepared: crate::storage::PreparedRecords,
         mode: ImportIndexBuildMode,
         context: &crate::json::JsonOperationContext,
     ) -> Result<ImportBatchMetrics> {
+        // The profile's import limit bounds record slots here. A replacement
+        // consumes a tombstone and a put, and the byte target includes a commit
+        // frame. The maximum chunks reported below counts only ChunkPut records in
+        // batches that actually committed.
         let byte_limit = batch_byte_target(self.active_cache_budget_mb());
         let max_records = self.config.resource_profile.params().import_batch_chunks;
         // Validate every atomic group before writing, without retaining a manifest-wide plan.
+        // Consume the entire plan once. An invalid atomic group near the end must
+        // be diagnosed before the first otherwise valid prefix is committed. These
+        // counts need not stay in memory after the check.
         plan_record_batches(prepared.records()?, byte_limit, max_records)?
             .try_for_each(|count| count.map(|_| ()))?;
+        // Set the expected count for the whole manifest before consuming its first
+        // staged row. The progress snapshot can then distinguish the last
+        // confirmed sub-batch from completion of the logical import.
         context.expect_write_records(prepared.remaining_records());
         let mut pending: Option<PendingIndexUpdate> = None;
         let mut metrics = ImportBatchMetrics::default();
         loop {
+            // Restart at the first unconsumed staging entry. The planner can look
+            // ahead to find a safe boundary while leaving the staging cursor in
+            // place for the decoder that actually takes the batch.
             let count = plan_record_batches(prepared.records()?, byte_limit, max_records)?
                 .next()
                 .transpose()?;
             let Some(count) = count else {
                 break;
             };
+            // A planned count is an upper bound on the next physical commit. The
+            // decoder can return a shorter nonempty prefix under a memory limit,
+            // provided it keeps a replacement pair together. Finish the remainder
+            // of this plan before reading the next one.
             let mut remaining = count;
             while remaining > 0 {
                 #[cfg(any(test, feature = "native-test-support"))]
@@ -3791,6 +5518,10 @@ impl Inner {
                     }
                     *remaining -= 1;
                 }
+                // A deferred refresh can hold vector cache credit from earlier
+                // commits. Include that owner in reclamation alongside the
+                // handle's caches so a previous optimization cannot unnecessarily
+                // prevent a later batch.
                 let batch = prepared.take_batch_reclaiming(remaining, || {
                     Self::release_optional_caches(
                         &mut self.text_index,
@@ -3801,16 +5532,27 @@ impl Inner {
                             .map(|pending| &mut pending.reusable_vectors),
                     )
                 })?;
+                // Advance by the number of records actually returned. For example,
+                // two smaller batches taken from one planned group produce two
+                // commit receipts and may need two inline checkpoint cycles.
                 remaining -= batch.len();
                 let chunks = batch
                     .records()
                     .filter(|record| matches!(record, RecordPayload::ChunkPut(_)))
                     .count();
                 let started = Instant::now();
+                // The staged input cursor was advanced when the batch was taken.
+                // If this commit fails, the function returns instead of replanning
+                // the same records from the new cursor. Already confirmed batches
+                // belong to this import's progress report.
                 let next = self.commit_prepared_batch_tracking(batch, pending.as_mut())?;
                 metrics.commit_time += started.elapsed();
                 metrics.committed_batches += 1;
                 metrics.max_batch_chunks = metrics.max_batch_chunks.max(chunks);
+                // Each successful commit invalidates the previous on-disk suffix.
+                // Inline mode rebuilds for this commit immediately. Deferred mode
+                // accumulates the collections touched across commits and makes the
+                // replacement once at the final tip.
                 match mode {
                     ImportIndexBuildMode::InlineFullCheckpoint => {
                         let started = Instant::now();
@@ -3821,6 +5563,11 @@ impl Inner {
                             self.index_suffix_status == IndexSuffixState::PersistentCheckpoint,
                         );
                     }
+                    // On subsequent deferred commits,
+                    // commit_prepared_batch_tracking has already merged the
+                    // changes into the first pending update. Keep its saved bodies
+                    // and vector entries, since later commits generally see a
+                    // suffix that has already been invalidated.
                     ImportIndexBuildMode::DeferredFullCheckpoint => {
                         if pending.is_none() {
                             pending = Some(next);
@@ -3829,6 +5576,9 @@ impl Inner {
                 }
             }
         }
+        // Reaching this point means all main batches succeeded. A deferred import
+        // with no records has no pending work, so the final readiness can still
+        // reflect a checkpoint that predates the import.
         if let Some(pending) = pending {
             let started = Instant::now();
             self.finish_index_update(pending, context)?;
@@ -3847,6 +5597,11 @@ impl Inner {
         records: OwnedRecordBatch,
         context: &crate::json::JsonOperationContext,
     ) -> Result<()> {
+        // The main-data commit is already visible when index maintenance starts. An
+        // index update failure cannot undo that commit or make repeating the write safe.
+        // Ordinary writes have a single primary commit. Once this call succeeds
+        // the checkpoint phase operates on the newly visible view. Returning an
+        // error from that later phase cannot roll back the primary commit.
         let pending = self.commit_records_in(records)?;
         self.finish_index_update(pending, context)
     }
@@ -3861,11 +5616,27 @@ impl Inner {
         self.commit_records_in(batch)
     }
 
+    // Prepare changes against the old catalog while its checkpoint and payload
+    // locations are still usable. The catalog transaction can undo those edits.
+    // The append supplies the actual record offsets: install them and commit the
+    // transaction only after storage returns the completed batch. Index work then
+    // runs against the new catalog; its failure cannot roll back the data.
     fn commit_records_in(&mut self, records: OwnedRecordBatch) -> Result<PendingIndexUpdate> {
         self.storage.require_writer()?;
+        // Remember whether the preceding snapshot supplied a usable checkpoint
+        // before this write can change either the file length or the reported
+        // index state. The flag describes the base from which untouched
+        // collections may be reused.
         let reusable_checkpoint =
             self.index_suffix_status == IndexSuffixState::PersistentCheckpoint;
+        // Use the batch's own operation context to prepare encoding and catalog
+        // state. Its memory includes the still-live caller payloads, so
+        // reservations for retries must coexist with those inputs.
         let context = records.context().clone();
+        // This batch may have acquired its metadata before entering the database.
+        // Attach its operation to the catalog ledger while the input and catalog
+        // are still separate so subsequent credit transfers use the same
+        // accounting.
         crate::json::retry_after_memory_reclaim(
             || self.catalog.attach_context(&context),
             || {
@@ -3877,6 +5648,10 @@ impl Inner {
                 )
             },
         )?;
+        // Validate and measure the binary encoder's inputs while the batch still
+        // owns them. The encoding plan retains the derived collection
+        // configuration and traversal requirements after catalog preparation
+        // starts transferring JSON credit.
         let mut records = records.prepare_encoding(|| {
             Self::release_optional_caches(
                 &mut self.text_index,
@@ -3885,6 +5660,10 @@ impl Inner {
                 [],
             )
         })?;
+        // Classify index changes against the old catalog. A tombstone names a
+        // child by ID and needs its previous row to identify the affected
+        // collection. An embedding put can leave text postings reusable even while
+        // its vector segment changes.
         let changes = crate::json::retry_after_memory_reclaim(
             || IndexChanges::from_records(&self.catalog, records.records(), &context),
             || {
@@ -3896,7 +5675,13 @@ impl Inner {
                 )
             },
         )?;
+        // Read reusable index data while its offsets still name the previous suffix.
+        // The main-log append may truncate that suffix even when the indexed
+        // collection itself was untouched.
         let mut prefetched = self.prefetch_unchanged_vector_segments(&changes.vector);
+        // Text prefetch owns staged segment bodies. A memory refusal may become
+        // recoverable by discarding even the vector segments just prefetched. At
+        // this point no new record has entered the primary log.
         let prefetched_text = match self.prefetch_unchanged_text(&changes.text, &context) {
             Err(error) if crate::json::is_memory_budget_error(&error) => {
                 if Self::release_optional_caches(
@@ -3912,6 +5697,10 @@ impl Inner {
             }
             result => result?,
         };
+        // Give the tentative catalog records in the writer's order. Several
+        // records can touch one internal ID. Matching the final locator to a
+        // provisional position prevents an earlier occurrence from replacing its
+        // successor.
         let mut transaction = self.catalog.transaction(&context);
         let (payloads, json) = records.records_and_json();
         if let Err(error) = transaction.prepare_reclaiming(payloads.iter(), json, || {
@@ -3928,6 +5717,10 @@ impl Inner {
             drop(transaction);
             return Err(error);
         }
+        // Keep the returned batch reservation alive while consuming its record
+        // array. An append error unwinds the catalog transaction. Follow the
+        // storage error's progress and recovery information to determine whether a
+        // retry is safe.
         let (mut append, _batch_work) =
             self.storage
                 .append_owned_batch_in(records, self.config.durability, || {
@@ -3938,6 +5731,9 @@ impl Inner {
                         [&mut prefetched],
                     )
                 })?;
+        // Only the successful append supplies final record offsets. Replace
+        // provisional references before releasing the catalog undo journal. Index
+        // preparation below operates on the already committed catalog.
         transaction.finish_references(&mut append.records);
         transaction.commit();
         self.apply_committed_batch(
@@ -3957,15 +5753,26 @@ impl Inner {
         self.commit_prepared_batch_tracking(batch, None)
     }
 
+    // Staging already supplies the encoded file ranges and lightweight summaries.
+    // Before copying a range into the primary log, prepare the catalog and any
+    // deferred invalidation state needed to describe this commit if it succeeds.
     fn commit_prepared_batch_tracking(
         &mut self,
         mut batch: crate::storage::PreparedBatch<'_>,
         mut pending: Option<&mut PendingIndexUpdate>,
     ) -> Result<PendingIndexUpdate> {
         self.storage.require_writer()?;
+        // After the first deferred commit the handle no longer advertises the old
+        // checkpoint as current. The separately held PendingIndexUpdate can still
+        // retain its original sources for unchanged collections, while each
+        // further commit extends the set of changed IDs.
         let reusable_checkpoint =
             self.index_suffix_status == IndexSuffixState::PersistentCheckpoint;
         let context = batch.context().clone();
+        // The attaching operation and its changed-collection sets share the
+        // batch's memory. When this is a later deferred batch, releasing optional
+        // vectors from the first update can make room without losing the
+        // identities already collected.
         let changes = crate::json::retry_after_memory_reclaim(
             || {
                 self.catalog.attach_context(&context)?;
@@ -3984,6 +5791,9 @@ impl Inner {
         )?;
         // Deferred imports keep the first reusable checkpoint. Admit their union
         // before this batch writes, while earlier valid commits remain visible.
+        // The union is made before the next append. Repeating insertion after
+        // reclamation is safe because a previously inserted collection ID owns its
+        // credit and contributes only once to each set.
         if let Some(pending) = pending.as_mut() {
             crate::json::retry_after_memory_reclaim(
                 || pending.changes.extend(&changes),
@@ -3997,8 +5807,15 @@ impl Inner {
                 },
             )?;
         }
+        // Try to save untouched segments while this batch can still see its
+        // predecessor's suffix. After an earlier deferred append the status is
+        // already rebuild-needed, so the prefetch helpers can return empty without
+        // consulting stale offsets.
         let mut prefetched = self.prefetch_unchanged_vector_segments(&changes.vector);
         let prefetched_text = match self.prefetch_unchanged_text(&changes.text, &context) {
+            // A later deferred batch can have two extra cache owners. Release both
+            // the vectors held for the eventual refresh and those prefetched for
+            // this batch when optional reuse competes with the text staging retry.
             Err(error) if crate::json::is_memory_budget_error(&error) => {
                 if Self::release_optional_caches(
                     &mut self.text_index,
@@ -4018,6 +5835,10 @@ impl Inner {
             result => result?,
         };
         let mut transaction = self.catalog.transaction(&context);
+        // Borrow the summaries and their JSON reservation together. The
+        // transaction can move metadata credit out of the staging batch as it
+        // prepares rows, while the encoded source stays available for the later
+        // copy.
         let (payloads, json) = batch.records_and_json();
         if let Err(error) = transaction.prepare_reclaiming(payloads, json, || {
             Self::release_optional_caches(
@@ -4031,15 +5852,23 @@ impl Inner {
                     .chain(std::iter::once(&mut prefetched)),
             )
         }) {
+            // Release the staged summaries before undo can return their
+            // transferred credit. This ordering also applies when preparation
+            // failed partway through a batch.
             drop(batch);
             drop(transaction);
             return Err(error);
         }
+        // Keep the catalog changes provisional until append returns their on-disk
+        // references. Dropping the transaction on append failure rolls back the catalog.
         let (mut append, _batch_work) = self
             .storage
             .append_prepared_batch(batch, self.config.durability)?;
         transaction.finish_references(&mut append.records);
         transaction.commit();
+        // The resulting update belongs to this one committed batch. Deferred
+        // callers have already extended their original update and may drop this
+        // return value after the main-log receipt has been recorded.
         self.apply_committed_batch(
             append,
             changes,
@@ -4049,12 +5878,19 @@ impl Inner {
         )
     }
 
+    // Drop derived representations whose source is recoverable from the checkpoint
+    // or primary records. The additional owners cover prefetched segments
+    // temporarily detached from the handle during writes.
     fn release_optional_caches<'a>(
         text: &mut TextIndex,
         persistent: &mut Option<VectorCache>,
         lazy: &mut Option<CachedVectorSegment>,
         additional: impl IntoIterator<Item = &'a mut VectorCache>,
     ) -> bool {
+        // Measure charged bytes before clearing every owner. Even an empty cache
+        // may have carried directory credit. The return value tells the caller
+        // whether another attempt can have more budget than the one that just
+        // failed.
         let mut bytes = text.reserved_bytes()
             + persistent.as_ref().map_or(0, VectorCache::reserved_bytes)
             + lazy.as_ref().map_or(0, CachedVectorSegment::reserved_bytes);
@@ -4068,6 +5904,9 @@ impl Inner {
         bytes != 0
     }
 
+    // This is the credit of optional residents currently reachable from the
+    // database handle. In-flight staging and a caller's temporarily detached
+    // segment sets have their own reservations.
     fn optional_cache_bytes(&self) -> usize {
         self.text_index.reserved_bytes()
             + self
@@ -4080,6 +5919,10 @@ impl Inner {
                 .map_or(0, CachedVectorSegment::reserved_bytes)
     }
 
+    // The next append can overwrite the old checkpoint at the current log tip.
+    // Opportunistically bring forward complete vector segments for unaffected
+    // collections, leaving primary embedding records as the source for every
+    // collection that cannot be retained.
     fn prefetch_unchanged_vector_segments(
         &self,
         changed_collections: &BTreeSet<String>,
@@ -4092,6 +5935,9 @@ impl Inner {
         let Some(source) = &self.lazy_vector_source else {
             return prefetched;
         };
+        // Use encoded extent bytes to bound how much of the old suffix to
+        // prefetch. Charging the decoded identifiers, coordinates and cache
+        // directory is a separate admission against the full cache limit.
         let budget = (self.active_cache_budget_mb() as u64).saturating_mul(1_048_576) / 8;
         let cache_limit = self.active_cache_budget_mb().saturating_mul(1_048_576);
         let cached = self
@@ -4104,12 +5950,20 @@ impl Inner {
                     .map(|segment| &segment.collection_id),
             );
         // Changed segments remain owned until append succeeds, so they still consume budget.
+        // Charge the encoded footprint of both resident owners before loading
+        // anything else. An unknown length consumes the remaining allowance
+        // conservatively, since there is no verified size for that resident in
+        // this directory.
         let retained = cached.fold(0u64, |bytes, id| {
             bytes.saturating_add(source.encoded_len(id).unwrap_or(u64::MAX))
         });
         let mut remaining = budget.saturating_sub(retained);
         for collection in self.catalog.live_collections() {
             let id = &collection.collection_id;
+            // Move existing resident entries after the commit without rereading
+            // them. Skip changed collections because a segment can describe its
+            // predecessor perfectly yet contain rows that are unsuitable for the
+            // upcoming snapshot.
             if changed_collections.contains(id)
                 || self
                     .persistent_vector_segments
@@ -4130,6 +5984,10 @@ impl Inner {
             else {
                 continue;
             };
+            // A candidate must decode from the bound file, match the collection
+            // settings and enter the charged cache before it spends this pass's
+            // remaining encoded allowance. A failed candidate leaves room to try
+            // another collection.
             if let Ok(Some(segment)) = source.load_cached(&self.storage, id, reservation, &context)
             {
                 if segment.matches_collection(collection) && prefetched.insert(segment, cache_limit)
@@ -4150,10 +6008,17 @@ impl Inner {
         reusable_text: Option<TextCheckpoint>,
     ) -> Result<PendingIndexUpdate> {
         let context = crate::json::JsonOperationContext::new(Arc::clone(&self.work));
+        // Model resolution caches witnesses by embedding ID. Even a write that
+        // changed only a vector can invalidate the witness, and a later
+        // consistency check must observe the new catalog.
         for id in &changes.vector {
             self.catalog.invalidate_model_state(id);
         }
         let cache_limit = self.active_cache_budget_mb().saturating_mul(1_048_576);
+        // Detach resident segments only when they belonged to a usable
+        // predecessor. Transfers can decline new cache entries under the active
+        // limit. An omitted segment can still be produced from the committed
+        // records.
         let reusable_vectors = if reusable_checkpoint {
             let mut segments = self
                 .persistent_vector_segments
@@ -4162,13 +6027,23 @@ impl Inner {
             if let Some(segment) = self.lazy_vector_segment.take() {
                 segments.insert(segment, cache_limit);
             }
+            // Admission of the live and prefetched segments is best effort. Any
+            // segment that did not fit will have to be obtained from primary
+            // records when rebuilding the checkpoint, so an insertion refusal is
+            // not a failed data commit.
             segments.append(prefetched, cache_limit);
             segments
         } else {
             VectorCache::new(&context)
         };
         // The critical commit is visible even if the following rebuild fails.
+        // Retire the shared on-disk lookup directory before publishing the new tip
+        // to subsequent reads. The batch ID and the sequence of its commit frame
+        // are separate coordinates used when binding the replacement checkpoint.
         self.mark_index_checkpoint_rebuild_needed();
+        // Record both numbers from the append result. The batch ID is the catalog
+        // commit identity. The sequence number orders its commit record and is the
+        // value embedded in checkpoint coverage.
         self.catalog.last_commit_id = append.commit.batch_id;
         self.last_commit_sequence_no = append.commit_sequence_no;
         Ok(PendingIndexUpdate {
@@ -4179,16 +6054,27 @@ impl Inner {
         })
     }
 
+    // The batch is already committed and its old checkpoint has been invalidated.
+    // A conflict between embedding models skips the rebuild. A failure to persist
+    // the final checkpoint leaves the index marked for rebuilding; earlier errors
+    // while preparing index data can still reach the caller after the commit.
     fn finish_index_update(
         &mut self,
         pending: PendingIndexUpdate,
         context: &crate::json::JsonOperationContext,
     ) -> Result<()> {
+        // Refresh model witnesses for the touched collections that still exist. A
+        // collection dropped by this batch must not be looked up as a live target
+        // during maintenance.
         for id in &pending.changes.vector {
             if self.catalog.is_collection_live(id) {
                 self.cache_collection_model(id)?;
             }
         }
+        // A full checkpoint represents all collections. A conflict anywhere
+        // prevents publishing a consistent set, even if this batch touched a
+        // different collection. The primary commit stands and the rebuild-needed
+        // state installed earlier stays in effect.
         match self.catalog.require_consistent_models() {
             Err(error) if error.code() == ErrorCode::EmbeddingModelMismatch => return Ok(()),
             result => result?,
@@ -4199,6 +6085,10 @@ impl Inner {
             reusable_text,
             changes,
         } = pending;
+        // Move the previous resident text index into a local owner. It can supply
+        // unchanged collections during a subset rebuild or surrender credit for
+        // text staging without borrowing the database while the new segments are
+        // built.
         let mut resident = std::mem::take(&mut self.text_index);
         if !reusable_checkpoint {
             resident.clear_cache();
@@ -4209,6 +6099,9 @@ impl Inner {
                 reusable_vectors.clear();
                 resident.clear_cache() || bytes != 0
             });
+        // If required text staging fails, restore ownership of whatever resident
+        // index survived reclamation. The error belongs to work after the main
+        // commit and can still propagate to the caller.
         let text_checkpoint = match text_checkpoint {
             Ok(text) => text,
             Err(error) => {
@@ -4217,10 +6110,17 @@ impl Inner {
             }
         };
         let cache_limit = self.active_cache_budget_mb().saturating_mul(1_048_576);
+        // Lazy text reads need the prepared checkpoint bodies for later streaming
+        // but need no in-memory posting lists. A non-lazy handle with an
+        // unchanged, valid resident index can also skip rebuilding those lists.
         if self.lazy_text {
             resident.clear_cache();
         } else if !changes.text.is_empty() || !resident.has_resident_cache() {
             loop {
+                // A resident index can reuse the unchanged collections only if it
+                // represented the preceding checkpoint. In that case the build
+                // returns a subset to splice in; otherwise it has to stand on its
+                // own.
                 let subset = reusable_checkpoint && resident.has_resident_cache();
                 let built = build_text_index_from_checkpoint(
                     text_checkpoint.as_ref(),
@@ -4229,6 +6129,10 @@ impl Inner {
                     context,
                     cache_limit,
                 );
+                // Clearing old residents after an admission failure removes the
+                // base for a subset build. Recompute the subset decision at the
+                // head of the loop so the next attempt can build a complete
+                // resident index.
                 let replacement = match built {
                     Err(error) if crate::json::is_memory_budget_error(&error) => {
                         let bytes = reusable_vectors.reserved_bytes();
@@ -4245,16 +6149,28 @@ impl Inner {
                     }
                     Ok(replacement) => replacement,
                 };
+                // A full replacement already covers every collection, including
+                // the case where cache admission left no resident index. Only a
+                // subset needs entries removed from the old posting and length
+                // tables.
                 if !subset {
                     resident = replacement;
                     break;
                 }
+                // Include catalog rows hidden by tombstones when enumerating
+                // lengths to remove. A newly hidden chunk may still have a length
+                // in the preceding resident index even though a live-row scan no
+                // longer visits it.
                 let old_chunk_ids = self
                     .catalog
                     .chunks
                     .values()
                     .filter(|chunk| changes.text.contains(&chunk.collection_id))
                     .map(|chunk| chunk.chunk_id.as_str());
+                // Merging changed postings can remove a dictionary key whose
+                // posting list is empty everywhere. Consult the prepared
+                // checkpoint's vocabulary and revisit its dictionaries only if a
+                // resident merge succeeded.
                 let restore = text_checkpoint
                     .as_ref()
                     .is_some_and(TextCheckpoint::has_zero_frequency_terms);
@@ -4266,6 +6182,10 @@ impl Inner {
                 )? && restore
                 {
                     let checkpoint = text_checkpoint.as_ref().expect("prepared text checkpoint");
+                    // Dictionary restoration visits all live collections because a
+                    // term is a shared key in the resident index. A cache
+                    // admission miss can release the resident form while the
+                    // visitor continues validating staged data.
                     let mut restore = || {
                         resident.restore_empty_terms_from_visitors(
                             self.catalog
@@ -4276,6 +6196,10 @@ impl Inner {
                         )
                     };
                     if let Err(error) = restore() {
+                        // Leaving here also drops the local resident index taken
+                        // above. The visible primary catalog already includes the
+                        // batch; a caller receiving this restoration error must
+                        // not assume the write was rolled back.
                         if !crate::json::is_memory_budget_error(&error) {
                             return Err(error);
                         }
@@ -4286,6 +6210,9 @@ impl Inner {
                 break;
             }
         }
+        // Install the resulting resident owner before attempting the suffix write.
+        // The final refresh handles a persistence failure by invalidating the
+        // persistent state. The primary data already committed remains visible.
         self.text_index = resident;
         if let Err(_err) = self.refresh_index_checkpoint_prepared(
             reusable_vectors,
@@ -4304,6 +6231,9 @@ impl Inner {
         document_id: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Vec<Chunk>> {
+        // Resolve visibility and collection membership before reading any primary
+        // payload. Preserve the catalog's ordinal order and its source-membership
+        // tie-break when materializing the result.
         let summaries = self
             .catalog
             .chunks_for_document_in(collection_id, document_id, context)?;
@@ -4311,6 +6241,9 @@ impl Inner {
             RecordReservation::new(context.reservation(), context.workspace_reservation());
         let mut chunks =
             crate::json::ReservedVec::with_capacity(summaries.len(), context, "operation_scratch")?;
+        // Previously decoded chunks remain live while the result vector grows.
+        // Retain each chunk's JSON and native workspace until construction
+        // finishes so individual reads cannot all claim the same free budget.
         for summary in summaries.iter() {
             let (chunk, work) = self.materialize_chunk_in(&summary.chunk_id, context)?;
             retained.merge(work);
@@ -4324,6 +6257,10 @@ impl Inner {
         chunk_id: &str,
         context: &crate::json::JsonOperationContext,
     ) -> Result<(Chunk, RecordReservation)> {
+        // This helper fetches by internal ID. Its callers decide visibility or
+        // collection membership first. A surviving summary supplies the current
+        // relationship fields, even when the complete payload lives only in the
+        // primary file.
         let summary = self.catalog.chunks.get(chunk_id).ok_or_else(|| {
             Error::new(
                 ErrorCode::ChunkNotFound,
@@ -4331,6 +6268,10 @@ impl Inner {
             )
         })?;
         let record_ref = self.catalog.record_ref_for_chunk(chunk_id);
+        // A locator selects the committed record with its stored length and
+        // checksum. An in-memory chunk can supply its own full contents. Propagate
+        // errors following a present locator because the corresponding summary can
+        // omit the text.
         let retained = match record_ref {
             Some(record_ref) => self
                 .storage
@@ -4338,7 +6279,15 @@ impl Inner {
                 .read_chunk_in(record_ref, context)?,
             None => RetainedChunk::copy(summary, context)?,
         };
+        // The embedding association can change when a later EmbeddingPut is
+        // committed. Use the current summary for that link even after fetching the
+        // older ChunkPut body, while transferring any replacement string's charge
+        // with the chunk.
         let mut retained = retained.with_embedding_id(summary.embedding_id.as_deref())?;
+        // Recompute the token-count hint from materialized primary text. In-memory
+        // rows keep their existing count. BM25 scoring obtains its length from the
+        // searchable segment, where even a zero-token chunk has an effective
+        // length of one.
         let token_count = if record_ref.is_some() {
             Some(token_count_hint_in(&retained.parts().0.text, context)?)
         } else {
@@ -4352,6 +6301,10 @@ impl Inner {
     }
 
     fn text_stats(&self) -> Option<&TextStatsSummary> {
+        // A directory can remain meaningful only for the file boundary and commit
+        // that produced it. Require persistent status here, then let the source
+        // compare both coordinates before handing out the attached text
+        // statistics.
         (self.index_suffix_status == IndexSuffixState::PersistentCheckpoint)
             .then_some(self.lazy_vector_source.as_ref())
             .flatten()?
@@ -4362,16 +6315,27 @@ impl Inner {
     }
 
     fn index_stats(&self) -> IndexStats {
+        // The primary catalog can count visible embeddings without any index.
+        // Checkpoint sizes, terms, segment counts and index position require
+        // statistics bound to the current tip, so callers can still report vectors
+        // while the suffix awaits rebuilding.
         let vector_count = self.catalog.live_embeddings().count();
         let collection_count = self.catalog.live_collections().count();
         let text_stats = self.text_stats();
         let persistent_ready = text_stats.is_some();
+        // A complete checkpoint supplies a text segment and a vector segment per
+        // live collection. Empty collections also have segment headers. Counting
+        // rows or collections with embeddings would understate the physical
+        // segment count.
         let segment_count = if persistent_ready {
             collection_count
         } else {
             0
         };
         IndexStats {
+            // The database term total includes retained dictionary keys with empty
+            // posting lists. Collection-local term counts count only keys with
+            // postings in that collection.
             text_terms: text_stats.map_or(0, TextStatsSummary::term_count),
             text_segments: segment_count,
             vector_count,
@@ -4382,12 +6346,18 @@ impl Inner {
             } else {
                 0
             },
+            // The reported position names the commit frame covered by the index.
+            // Hide an old position along with the byte count whenever the matching
+            // statistics are unavailable.
             last_index_commit_id: persistent_ready
                 .then_some(self.last_index_commit_sequence_no)
                 .flatten(),
         }
     }
 
+    // Compaction reports the number of usable persistent segments. Both types
+    // contribute even when one holds no rows. A metadata-only checkpoint
+    // contributes none.
     fn compacted_persistent_segment_count(&self) -> usize {
         if self.index_suffix_status != IndexSuffixState::PersistentCheckpoint {
             return 0;
@@ -4420,16 +6390,27 @@ impl Inner {
         )
     }
 
+    // Prepare the text checkpoint before publishing a compacted replacement. A
+    // staged copy from the old checkpoint competes for temporary disk and memory.
+    // Rebuilding bodies directly from live records can fit when retaining that
+    // copy cannot.
     fn prepare_compact_text_checkpoint(
         &self,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Option<TextCheckpoint>> {
+        // Only exhaustion of memory or temporary disk qualifies for the compaction
+        // fallback. A primary read error or an unrelated resource failure remains
+        // visible to the maintenance caller.
         let budget_miss = |error: &Error| {
             error.code() == ErrorCode::ResourceExhausted
                 && error.detail().iter().any(|(key, value)| {
                     key == "resource" && matches!(value.as_str(), "memory" | "temporary_disk")
                 })
         };
+        // No collection's live text changes merely because compaction moves its
+        // records. Use the empty changed set to consider every collection for
+        // reuse, but only after the old text statistics have matched this file and
+        // commit.
         let changed = BTreeSet::new();
         let reuse = if self.text_stats().is_some() {
             match self.prefetch_unchanged_text(&changed, context) {
@@ -4441,6 +6422,9 @@ impl Inner {
         };
         let reused = reuse.is_some();
         // Failed preparation drops its staging and credit before the primary fallback.
+        // Retry from primary records only if the failed build had accepted a
+        // reusable input. Starting from primary records again after a primary-only
+        // budget failure would repeat the same computation with the same inputs.
         match self.prepare_text_checkpoint(reuse, &changed, context) {
             Err(error) if reused && budget_miss(&error) => {
                 self.prepare_text_checkpoint(None, &changed, context)
@@ -4454,9 +6438,16 @@ impl Inner {
         changed: &BTreeSet<String>,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Option<TextCheckpoint>> {
+        // Only a persistent checkpoint can provide bodies worth staging. A missing
+        // extent for an individual collection leaves a gap for the builder to fill
+        // later from that collection's live chunks.
         if self.index_suffix_status != IndexSuffixState::PersistentCheckpoint {
             return Ok(None);
         }
+        // These are independent temporary copies of validated text segment bodies.
+        // Keep them under the temporary disk budget so the original index suffix
+        // can be removed without invalidating the source of the later checkpoint
+        // write.
         TextCheckpoint::prefetch(
             &self.storage,
             &self.catalog,
@@ -4486,12 +6477,19 @@ impl Inner {
     ) -> Result<Option<TextCheckpoint>> {
         #[cfg(test)]
         tests::record_text_checkpoint_build();
+        // Pin a reader to the file supplying the catalog locators. The builder
+        // calls the text loader for collections without a reusable staged body and
+        // derives its final statistics from the combined set.
         let mut reader = self.storage.payload_reader()?;
         let mut bytes_read = 0;
         TextCheckpoint::build_reclaiming(
             &self.storage,
             &self.catalog,
             self.last_commit_sequence_no,
+            // Even a staged body from an unchanged earlier commit needs to be
+            // discarded if its collection subsequently changed in a deferred
+            // import. Give the builder both the saved bodies and the union of
+            // changes before it decides which primary texts to read.
             reuse.map(|reuse| (reuse, changed)),
             |visible| read_visible_chunk_text(&mut reader, visible, context, &mut bytes_read),
             &self.temporary_work,
@@ -4508,6 +6506,10 @@ impl Inner {
         mut text: Option<TextCheckpoint>,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Option<IndexSuffixReport>> {
+        // Borrow the prepared text for both attempts. Its body handles and
+        // statistics are reusable until a successful writer consumes the
+        // statistics. Optional vector entries, on the other hand, move into the
+        // first attempt.
         match self.refresh_index_checkpoint_attempt(
             reusable_vectors,
             changed_vector_collections,
@@ -4518,6 +6520,10 @@ impl Inner {
             Err(error) if crate::json::is_memory_budget_error(&error) => {
                 // Only the rebuildable suffix is retried. Failed attempt caches have
                 // already dropped; never repeat a committed primary-data write.
+                // The retry starts with no reusable vector cache, skips optional
+                // vector materialization and disables the writer's optional output
+                // buffering. Required directory and decoding workspace can still
+                // fail admission.
                 self.text_index.clear_cache();
                 self.refresh_index_checkpoint_attempt(
                     VectorCache::new(context),
@@ -4526,11 +6532,31 @@ impl Inner {
                     text.as_mut(),
                     context,
                 )
+                // If the first pass may already have modified the suffix, a second
+                // failure cannot promise the previous index is intact even when
+                // the retry failed earlier. Preserve that effect with the retry's
+                // more immediate error.
+                .map_err(|e| {
+                    if error
+                        .detail()
+                        .iter()
+                        .any(|(k, v)| k == "effect" && v == "index_may_need_rebuild")
+                    {
+                        e.index_retry_failure()
+                    } else {
+                        e
+                    }
+                })
             }
             result => result,
         }
     }
 
+    // Reuse is per collection, but the output covers the whole visible catalog.
+    // An unchanged vector segment can be stamped with the new commit only if
+    // its collection still matches and its cache fits. Stream the other segments
+    // from committed records. Publish the new lookup directory only after the
+    // writer has finished the checkpoint.
     fn refresh_index_checkpoint_attempt(
         &mut self,
         mut reusable_vectors: VectorCache,
@@ -4539,6 +6565,9 @@ impl Inner {
         mut text: Option<&mut TextCheckpoint>,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Option<IndexSuffixReport>> {
+        // A database with no committed batch has no tip for an index to cover.
+        // Forget any old index coordinates and vector sources and return without
+        // appending a checkpoint.
         if self.catalog.last_commit_id == 0 {
             self.index_suffix_status = IndexSuffixState::Missing;
             self.last_index_commit_sequence_no = None;
@@ -4548,12 +6577,20 @@ impl Inner {
             self.lazy_vector_segment = None;
             return Ok(None);
         }
+        // Once the main log has a commit, a full checkpoint needs a text builder,
+        // including when it produced no collection bodies. Missing prepared state
+        // is an error even though a newly empty catalog can legitimately have zero
+        // segments.
         let text = text.as_mut().ok_or_else(|| {
             Error::new(
                 ErrorCode::IndexCorruption,
                 "missing prepared text checkpoint",
             )
         })?;
+        // Invalidate the old directory and covered position before fallible
+        // assembly. The storage writer may truncate or partially replace the
+        // suffix. Until its entire replacement is installed, a later search must
+        // use another source.
         self.mark_index_checkpoint_rebuild_needed();
         #[cfg(test)]
         {
@@ -4567,17 +6604,32 @@ impl Inner {
                 "injected index checkpoint refresh failure",
             ));
         }
+        // Use the database budget because maintenance has no query profile
+        // override. Compare the encoded bytes of retained segments with one eighth
+        // of that budget. Resident capacity is still charged independently.
         let budget_mb = self.active_cache_budget_mb();
         let cache_limit = budget_mb.saturating_mul(1_048_576);
         let budget = (budget_mb as u64).saturating_mul(1_048_576) / 8;
+        // An unchanged collection can reuse vector bytes only while the cached
+        // segment still matches its schema and the retained set fits the reuse
+        // budget. Its coverage sequence will change because this checkpoint
+        // describes the new commit.
         let mut reused_bytes = 0u64;
         reusable_vectors.retain(|id, segment| {
+            // A collection can have disappeared or changed vector configuration
+            // while the reusable cache still owns its old segment. Check the
+            // current catalog entry as well as the changed-ID set before retaining
+            // its rows.
             let eligible = !changed_vector_collections.contains(id)
                 && self
                     .catalog
                     .collection_by_id(id)
                     .is_ok_and(|collection| segment.matches_collection(collection));
             eligible
+                // The allowance covers the sum of retained encoded extents. A
+                // segment that cannot be sized or does not fit is skipped, leaving
+                // the earlier selection and the remaining bytes available for
+                // other collections.
                 && segment.encoded_len().is_ok_and(|bytes| {
                     if bytes > budget.saturating_sub(reused_bytes) {
                         return false;
@@ -4586,26 +6638,49 @@ impl Inner {
                     true
                 })
         });
+        // Decoded identifiers, coordinates and directory storage have their own
+        // cache charge. If that retained representation exceeds the cache limit,
+        // discard it and reset the encoded-byte counter together.
         if reusable_vectors.is_empty() || reusable_vectors.reserved_bytes() > cache_limit {
             reusable_vectors.clear();
             reused_bytes = 0;
         }
+        // These entries now describe unchanged rows under the current snapshot.
+        // Stamp the new commit only after testing their old collection identity
+        // and settings. This changes coverage metadata without rereading the
+        // vector coordinates.
         for segment in reusable_vectors.values_mut() {
             segment.set_covered_commit(self.last_commit_sequence_no);
         }
         let checkpoint = self.index_checkpoint_metadata(context)?;
         // Reused segments remain owned throughout writing, including before their turn.
+        // The segment iterator proposes new caches and the completion callback
+        // decides which remain admitted. They share this byte count so later
+        // collections see the cost of entries already retained without
+        // materializing future collections in advance.
         let allocated = Cell::new(reused_bytes);
         let mut admitted = VectorCache::new(context);
+        // Open the primary payload reader once and clone it into individual
+        // streamed segments. It stays bound to the generation being checkpointed
+        // throughout the write. Absolute embedding locators from that catalog must
+        // never be followed through a subsequent open of the pathname.
         let reader = self.storage.payload_reader()?;
         let catalog = &self.catalog;
         let commit = self.last_commit_sequence_no;
+        // Emit a staged text body for every live collection first. Even an empty
+        // collection needs its entry so the directory can distinguish an empty
+        // segment from missing coverage. The writer binds each body to this
+        // checkpoint's commit.
         let text_segments = catalog.live_collections().map(|collection| {
             Ok(CheckpointSegment::StagedText {
                 body: text.body(&collection.collection_id)?,
                 commit,
             })
         });
+        // Use the same visible collection set for the vector half. Borrow an
+        // unchanged resident entry through its write or assemble rows from the
+        // collection's currently selected live embeddings and their primary
+        // locators.
         let vector_segments = catalog.live_collections().map(|collection| {
             match reusable_vectors.get(&collection.collection_id) {
                 Some(segment) => Ok(CheckpointSegment::BorrowedCachedVector(segment)),
@@ -4619,6 +6694,10 @@ impl Inner {
                                 catalog.record_ref_for_embedding(&embedding.embedding_id),
                             )
                         });
+                    // The record-backed segment records an ordered set of rows and
+                    // a reader tied to their file. A later streaming write can
+                    // fetch one embedding's coordinates at a time without
+                    // constructing an entire resident copy.
                     let mut source = VectorRecordSegment::new(
                         collection,
                         commit,
@@ -4626,10 +6705,19 @@ impl Inner {
                         reader.try_clone()?,
                         context,
                     )?;
+                    // Test the full encoded extent size before trying to retain a
+                    // decoded copy. Declining to materialize leaves the prepared
+                    // row source available to write the same segment through the
+                    // streaming path.
                     let encoded_len = source.encoded_len()?;
                     if allow_optional_memory
                         && encoded_len <= budget.saturating_sub(allocated.get())
                     {
+                        // try_materialize can decline optional memory and leave
+                        // the same source intact for streaming. An actual source
+                        // error still aborts the index write. Skipping the
+                        // offending segment would publish a directory that claims
+                        // full coverage while omitting that collection.
                         if let Some(segment) = source.try_materialize(cache_limit)? {
                             return Ok(CheckpointSegment::CachedVector(segment));
                         }
@@ -4638,10 +6726,18 @@ impl Inner {
                 }
             }
         });
+        // The writer finalizes each frame and then its enclosing directory,
+        // checksums and completion marker. Segment callbacks occur before this
+        // entire operation has succeeded, so keep their cache local until the
+        // writer returns its report.
         let (report, source) = self.storage.write_index_segments_in(
             &checkpoint,
             text_segments.chain(vector_segments),
             |segment, bytes| {
+                // Only a newly owned cached vector needs an insert here. A
+                // borrowed vector already counts toward the budget, and a declined
+                // directory insert leaves the written frame usable even though the
+                // next search may have to read it.
                 if let CheckpointSegment::CachedVector(segment) = segment {
                     if admitted.insert(segment, cache_limit) {
                         allocated.set(allocated.get().saturating_add(bytes));
@@ -4652,6 +6748,10 @@ impl Inner {
             context,
             allow_optional_memory,
         )?;
+        // The committed directory is now the common source for text and vector
+        // reads. Attach statistics derived from these same staged bodies and
+        // publish its status, covered sequence and footprint from the writer's
+        // report.
         admitted.append(reusable_vectors, cache_limit);
         self.persistent_vector_segments = Some(admitted);
         let text_stats = text.take_stats();
@@ -4662,6 +6762,10 @@ impl Inner {
         Ok(Some(report))
     }
 
+    // A text cache holds postings across collections. Building it is optional on
+    // the search path. A request for one collection can still visit that
+    // collection's checkpoint segment if retaining the whole text index is too
+    // expensive.
     fn prepare_text_index(
         &mut self,
         cache_budget_mb: usize,
@@ -4676,6 +6780,10 @@ impl Inner {
             return Ok(());
         };
         let limit = cache_budget_mb.saturating_mul(1_048_576);
+        // Subtract all optional residents, including decoded vectors, before
+        // applying the encoded-size allowance. An overflowing sum of text extents
+        // has no usable estimate and skips this prewarm without spending cache
+        // credit.
         let remaining = limit.saturating_sub(self.optional_cache_bytes());
         if source
             .text_encoded_len()
@@ -4683,6 +6791,10 @@ impl Inner {
         {
             return Ok(());
         }
+        // Build in a private candidate and install it only when every selected
+        // collection has been visited. Failure to validate an unrelated collection
+        // during prewarm leaves the actual requested segment to its own checked
+        // read.
         match build_text_cache_in(
             &self.catalog,
             |_| true,
@@ -4709,12 +6821,18 @@ impl Inner {
         )
     }
 
+    // Vectors retained while writing the checkpoint live in a collection-keyed
+    // map. A separate slot holds the last on-demand load. Check both owners
+    // against this request's budget before accepting a resident hit.
     fn prepare_vector_index_with_context(
         &mut self,
         collection_id: &str,
         cache_budget_mb: usize,
         caller_context: &crate::json::JsonOperationContext,
     ) -> Result<()> {
+        // Without a directory there is no persistent vector segment to prepare. If
+        // a directory does exist, it must contain a vector extent for this
+        // collection. A missing entry invalidates checkpoint coverage.
         let Some(source) = &self.lazy_vector_source else {
             return Ok(());
         };
@@ -4724,6 +6842,9 @@ impl Inner {
         };
         // Preserve the existing decoder headroom policy, now applied to one collection.
         let load_budget = (cache_budget_mb as u64).saturating_mul(1_048_576) / 8;
+        // Compare encoded sizes across all retained vector segments. Treating an
+        // unknown length as maximal prevents an unaccounted cached segment from
+        // appearing to fit the current profile.
         let mut cached_bytes = self
             .persistent_vector_segments
             .as_ref()
@@ -4732,11 +6853,17 @@ impl Inner {
                     total.saturating_add(source.encoded_len(id).unwrap_or(u64::MAX))
                 })
             });
+        // The one-collection entry can have outlived the search that loaded it.
+        // Include its extent along with the multi-collection map even if it
+        // belongs to a different target.
         let lazy_bytes = self.lazy_vector_segment.as_ref().map_or(0, |segment| {
             source
                 .encoded_len(&segment.collection_id)
                 .unwrap_or(u64::MAX)
         });
+        // Check resident credit separately from encoded sizes. Each decoded segment
+        // owns identifiers and vector buffers. The multi-collection cache also
+        // charges its directory.
         let actual_bytes = self
             .persistent_vector_segments
             .as_ref()
@@ -4745,6 +6872,9 @@ impl Inner {
                 .lazy_vector_segment
                 .as_ref()
                 .map_or(0, CachedVectorSegment::reserved_bytes);
+        // The caller can select a smaller profile than the one that admitted the
+        // cache. Discard residents that exceed either bound before accepting a
+        // cached hit under the new profile.
         if cached_bytes.saturating_add(lazy_bytes) > load_budget
             || actual_bytes > cache_budget_mb.saturating_mul(1_048_576)
         {
@@ -4752,6 +6882,9 @@ impl Inner {
             self.lazy_vector_segment = None;
             cached_bytes = 0;
         }
+        // Test the multi-collection cache after enforcing the active limits. A hit
+        // returns without allocating a second representation of the same segment
+        // in the one-collection slot.
         if self
             .persistent_vector_segments
             .as_ref()
@@ -4759,6 +6892,9 @@ impl Inner {
         {
             return Ok(());
         }
+        // An extent too large for the optional cache can still be streamed by the
+        // search. Drop the one-collection cache entry without marking the on-disk
+        // checkpoint stale.
         if encoded_len > load_budget {
             self.lazy_vector_segment = None;
             return Ok(());
@@ -4770,14 +6906,26 @@ impl Inner {
         {
             return Ok(());
         }
+        // Replace the previous one-collection entry before attempting a load. If
+        // the existing multi-collection cache and the requested extent would exceed
+        // the encoded-size allowance, release the multi-collection cache as well.
         self.lazy_vector_segment = None;
         if cached_bytes.saturating_add(encoded_len) > load_budget {
             self.persistent_vector_segments = None;
         }
+        // The decoded segment can outlive this search, so its reservation uses the
+        // database's ledger. Inherit the caller's cost accounting to attribute the
+        // load to the query that triggered it.
         let mut context = crate::json::JsonOperationContext::new(Arc::clone(&self.work));
         context.inherit_search_cost(caller_context);
         let cache_limit = cache_budget_mb.saturating_mul(1_048_576);
         let mut reservation = CachedVectorSegment::reserve(&context, cache_limit, encoded_len);
+        // Retry admission once after dropping the other optional residents.
+        // Refusing cache credit is an ordinary streaming fallback and supplies no
+        // evidence that the segment itself is damaged.
+        // Only the remaining multi-collection cache is discarded by this admission
+        // retry. If the reservation still cannot fit, later vector search can
+        // stream rows without a resident vector segment.
         if reservation.is_none() && self.persistent_vector_segments.is_some() {
             self.persistent_vector_segments = None;
             reservation = CachedVectorSegment::reserve(&context, cache_limit, encoded_len);
@@ -4785,6 +6933,9 @@ impl Inner {
         let Some(reservation) = reservation else {
             return Ok(());
         };
+        // Install a segment only after its extent and decoded records validate. A
+        // missing validated result makes the checkpoint unusable, whereas an error
+        // returned by the reader is propagated to the caller.
         match source.load_cached(&self.storage, collection_id, reservation, &context)? {
             Some(segment) => self.lazy_vector_segment = Some(segment),
             None => self.mark_index_checkpoint_rebuild_needed(),
@@ -4799,14 +6950,22 @@ impl Inner {
         options: TextSearchOptions,
         context: &crate::json::JsonOperationContext,
     ) -> Result<Option<Bm25Hits>> {
+        // A resident text index is usable only with current persistent coverage.
+        // The in-memory owner can survive a status downgrade.
         if self.index_suffix_status != IndexSuffixState::PersistentCheckpoint {
             return Ok(None);
         }
+        // A memory failure in the fast path may be resolved by releasing resident
+        // text and vector entries. Once the cache has been discarded, the next
+        // attempt reads the directory rather than borrowing postings that no
+        // longer exist.
         if self.text_index.has_resident_cache() {
             match self
                 .text_index
                 .search(collection_id, query, options, context)
             {
+                // If no resident credit can be reclaimed, preserve the original
+                // allocation error instead of reporting a checkpoint miss.
                 Err(error) if crate::json::is_memory_budget_error(&error) => {
                     if !Self::release_optional_caches(
                         &mut self.text_index,
@@ -4820,6 +6979,9 @@ impl Inner {
                 result => return result.map(Some),
             }
         }
+        // An empty successful hit set is a complete answer. None delegates recall
+        // to primary data. Returning an empty set on a checkpoint miss would
+        // silently suppress matches in the catalog.
         self.search_uncached_text_index(collection_id, query, options, context)
     }
 
@@ -4835,6 +6997,9 @@ impl Inner {
         {
             return Ok(None);
         }
+        // For a collection with no visible chunks the catalog proves the result is
+        // empty, even before opening a text extent. Return a completed empty
+        // result so the caller need not scan the primary stream.
         if !self
             .catalog
             .live_chunks()
@@ -4845,6 +7010,9 @@ impl Inner {
         let Some(source) = &self.lazy_vector_source else {
             return Ok(None);
         };
+        // Reading the target segment validates the rows that actually supplied its
+        // BM25 scores. When the directory offers no usable segment, invalidate
+        // checkpoint coverage so the primary path can recompute recall.
         let result = TextIndex::search_from_segment(
             source,
             &self.storage,
@@ -4903,6 +7071,9 @@ impl Inner {
         context: &crate::json::JsonOperationContext,
         work: &mut VectorWork,
     ) -> Result<Option<VectorHits>> {
+        // Re-evaluate cache lookup inside the reclamation closure. If the first
+        // scoring attempt has to release memory, eviction can remove the very
+        // entry it borrowed and change the next lookup into a miss.
         let cached = self.read_reclaiming(|inner| {
             let segment = inner
                 .persistent_vector_segments
@@ -4914,6 +7085,10 @@ impl Inner {
                         .as_ref()
                         .filter(|segment| segment.collection_id == collection.collection_id)
                 });
+            // Both resident owners supply the same raw coordinates. Compare them
+            // with the current collection's metric and use the live catalog for
+            // any filter. The caller's work counters span attempts even though
+            // each candidate heap belongs to one scoring pass.
             segment
                 .map(|segment| {
                     search_persistent_vector_segment_with_work(
@@ -4946,6 +7121,9 @@ impl Inner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    // Stream vectors when the connection has no retained segment for this
+    // collection. The visit can produce candidates before its final integrity
+    // checks finish, so only the success path may publish those candidates.
     fn search_uncached_vector_index_with_work(
         &mut self,
         collection: &CollectionInfo,
@@ -4955,6 +7133,10 @@ impl Inner {
         context: &crate::json::JsonOperationContext,
         work: &mut VectorWork,
     ) -> Result<Option<VectorHits>> {
+        // A target with a resident segment belongs to the caller's cached search
+        // path. Return None here to decline the streamed attempt. A segment for
+        // some other collection in either cache does not prevent this target from
+        // streaming.
         if self
             .persistent_vector_segments
             .as_ref()
@@ -4969,11 +7151,19 @@ impl Inner {
         let Some(source) = &self.lazy_vector_source else {
             return Ok(None);
         };
+        // Input read-ahead and the bounded result heap compete for workspace. Keep
+        // the scorer across attempts because it depends on the query, and recreate
+        // the heap because previously delivered rows remain provisional until the
+        // whole extent validates.
         let mut input = source.reserve_read_buffer(&collection.collection_id, context)?;
         let scorer = VectorScorer::new(query, collection.distance_metric);
         loop {
             let mut candidates = VectorCandidates::new(limit, context);
             let result = source.visit(&self.storage, collection, &input, |chunk_id, values| {
+                // Count a visited row even when the metadata filter rejects it.
+                // Distance work starts only for eligible rows and counts
+                // coordinate components, so a four-dimensional scored vector adds
+                // four while a filtered row adds none.
                 work.scans += 1;
                 context.search_cost_add(crate::search_cost::Counter::VectorChecks, 1);
                 if !matches_vector_filter(
@@ -4990,6 +7180,10 @@ impl Inner {
                     crate::search_cost::Counter::DistanceComponents,
                     values.len() as u64,
                 );
+                // Preserve both the metric-native score and its normalized value.
+                // Candidate selection compares the normalized value across rows.
+                // Downstream diagnostics can still recover the distance or
+                // similarity the index computed for the retained candidate.
                 candidates.push(
                     chunk_id,
                     raw,
@@ -5001,6 +7195,10 @@ impl Inner {
                 )?;
                 Ok(())
             });
+            // The visitor can have scored rows before the containing frame's final
+            // integrity check. Only true promotes these candidates to hits. A
+            // false result discards the heap and makes subsequent recall use
+            // committed primary data.
             match result {
                 Err(error)
                     if error.code() == ErrorCode::ResourceExhausted
@@ -5008,6 +7206,10 @@ impl Inner {
                 {
                     // Retry a validated frame once without optional buffering.
                     // Discard all provisional candidates before reclaiming its quota.
+                    // Keep the cumulative work counters for diagnostics when
+                    // starting over. The replacement heap must begin empty, since
+                    // replaying the same rows into the old heap could retain
+                    // duplicate chunk IDs.
                     drop(candidates);
                     input.retain(0);
                 }
@@ -5021,7 +7223,15 @@ impl Inner {
         }
     }
 
+    // This transition retires the persistent read path in memory. It clears the
+    // directory, vector residents and checkpoint metrics. The committed catalog
+    // remains the source for rebuilding or fallback, and no file bytes are changed
+    // here.
     fn mark_index_checkpoint_rebuild_needed(&mut self) {
+        // Clear the index-side identity, byte count, and both cached and lazy
+        // vector sources together. Leaving a lazy directory available would allow
+        // a later prefix-based read to follow stale offsets even after the status
+        // requests a rebuild.
         self.index_suffix_status = IndexSuffixState::RebuildNeeded;
         self.last_index_commit_sequence_no = None;
         self.index_size_bytes = 0;
@@ -5065,6 +7275,10 @@ impl Inner {
         &self,
         context: &crate::json::JsonOperationContext,
     ) -> Result<IndexCheckpointMetadata> {
+        // Bind the visible catalog to its main-log batch, commit frame and byte
+        // boundary with a coverage fingerprint. Record the object counts
+        // separately so reopening can compare the decoded directory with the
+        // primary snapshot.
         let collection_count = self.catalog.live_collections().count();
         Ok(IndexCheckpointMetadata {
             covered_last_batch_id: self.catalog.last_commit_id,
@@ -5079,12 +7293,18 @@ impl Inner {
             live_document_count: self.catalog.live_documents().count(),
             live_chunk_count: self.catalog.live_chunks().count(),
             live_embedding_count: self.catalog.live_embeddings().count(),
+            // Declare both segment types for each live collection, including
+            // collections with no chunks or embeddings. The segment writer checks
+            // these declared counts against the records it actually receives.
             text_segment_count: collection_count,
             vector_segment_count: collection_count,
             build_mode: "inline_full_checkpoint".into(),
         })
     }
 
+    // Database configuration can override the resource profile's cache ceiling.
+    // Maintenance and prefetch have no per-query override, so use this configured
+    // budget before admitting reusable segments.
     fn active_cache_budget_mb(&self) -> usize {
         self.config
             .cache_budget_mb
@@ -5092,11 +7312,19 @@ impl Inner {
     }
 }
 
+// Produce the primary records for the replacement in replay order. Iterate live
+// catalog rows without retaining a second database image. Each owned output
+// travels with the reservation that covers it until the replacement writer has
+// consumed it.
 fn compaction_records<'a>(
     catalog: &'a Catalog,
     mut reader: PayloadReader,
     context: &'a crate::json::JsonOperationContext,
 ) -> impl Iterator<Item = Result<(RecordPayload, RecordReservation)>> + 'a {
+    // The iterator borrows catalog rows until one record is requested. Each
+    // variant identifies the reconstruction needed for that record so copied
+    // strings or decoded coordinate buffers live for only the current output at
+    // this level.
     enum Source<'a> {
         Collection(&'a CollectionInfo),
         DroppedCollection(&'a CollectionInfo),
@@ -5104,6 +7332,9 @@ fn compaction_records<'a>(
         Chunk(&'a Chunk),
         Embedding(&'a Embedding),
     }
+    // A deleted collection definition carries the name that must stay reserved
+    // after compaction. Select it separately from live collections so the
+    // replacement can recreate the definition and then replay its drop.
     let deleted_collections = || {
         catalog.collections.values().filter(|collection| {
             catalog
@@ -5111,6 +7342,10 @@ fn compaction_records<'a>(
                 .contains(&collection.collection_id)
         })
     };
+    // Create all retained collection definitions, then replay the drops before
+    // writing live documents, chunks and embeddings. This lets catalog recovery
+    // reserve names from known definitions and resolve a later embedding against
+    // its already present chunk.
     catalog
         .live_collections()
         .chain(deleted_collections())
@@ -5125,6 +7360,10 @@ fn compaction_records<'a>(
                 Ok((RecordPayload::CollectionCreate(collection), work))
             }
             Source::DroppedCollection(collection) => {
+                // Construct a fresh drop record from the retained identity and
+                // timestamp. A catalog containing a deleted collection with no
+                // explicit drop time supplies its creation time as the fallback.
+                // The compacted history need not reproduce a historical reason.
                 let mut work = RecordReservation::from(context.reservation());
                 Ok((
                     RecordPayload::CollectionDrop {
@@ -5147,6 +7386,10 @@ fn compaction_records<'a>(
                 Ok((RecordPayload::DocumentPut(document), work))
             }
             Source::Chunk(summary) => {
+                // Only the live chunk summary is guaranteed to be resident. Prefer
+                // its pinned primary locator for the omitted text and metadata,
+                // then recompute the token-count hint from the full text being
+                // rewritten.
                 let mut retained = match catalog.record_ref_for_chunk(&summary.chunk_id) {
                     Some(record_ref) => reader.read_chunk_in(record_ref, context)?,
                     None => RetainedChunk::copy(summary, context)?,
@@ -5158,6 +7401,10 @@ fn compaction_records<'a>(
                 Ok((RecordPayload::ChunkPut(chunk), work))
             }
             Source::Embedding(summary) => {
+                // Write only the embedding currently selected by a live chunk.
+                // Reading a stored vector may allocate both coordinates and
+                // identifiers, so pass their native workspace ownership along with
+                // the reconstructed record.
                 let retained = match catalog.record_ref_for_embedding(&summary.embedding_id) {
                     Some(record_ref) => reader.read_embedding_in(record_ref, context)?,
                     None => RetainedEmbedding::copy(summary, context)?,
@@ -5166,6 +7413,10 @@ fn compaction_records<'a>(
                 // Binary EmbeddingPut omits the alias; recovery derives it from the chunk.
                 Ok((
                     RecordPayload::EmbeddingPut(embedding),
+                    // Embedding coordinates and identifiers own native workspace.
+                    // Their record has no JSON metadata, so pair that existing
+                    // workspace with an empty JSON reservation for the common
+                    // rewrite interface.
                     RecordReservation::new(context.reservation(), workspace),
                 ))
             }
@@ -5177,6 +7428,9 @@ fn index_suffix_status_from_scan(
     catalog: &Catalog,
     context: &crate::json::JsonOperationContext,
 ) -> Result<IndexSuffixState> {
+    // The storage scanner knows the physical position, record layout and integrity
+    // of the suffix. Comparing its report with the replayed catalog establishes
+    // whether those index contents cover this particular visible snapshot.
     let matches = scan
         .index_suffix
         .as_ref()
@@ -5187,6 +7441,10 @@ fn index_suffix_status_from_scan(
 }
 
 fn index_suffix_status_with_coverage(scan: &ScanReport, matches: bool) -> IndexSuffixState {
+    // A directory with valid individual checksums can still describe the wrong
+    // catalog, and an unreadable directory can have no report at all. Either a
+    // rebuild finding or a coverage mismatch takes precedence over the report's
+    // own status.
     let has_rebuild_index_issue = scan.findings.iter().any(index_issue_requires_rebuild);
     if has_rebuild_index_issue || !matches {
         IndexSuffixState::RebuildNeeded
@@ -5202,6 +7460,9 @@ fn index_commit_sequence_no_from_scan(
     scan: &ScanReport,
     index_suffix_status: IndexSuffixState,
 ) -> Option<u64> {
+    // The raw report may name a commit even when its coverage check failed.
+    // Suppress that sequence after a downgrade so statistics cannot associate an
+    // unusable directory with a current searchable checkpoint.
     if index_suffix_status != IndexSuffixState::PersistentCheckpoint {
         return None;
     }
@@ -5211,20 +7472,35 @@ fn index_commit_sequence_no_from_scan(
 }
 
 fn index_commit_sequence_no_from_report(report: &IndexSuffixReport) -> Option<u64> {
+    // Metadata-only output also carries a covered commit for inspection. Advertise
+    // an index commit position to ordinary callers only when the report describes
+    // persistent search segments.
     (IndexSuffixState::from_report(report) == IndexSuffixState::PersistentCheckpoint)
         .then_some(report.covered_last_commit_sequence_no)
 }
 
+// An aggregate mismatch by itself is a warning when the scanner has independently
+// verified the individual records and segments. Preserve that finding in the
+// report, while allowing the checked segments to describe a usable index. Other
+// index findings take the rebuild path.
 fn index_issue_requires_rebuild(issue: &CheckIssue) -> bool {
     issue.stream == "index" && issue.code != "checkpoint_payload_checksum_mismatch"
 }
 
+// The storage scanner proves that a checkpoint is well formed and names a
+// committed byte range. Compare it with the catalog replayed from that range
+// before making it available for search. Correct offsets and individual CRCs do
+// not establish that the index describes the same visible objects.
 fn index_suffix_matches_catalog(
     catalog: &Catalog,
     suffix: &IndexSuffixReport,
     context: &crate::json::JsonOperationContext,
 ) -> Result<bool> {
     let live_collection_count = catalog.live_collections().count();
+    // Seed coverage with the primary boundary and commit sequence recorded in this
+    // suffix. A catalog with the right row counts can still differ in identity or
+    // in collection configuration. Comparing counts alone cannot detect that
+    // substitution.
     let hash = match catalog_index_coverage_hash(
         catalog,
         suffix.covered_critical_end_offset,
@@ -5232,6 +7508,10 @@ fn index_suffix_matches_catalog(
         context,
     ) {
         Ok(hash) => hash,
+        // Malformed catalog data or an invalid dimension cannot validate this
+        // checkpoint. Report the mismatch to the caller. Budget and I/O errors
+        // leave the comparison undecided and must propagate so the caller can
+        // reclaim memory or report the failure.
         Err(error)
             if matches!(
                 error.code(),
@@ -5242,6 +7522,10 @@ fn index_suffix_matches_catalog(
         }
         Err(error) => return Err(error),
     };
+    // Both kinds of checkpoint must match the coverage hash. Metadata-only
+    // checkpoints contain no segments from which to derive row counts. A full
+    // checkpoint additionally needs one text and one vector segment per live
+    // collection and the same numbers of live chunks and embeddings.
     Ok(suffix.coverage_hash == hash
         && (IndexSuffixState::from_report(suffix) == IndexSuffixState::MetadataRecordOnly
             || (suffix.text_segment_count == live_collection_count
@@ -5312,12 +7596,18 @@ fn vector_segments_by_collection(
         .collect()
 }
 
+// A cached vector segment can perform an unfiltered scan without looking up every
+// chunk again. For a metadata predicate the catalog is the authority for the
+// owning collection, visibility and current document or chunk metadata.
 fn matches_vector_filter(
     catalog: &Catalog,
     collection_id: &str,
     filter: Option<&FilterExpr>,
     chunk_id: &str,
 ) -> bool {
+    // Apply the visibility and ownership checks before evaluating the filter. A
+    // missing or deleted row cannot qualify through a matching value still present
+    // in its metadata.
     filter.map_or(true, |expr| {
         catalog.chunks.get(chunk_id).is_some_and(|chunk| {
             chunk.collection_id == collection_id
@@ -5344,6 +7634,9 @@ fn search_persistent_vector_segment(
 }
 
 #[allow(clippy::too_many_arguments)]
+// Score one collection's retained segment. Scanning a row, computing a distance
+// and keeping the row among the best candidates are three separate events.
+// Preserve that distinction when merging work from multiple search paths.
 fn search_persistent_vector_segment_with_work(
     segment: &VectorIndexSegmentPayload,
     query: &[f32],
@@ -5355,18 +7648,27 @@ fn search_persistent_vector_segment_with_work(
 ) -> Result<VectorHits> {
     let mut candidates = VectorCandidates::new(limit, context);
     let scorer = VectorScorer::new(query, metric);
+    // Count a row check before asking the predicate. A row with the wrong vector
+    // length can still be scanned, but it contributes no distance work and never
+    // enters the bounded candidate list.
     for entry in &segment.vectors {
         work.scans += 1;
         context.search_cost_add(crate::search_cost::Counter::VectorChecks, 1);
         if !include(&entry.chunk_id) || entry.vector.len() != query.len() {
             continue;
         }
+        // All components have a partner in the query at this point. Add one unit
+        // per component to both the returned work and the optional trace. The
+        // number of retained hits is independently limited by VectorCandidates.
         let raw = scorer.score(&entry.vector);
         work.distance_ops += entry.vector.len();
         context.search_cost_add(
             crate::search_cost::Counter::DistanceComponents,
             entry.vector.len() as u64,
         );
+        // Keep the metric's raw value alongside its normalized score. Later fusion
+        // and diagnostics use different representations even though there is only
+        // one distance calculation for this row.
         candidates.push(
             &entry.chunk_id,
             raw,
@@ -5376,6 +7678,10 @@ fn search_persistent_vector_segment_with_work(
     Ok(candidates.finish())
 }
 
+// Reconstruct an optional resident index by visiting the prepared text checkpoint
+// collection by collection. A valid source that cannot fit a cache remains usable.
+// An incomplete source needs different treatment because the caller cannot trust
+// it for later reads.
 fn build_text_index_from_checkpoint(
     checkpoint: Option<&TextCheckpoint>,
     catalog: &Catalog,
@@ -5383,6 +7689,9 @@ fn build_text_index_from_checkpoint(
     context: &crate::json::JsonOperationContext,
     cache_limit: usize,
 ) -> Result<TextIndex> {
+    // An empty database has no committed text to cover. After the first commit,
+    // the absence of the prepared checkpoint for this operation cannot be
+    // interpreted as an empty text index.
     let Some(checkpoint) = checkpoint else {
         if catalog.last_commit_id == 0 {
             return Ok(TextIndex::default());
@@ -5397,12 +7706,19 @@ fn build_text_index_from_checkpoint(
         include,
         context,
         cache_limit,
+        // Open each collection body when requested and pass the current input
+        // grant to its visitor. Rebuilding under pressure can ask the same
+        // checkpoint for the body again with a smaller or zero read buffer.
         |id, input, visit| {
             checkpoint
                 .body(id)?
                 .visit(context, input.reserved_bytes(), visit)
         },
     )? {
+        // A miss means the source was usable but the optional resident
+        // representation was not installed. Invalid means validation could not
+        // complete for the supplied checkpoint. Returning an empty cache for both
+        // would hide damaged prepared data.
         TextCacheBuild::Complete(index) => Ok(index),
         TextCacheBuild::Miss => Ok(TextIndex::default()),
         TextCacheBuild::Invalid => Err(Error::new(
@@ -5412,6 +7728,10 @@ fn build_text_index_from_checkpoint(
     }
 }
 
+// The budget for scanning checkpoint bytes competes with the budget for a resident
+// cache. Each retry starts a new set of visitors from the beginning. The loop
+// reduces an optional reservation on each retry so it cannot keep retrying with
+// the same inputs.
 fn build_text_cache_in(
     catalog: &Catalog,
     include: impl Fn(&str) -> bool,
@@ -5423,6 +7743,9 @@ fn build_text_cache_in(
         &mut crate::storage::TextSegmentVisitor<'_>,
     ) -> Result<bool>,
 ) -> Result<TextCacheBuild> {
+    // Read-ahead is a preference. Request a zero minimum and let a memory denial
+    // leave the input unbuffered. A different error from the workspace cannot be
+    // repaired by changing the visitor's buffer size.
     let mut input = context.workspace_reservation();
     match input.grow_to(0, 64 * 1024, "operation_scratch") {
         Ok(_) => {}
@@ -5430,6 +7753,9 @@ fn build_text_cache_in(
         Err(error) => return Err(error),
     }
     loop {
+        // Build from the live collection set selected by the caller. Reopen the
+        // sources for every attempt because a previous pass may have consumed an
+        // arbitrary prefix before running short of workspace.
         let result = TextIndex::try_cache_from_visitors(
             catalog
                 .live_collections()
@@ -5439,6 +7765,10 @@ fn build_text_cache_in(
             cache_limit,
             |id, callback| visit(id, &input, callback),
         );
+        // Surrender input buffering first to give the cache construction a chance
+        // to finish. If a required decode still runs short, retry with no
+        // resident-cache allowance so the underlying segments can be checked
+        // independently.
         match result {
             Err(error)
                 if crate::json::is_memory_budget_error(&error) && input.reserved_bytes() > 0 =>
@@ -5449,6 +7779,9 @@ fn build_text_cache_in(
                 // An optional candidate can crowd later decoder scratch. Validate again without it.
                 cache_limit = 0;
             }
+            // A cache miss need not arrive as an error. Returning the read-ahead
+            // grant may make the same cache fit. Once input buffering is already
+            // gone the miss is final for this attempt.
             Ok(TextCacheBuild::Miss) if input.reserved_bytes() > 0 => input.retain(0),
             result => return result,
         }
@@ -5494,43 +7827,69 @@ fn build_text_index_matching(
     Ok((index, bytes_read))
 }
 
-fn build_check_report(
+// A path-only check works on the view opened by the storage scanner. A database
+// handle can instead provide an already bound file and a one-shot cache reclaim
+// operation. Both paths build their findings from the committed view they actually
+// scanned.
+pub(crate) fn build_check_report(
     path: &Path,
     options: CheckOptions,
     context: &crate::json::JsonOperationContext,
 ) -> Result<CheckReport> {
-    build_check_report_reclaiming(path, options, context, || false)
+    build_check_report_reclaiming(path, None, options, context, || false)
+        .map_err(|e| e.maintenance_phase("check_view", "unchanged"))
 }
 
 fn build_check_report_reclaiming(
     path: &Path,
+    bound: Option<&crate::physical_file::ManagedFile>,
     options: CheckOptions,
     context: &crate::json::JsonOperationContext,
     reclaim: impl FnOnce() -> bool,
 ) -> Result<CheckReport> {
     #[cfg(test)]
     tests::record_check_scan();
+    // Populate a fresh catalog from the records admitted by the scan's commit
+    // checks. A data frame can have a valid checksum and still belong to an
+    // unfinished batch. None of its objects should affect the visible counts or
+    // the coverage comparison.
     let mut catalog = Catalog::new_in(context);
-    let scan = scan_file_with_retained_records_in(path, context, |record, work| {
+    let scan = crate::storage::scan_check_view(path, bound, context, |record, work| {
         catalog.apply_retained(record, work, context)
     })?;
+    // A check may recover a committed prefix and still record corrupt bytes after
+    // it. Tie the visible catalog to the last accepted batch, even when the
+    // overall report will contain errors.
     catalog.last_commit_id = scan.last_valid_commit;
     #[cfg(test)]
     let _pressure = tests::hold_check_coverage_pressure(context);
+    // A well-formed checkpoint may still describe a different set of live rows.
+    // Reconcile the scanned suffix with the catalog rebuilt from committed records
+    // before deciding whether index repair is available.
     let matches = if let Some(suffix) = &scan.index_suffix {
         crate::json::retry_after_memory_reclaim(
             || index_suffix_matches_catalog(&catalog, suffix, context),
             reclaim,
         )?
+    // A missing suffix has no coverage claim to disprove. Leave the match flag
+    // true in that case and let the suffix status report the absence. Treating it
+    // as a mismatch would manufacture a different diagnostic.
     } else {
         true
     };
     let index_suffix_status = index_suffix_status_with_coverage(&scan, matches);
     let mut issues = scan.findings.clone();
+    // A model conflict is a property of visible embeddings after replay. Scan the
+    // live collections, even when their checkpoint is absent. Rebuilding an index
+    // cannot fix conflicting model declarations in primary data.
     for collection in catalog.live_collections() {
         if let crate::catalog::ModelState::Conflict(witness) =
             catalog.visible_model_state(&collection.collection_id)?
         {
+            // Attach the witness to a committed frame so the finding identifies
+            // the actual embedding and batch. If its locator is missing, the
+            // replayed state itself is inconsistent and the detector cannot return
+            // a trustworthy location.
             let reference = catalog
                 .record_refs
                 .get(&witness.embedding_id)
@@ -5540,6 +7899,10 @@ fn build_check_report_reclaiming(
                         "visible model conflict has no committed record reference",
                     )
                 })?;
+            // Report model conflicts as primary-data errors without claiming that
+            // the records disappeared. The scan can expose their objects, while a
+            // single coherent model identity cannot be established for those
+            // embeddings.
             issues.push(CheckIssue {
                 severity: "error".into(),
                 code: "embedding_model_mismatch".into(),
@@ -5555,6 +7918,9 @@ fn build_check_report_reclaiming(
             });
         }
     }
+    // Keep the physical suffix details even when replay disproves coverage. Its
+    // offset identifies the checkpoint to rebuild. Only the index is affected; the
+    // primary end and last valid commit still come from the scan.
     if let Some(suffix) = &scan.index_suffix {
         if !matches {
             issues.push(CheckIssue {
@@ -5572,7 +7938,34 @@ fn build_check_report_reclaiming(
             });
         }
     }
-    attach_check_issue_suggestions(path, &catalog, &mut issues);
+    #[cfg(unix)]
+    // Compare the open file with the name late in the check, when commands for the
+    // report are about to be chosen. Unix permits the name to be replaced while
+    // the open file remains readable, or unlinked while the scan proceeds.
+    let detached_view = if let Some(file) = bound {
+        use std::os::unix::fs::MetadataExt;
+        let physical = file.metadata()?;
+        !path
+            .metadata()
+            .is_ok_and(|named| named.dev() == physical.dev() && named.ino() == physical.ino())
+    } else {
+        false
+    };
+    #[cfg(not(unix))]
+    let detached_view = false;
+    // If the bound inode is no longer at this path, keep the findings about the
+    // inspected file but suppress pathname-based repair suggestions. Running such a
+    // command would act on the replacement.
+    if detached_view {
+        for issue in &mut issues {
+            issue.suggested_command = None;
+        }
+    } else {
+        attach_check_issue_suggestions(path, &catalog, &mut issues);
+    }
+    // Overall status summarizes all findings, including primary-data issues. Index
+    // checking has its own result below. An index can remain usable while the
+    // report still carries a warning.
     let status = if issues.iter().any(|issue| issue.severity == "error") {
         "error"
     } else if issues.iter().any(|issue| issue.severity == "warning") {
@@ -5580,8 +7973,15 @@ fn build_check_report_reclaiming(
     } else {
         "ok"
     };
+    // A suggested command can be useful even for an issue with no automatic
+    // repair. Compute repair availability from the findings' own flags rather than
+    // the presence of a printable command.
     let repair_available = issues.iter().any(|issue| issue.repair_available);
     let has_rebuild_index_issue = issues.iter().any(index_issue_requires_rebuild);
+    // Report index verification independently of overall severity. An aggregate
+    // checksum warning can accompany independently checked segments. Use the first
+    // finding that actually requires rebuilding as the reason for a failed index
+    // check.
     let (index_check, index_check_reason) = if options.verify_indexes && has_rebuild_index_issue {
         let reason = issues
             .iter()
@@ -5595,6 +7995,10 @@ fn build_check_report_reclaiming(
         ("ok".into(), None)
     } else if options.verify_indexes && index_suffix_status == IndexSuffixState::MetadataRecordOnly
     {
+        // A metadata-only checkpoint identifies the covered commit but supplies no
+        // persistent segments to verify. Distinguish that state from both a
+        // missing checkpoint and an explicit request to disable index
+        // verification.
         (
             "skipped".into(),
             Some("persistent_index_segments_not_implemented".into()),
@@ -5607,7 +8011,11 @@ fn build_check_report_reclaiming(
     } else {
         ("disabled".into(), None)
     };
+    // The primary boundary, suffix status and object counts describe the same
+    // inspected view. In particular, replacing the path during a check does not
+    // turn this into a report on the replacement.
     Ok(CheckReport {
+        detached_view,
         schema_version: "0.1".into(),
         path: path.to_path_buf(),
         status: status.into(),
@@ -5626,6 +8034,9 @@ fn build_check_report_reclaiming(
     })
 }
 
+// Fill in a generic suggestion only for a finding that has no more specific
+// command. The caller has already ruled out an inspected file detached from this
+// pathname.
 fn attach_check_issue_suggestions(path: &Path, catalog: &Catalog, issues: &mut [CheckIssue]) {
     for issue in issues {
         if issue.suggested_command.is_some() {
@@ -5640,6 +8051,10 @@ fn check_issue_suggested_command(
     catalog: &Catalog,
     issue: &CheckIssue,
 ) -> Option<String> {
+    // A derived-only issue can be addressed by rebuilding. Print a collection
+    // selector only when there is exactly one visible collection. Choosing the
+    // first in a larger catalog would narrow the printed command without evidence
+    // that the issue belongs to that collection.
     if issue.stream == "index" && issue.visibility_impact == "rebuild_index_only" {
         let mut live_collections = catalog.live_collections();
         if let Some(collection) = live_collections.next() {
@@ -5653,6 +8068,8 @@ fn check_issue_suggested_command(
         }
         return Some(format!("coffer rebuild-index {}", path.display()));
     }
+    // This is advice attached to a finding. The repair command performs its own
+    // validation of the tail before it can truncate the file.
     if issue.repair_available || issue.visibility_impact == "tail_only" {
         return Some(format!("coffer repair {} --truncate-tail", path.display()));
     }
@@ -5660,13 +8077,17 @@ fn check_issue_suggested_command(
 }
 
 impl CheckReport {
+    /// Return the structured JSON representation of this report.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
-        builder.object([
+        // Construct the scan and index findings through the caller's builder so
+        // nested arrays share the same output accounting. The public to_json path
+        // supplies a host builder for the same report shape.
+        let mut report = builder.object([
             ("schema_version", builder.string(&self.schema_version)?),
             ("path", builder.display(self.path.display())?),
             ("status", builder.string(&self.status)?),
@@ -5676,16 +8097,19 @@ impl CheckReport {
             ),
             (
                 "last_valid_commit",
-                JsonValue::Number(self.last_valid_commit as f64),
+                builder.optional_u64(Some(self.last_valid_commit))?,
             ),
             (
                 "critical_end_offset",
-                JsonValue::Number(self.critical_end_offset as f64),
+                builder.optional_u64(Some(self.critical_end_offset))?,
             ),
             (
                 "index_suffix_status",
                 builder.string(&self.index_suffix_status)?,
             ),
+            // Keep the physical suffix report separate from the interpreted
+            // status. It may describe a parsed structure whose coverage was later
+            // rejected. Null means the scanner had no suffix report to attach.
             (
                 "index_suffix",
                 self.index_suffix
@@ -5709,23 +8133,42 @@ impl CheckReport {
                 builder.object([
                     (
                         "live_documents",
-                        JsonValue::Number(self.live_documents as f64),
+                        builder.optional_u64(Some(self.live_documents as u64))?,
                     ),
-                    ("live_chunks", JsonValue::Number(self.live_chunks as f64)),
-                    ("tombstones", JsonValue::Number(self.tombstones as f64)),
+                    (
+                        "live_chunks",
+                        builder.optional_u64(Some(self.live_chunks as u64))?,
+                    ),
+                    (
+                        "tombstones",
+                        builder.optional_u64(Some(self.tombstones as u64))?,
+                    ),
                 ])?,
             ),
-        ])
+        ])?;
+        // Add this marker only when the pathname and open file have diverged.
+        // Older consumers see their usual report for an attached view, while a
+        // detached report explains why it carries no pathname-based commands.
+        if self.detached_view {
+            builder.insert_if_absent(report.as_object_mut().unwrap(), "view_source", || {
+                builder.string("detached_file")
+            })?;
+        }
+        Ok(report)
     }
 }
 
 impl CompactSummary {
+    /// Return the structured JSON representation of this report.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // The shorter and byte-suffixed size keys are two spellings for the same
+        // physical file sizes. Serializing them from a single measurement keeps
+        // existing consumers in agreement.
         builder.object([
             (
                 "before_file_size",
@@ -5755,6 +8198,10 @@ impl CompactSummary {
                 "segments_merged",
                 JsonValue::Number(self.segments_merged as f64),
             ),
+            // A successful main-file replacement and a later index rebuild are
+            // separate events. Include the rebuild outcome and its reason in the
+            // same receipt so a caller can decide which part still needs
+            // maintenance.
             ("index_rebuild", builder.string(&self.index_rebuild)?),
             (
                 "index_rebuild_reason",
@@ -5766,6 +8213,7 @@ impl CompactSummary {
 }
 
 impl RebuildIndexSummary {
+    /// Return the structured JSON representation of this report.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
@@ -5774,6 +8222,9 @@ impl RebuildIndexSummary {
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
             ("schema_version", builder.string(&self.schema_version)?),
+            // Record the requested scope and the work actually performed
+            // independently. A named collection can produce a full checkpoint,
+            // which is why callers read rebuild_scope as well as collection.
             (
                 "collection",
                 builder.optional_str(self.collection.as_deref())?,
@@ -5802,6 +8253,9 @@ impl RebuildIndexSummary {
             ("rebuild_needed", JsonValue::Bool(self.rebuild_needed)),
             (
                 "last_index_commit_id",
+                // An absent index commit is carried as JSON null. Consumers can
+                // distinguish a rebuild with no persistent segment generation from
+                // a concrete checkpoint covering a commit.
                 self.last_index_commit_id
                     .map(|commit| JsonValue::Number(commit as f64))
                     .unwrap_or(JsonValue::Null),
@@ -5812,12 +8266,16 @@ impl RebuildIndexSummary {
 }
 
 impl RepairSummary {
+    /// Return the structured JSON representation of this report.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
     }
 
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
+        // The repair projection retains both legacy size keys and the
+        // byte-suffixed aliases. Derive each pair from the same before or after
+        // measurement so the spellings cannot disagree.
         builder.object([
             ("schema_version", builder.string(&self.schema_version)?),
             ("action", builder.string(&self.action)?),
@@ -5855,6 +8313,7 @@ impl RepairSummary {
 }
 
 impl SnapshotSummary {
+    /// Return the structured JSON representation of this report.
     pub fn to_json(&self) -> JsonValue {
         self.build_json(&JsonBuilder::host())
             .expect("host DTO construction is infallible")
@@ -5865,6 +8324,39 @@ impl SnapshotSummary {
             ("schema_version", builder.string(&self.schema_version)?),
             ("source_path", builder.display(self.source_path.display())?),
             ("output_path", builder.display(self.output_path.display())?),
+            (
+                "package",
+                // The package section is used to identify the copied file. Emit
+                // its byte count, commit and boundary as decimal strings so they
+                // survive consumers that parse JSON numbers as binary64. The
+                // digest refers to the actual copy.
+                builder.object([
+                    ("package_version", JsonValue::Number(1.0)),
+                    ("format_version", JsonValue::Number(FORMAT_VERSION as f64)),
+                    ("required_features", JsonValue::Array(Vec::new())),
+                    ("size_bytes", builder.display(self.bytes_copied)?),
+                    ("sha256", builder.string(&self.sha256)?),
+                    (
+                        "last_valid_commit",
+                        builder.display(self.last_valid_commit)?,
+                    ),
+                    (
+                        "critical_end_offset",
+                        builder.display(self.critical_end_offset)?,
+                    ),
+                    (
+                        "index_suffix_status",
+                        builder.string(&self.index_suffix_status)?,
+                    ),
+                    (
+                        "collections",
+                        builder.array(self.collections.iter().map(|c| c.build_json(builder)))?,
+                    ),
+                ])?,
+            ),
+            // Keep the top-level numeric summary for callers of the snapshot
+            // command. Exact large offsets are separately available as strings in
+            // the package object.
             ("bytes_copied", JsonValue::Number(self.bytes_copied as f64)),
             (
                 "last_valid_commit",
@@ -5882,28 +8374,34 @@ impl SnapshotSummary {
     }
 }
 
-fn ensure_snapshot_output_path(source_path: &Path, output_path: &Path) -> Result<()> {
+// Resolve the destination's directory before considering publication. The snapshot
+// is a new file, so its final path need not exist. It must have a filename and
+// must not already name an entry detected by this existence check.
+fn resolve_snapshot_output(source_path: &Path, output_path: &Path) -> Result<PathBuf> {
     if output_path.file_name().is_none() {
         return Err(Error::new(
             ErrorCode::InvalidSearchParams,
             "snapshot output path must include a file name",
         ));
     }
-    if output_path.exists() {
+    let output = normalize_new_output_path(output_path)?;
+    // Reject a destination that already exists before copying. This is an early
+    // diagnostic: a different process can still create it later, so the
+    // publication step must also enforce its own destination rule.
+    if output.exists() {
         return Err(Error::new(
             ErrorCode::InvalidSearchParams,
             "snapshot output path already exists",
         ));
     }
     let source = source_path.canonicalize()?;
-    let output = normalize_new_output_path(output_path)?;
     if source == output {
         return Err(Error::new(
             ErrorCode::InvalidSearchParams,
             "snapshot output path must differ from source path",
         ));
     }
-    Ok(())
+    Ok(output)
 }
 
 fn normalize_new_output_path(path: &Path) -> Result<PathBuf> {
@@ -5913,65 +8411,14 @@ fn normalize_new_output_path(path: &Path) -> Result<PathBuf> {
             "snapshot output path must include a file name",
         )
     })?;
+    // Canonicalize only the parent, then reattach the requested filename. On a
+    // bare name, resolve the current directory. Canonicalizing the complete path
+    // would fail for the ordinary case of a new snapshot destination.
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     Ok(parent.canonicalize()?.join(file_name))
-}
-
-fn snapshot_temp_path(output_path: &Path) -> Result<PathBuf> {
-    let file_name = output_path.file_name().ok_or_else(|| {
-        Error::new(
-            ErrorCode::InvalidSearchParams,
-            "snapshot output path must include a file name",
-        )
-    })?;
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut tmp_name = file_name.to_os_string();
-    tmp_name.push(format!(".{}.{}.tmp", std::process::id(), unique));
-    Ok(output_path.with_file_name(tmp_name))
-}
-
-fn copy_snapshot_file(source_path: &Path, tmp_path: &Path) -> Result<u64> {
-    let mut owned_temporary = false;
-    let copy_result = (|| {
-        let mut source = File::open(source_path)?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(tmp_path)?;
-        owned_temporary = true;
-        let bytes = std::io::copy(&mut source, &mut output)?;
-        output.flush()?;
-        output.sync_data()?;
-        Ok(bytes)
-    })();
-    if copy_result.is_err() && owned_temporary {
-        let _ = fs::remove_file(tmp_path);
-    }
-    copy_result
-}
-
-fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            let dir = File::open(parent)?;
-            dir.sync_all()?;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -6527,7 +8974,7 @@ mod tests {
                 let (diagnosis, mut work) = db
                     .why_not_debug_with_metadata_boost_in(
                         if seed % 4 == 0 { "empty" } else { "first" },
-                        expected_chunk,
+                        DiagnosisTarget::Legacy(expected_chunk),
                         Some(" text \u{4e2d} ".into()),
                         None,
                         JsonValue::object(),
@@ -6537,6 +8984,7 @@ mod tests {
                         1 + seed % 2,
                         None,
                         Some(context.clone()),
+                        |_| Ok(()),
                     )
                     .unwrap();
                 assert_eq!(diagnosis.query_text.as_deref(), Some("text \u{4e2d}"));
@@ -12723,20 +15171,6 @@ mod tests {
         drop(other);
         drop(db);
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn snapshot_copy_failure_never_removes_preexisting_temporary_file() {
-        let source = temp_path("snapshot-copy-source");
-        let temporary = temp_path("snapshot-copy-existing-temp");
-        fs::write(&source, b"snapshot source").unwrap();
-        fs::write(&temporary, b"preexisting unrelated data").unwrap();
-        assert!(copy_snapshot_file(&source, &temporary).is_err());
-        assert_eq!(fs::read(&temporary).unwrap(), b"preexisting unrelated data");
-        fs::remove_file(&source).unwrap();
-        assert!(copy_snapshot_file(&source, &temporary).is_err());
-        assert_eq!(fs::read(&temporary).unwrap(), b"preexisting unrelated data");
-        fs::remove_file(temporary).unwrap();
     }
 
     #[test]
@@ -19118,6 +21552,7 @@ mod tests {
         COVERAGE_HASH_CALLS.set(0);
         let same = build_check_report_reclaiming(
             &path,
+            None,
             CheckOptions {
                 verify_indexes: true,
             },

@@ -53,15 +53,24 @@ pub(super) fn write_checkpoint_segments<'a, W: Write + Seek>(
     )
 }
 
+// Reserve one slot per text or vector record plus one for commit metadata. The
+// storage writer does this before removing the old suffix, so a directory admission
+// failure can leave that suffix intact.
 pub(super) fn reserve_directory(
     checkpoint: &IndexCheckpointMetadata,
     context: &crate::json::JsonOperationContext,
 ) -> Result<IndexDirectory> {
+    // Reserve space for a commit metadata extent even for a checkpoint with no
+    // collections. A valid empty checkpoint still describes the committed primary
+    // boundary and has one index record.
     let count = checked_writer_add(
         checked_segment_record_count(checkpoint)?,
         1,
         "index checkpoint record count overflow",
     )?;
+    // The number of extent rows is a wire-format quantity. Reject a directory that
+    // cannot be indexed by this process before passing a truncated capacity to the
+    // reserved vector.
     let count = usize::try_from(count).map_err(|_| {
         Error::new(
             ErrorCode::FileFormatError,
@@ -71,6 +80,10 @@ pub(super) fn reserve_directory(
     IndexDirectory::with_capacity(count, context, "operation_scratch")
 }
 
+// The metadata refers to segment extents and checksums that are known only
+// after encoding. Leave space for it, stream the segments, then backfill
+// metadata and the outer header. Write the completion trailer last so that
+// an interruption does not advertise a finished checkpoint to recovery.
 pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     output: &mut W,
     checkpoint: &IndexCheckpointMetadata,
@@ -80,11 +93,17 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     mut extents: IndexDirectory,
     allow_optional_memory: bool,
 ) -> Result<(u64, IndexSegmentSource)> {
+    // Use the declared record count for the preliminary header even though the
+    // iterator can still fail or produce the wrong number of segments. The
+    // completion trailer is the recovery evidence for a finished stream.
     let count = checked_writer_add(
         checked_segment_record_count(checkpoint)?,
         1,
         "index checkpoint record count overflow",
     )?;
+    // The encoded table contains a fixed-width row for every record, including the
+    // metadata row. Keep this byte length distinct from the number of bytes
+    // occupied by record frames.
     let table_len = count
         .checked_mul(INDEX_EXTENT_ENTRY_LEN as u64)
         .ok_or_else(|| {
@@ -93,11 +112,18 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
                 "index extent table length overflow",
             )
         })?;
+    // The metadata record precedes the segments on disk but depends on their
+    // checksums. Reserve its wire position and fill it after streaming them.
     output.seek(SeekFrom::Start(offset))?;
     output.write_all(&header(checkpoint, offset, count, 0, table_len, 0, 0)?)?;
     #[cfg(test)]
     tests::crash_boundary("index_suffix_partial")?;
     output.write_all(&[0; INDEX_RECORD_HEADER_LEN + INDEX_COMMIT_METADATA_LEN])?;
+    #[cfg(all(test, unix))]
+    crate::maintenance_faults::check(crate::maintenance_faults::Stage::WriteCheckpoint)?;
+    // Keep the metadata row in the same on-disk order as its reserved frame. Its
+    // location and size are fixed at this point; its checksum becomes known only
+    // after every referenced segment is encoded.
     extents.push(IndexExtentEntry {
         index_record_id: 1,
         record_type: INDEX_COMMIT_METADATA,
@@ -109,9 +135,15 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     });
     let mut text_count = 0usize;
     let mut vector_count = 0usize;
+    // Track the planned end of the previous frame explicitly. Reading
+    // record-backed input or seeking backward to fill a header can leave a shared
+    // file description's cursor elsewhere.
     let mut next_offset = output.stream_position()?;
     for (index, segment) in segments.into_iter().enumerate() {
         let mut segment = segment?;
+        // Count text and vector records independently. A checkpoint declaring one
+        // of each cannot satisfy its coverage merely by producing two records of
+        // the same kind.
         match &segment {
             #[cfg(test)]
             Segment::Text(_) => text_count += 1,
@@ -124,6 +156,9 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             | Segment::CachedVector(_)
             | Segment::VectorRecords(_) => vector_count += 1,
         }
+        // Reject excess segments immediately, before another extent could outgrow
+        // the admitted directory. A short producer can only be detected after
+        // iteration and must also fail before completion is written.
         if text_count > checkpoint.text_segment_count
             || vector_count > checkpoint.vector_segment_count
         {
@@ -132,15 +167,25 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
                 "index checkpoint has more segments than declared",
             ));
         }
+        // Record ID one is reserved for the commit metadata. Assign segment IDs in
+        // emission order and remember their extents, since the metadata will
+        // reference this ordering after the stream is complete.
         let record_id = index as u64 + 2;
         // Producing a segment may read through a clone of the same file handle.
         let start = next_offset;
         output.seek(SeekFrom::Start(start))?;
         output.write_all(&[0; INDEX_RECORD_HEADER_LEN])?;
+        // Leave a header-sized hole. The encoder streams the body through a digest
+        // to learn the exact length and payload CRC. Filling the hole afterwards
+        // requires only a small fixed header, even for uncached vectors.
         let payload =
             with_write_buffer(output, extents.context(), allow_optional_memory, |buffer| {
                 let mut writer = DigestWriter::new(buffer);
                 segment.encode(&mut writer)?;
+                // Returning the digest from the closure does not yet accept the
+                // payload. The enclosing write-buffer operation can still fail
+                // when flushing its remaining bytes, in which case no extent is
+                // recorded for this segment.
                 Ok(writer.digest)
             })?;
         let length = checked_writer_add(
@@ -148,12 +193,21 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             payload.len,
             "index record length overflow",
         )?;
+        // The frame header includes the payload length and checksum. Backpatching
+        // the reserved header now leaves the cursor near the start of the segment;
+        // the next frame must use its remembered end.
         let record_header = record_header(segment.record_type(), offset, record_id, &payload)?;
         output.seek(SeekFrom::Start(start))?;
         output.write_all(&record_header)?;
+        // Combine the encoded header CRC and the already computed payload CRC with
+        // its byte length. This produces the checksum of the framed record without
+        // reading the segment back from disk.
         let mut record_crc = Crc32c::default();
         record_crc.update(&record_header);
         record_crc.append_crc(payload.crc.finish(), payload.len);
+        // Keep the record's offset relative to the checkpoint start and its
+        // generation as the absolute checkpoint offset. The directory needs both
+        // coordinates when resolving this extent in a particular suffix.
         extents.push(IndexExtentEntry {
             index_record_id: record_id,
             record_type: segment.record_type(),
@@ -164,8 +218,15 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             extent_record_checksum: record_crc.finish(),
         });
         next_offset = checked_writer_add(start, length, "index record boundary overflow")?;
+        // Return ownership of this input segment after its own frame is written.
+        // The callback can recover a newly materialized cache entry here. There are
+        // still later operations that can fail before the whole checkpoint is
+        // complete.
         completed(segment, length);
     }
+    // Reaching the end of the producer is separate from meeting its declaration.
+    // The output may already contain complete individual frames at this point, but
+    // they cannot advertise a complete checkpoint on their own.
     if text_count != checkpoint.text_segment_count
         || vector_count != checkpoint.vector_segment_count
     {
@@ -174,20 +235,36 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             "index checkpoint has fewer segments than declared",
         ));
     }
+    // Record the absolute end of the frames independently of the current seek
+    // position. The packed directory starts here and lies outside the payload byte
+    // count used to check individual record extents.
     let records_end = next_offset;
     output.seek(SeekFrom::Start(records_end))?;
     let payload_len = records_end - offset - INDEX_CHECKPOINT_HEADER_LEN as u64;
+    // The wire length is a u64, while queries use a host-sized payload bound in the
+    // retained segment source. Check that conversion before publishing a checkpoint
+    // the writer could not search.
     let addressable_payload_len = usize::try_from(payload_len).map_err(|_| {
         Error::new(
             ErrorCode::FileFormatError,
             "index payload length exceeds address space",
         )
     })?;
+    // The metadata covers the segment entries, excluding its own slot. Including its
+    // own checksum here would make that checksum depend on the metadata that
+    // contains it.
+    // Bind the referenced-record checksum to the primary batch ID, its
+    // commit-frame sequence and this checkpoint offset before folding in any
+    // extents. A directory describes one committed view and one generation.
     let mut referenced = index_commit_hasher(
         checkpoint.covered_last_batch_id,
         checkpoint.covered_last_commit_sequence_no,
         offset,
     );
+    // The segment-table CRC covers packed extent rows alone. The commit CRC
+    // interleaves a row with the bytes of the record it describes. Feed both in
+    // record ID order even though the lookup directory will later have a different
+    // order.
     let mut segment_table = Crc32c::default();
     // Combine write-time digests in wire order without reading the new suffix back.
     for extent in &extents.as_slice()[1..] {
@@ -196,6 +273,9 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
         referenced.update(&bytes);
         referenced.append_crc(extent.extent_record_checksum, extent.length);
     }
+    // The referenced table interval starts one entry into the packed table. Its
+    // byte length and entry count both exclude the commit metadata that is
+    // currently being constructed.
     let metadata = build_index_commit_metadata_payload(
         checkpoint,
         count - 1,
@@ -212,18 +292,33 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             crc
         },
     };
+    // Fill the metadata record only after both the segment-table CRC and the
+    // referenced-record CRC are final. Its own framed CRC now replaces the
+    // placeholder in the first extent slot.
+    // The metadata payload has its own digest for the frame header. The directory
+    // slot needs a different checksum over the header and payload together, just
+    // like each segment slot.
     let metadata_header = record_header(INDEX_COMMIT_METADATA, offset, 1, &metadata_digest)?;
     output.seek(SeekFrom::Start(offset + INDEX_CHECKPOINT_HEADER_LEN as u64))?;
     let mut metadata_record = DigestWriter::new(&mut *output);
     metadata_record.write_all(&metadata_header)?;
     metadata_record.write_all(&metadata)?;
     extents.as_mut_slice()[0].extent_record_checksum = metadata_record.digest.crc.finish();
+    // For the outer payload checksum the metadata record does count, in its physical
+    // position before the segments. Combine the already observed record digests in
+    // that order before writing the table.
     let mut payload_crc = metadata_record.digest.crc;
     for extent in &extents.as_slice()[1..] {
         payload_crc.append_crc(extent.extent_record_checksum, extent.length);
     }
     output.seek(SeekFrom::Start(records_end))?;
+    // Write the complete directory in record order after the last frame. The full
+    // table checksum includes row one, unlike the earlier segment-table checksum
+    // embedded in commit metadata.
     let mut table_crc = Crc32c::default();
+    // The output buffer may be absent under memory pressure, but the table CRC
+    // must see exactly the same packed entry bytes in either case. A flush failure
+    // prevents the final header and trailer from being installed.
     with_write_buffer(output, extents.context(), allow_optional_memory, |writer| {
         for extent in extents.as_slice() {
             let bytes = encode_extent_entry(extent);
@@ -232,6 +327,9 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
         }
         Ok(())
     })?;
+    // Save the position following the table before seeking back to update the outer
+    // header. The trailer belongs at that saved position, independent of how many
+    // earlier records were backpatched.
     let trailer_start = output.stream_position()?;
     output.seek(SeekFrom::Start(offset))?;
     output.write_all(&header(
@@ -245,10 +343,16 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     )?)?;
     output.seek(SeekFrom::Start(trailer_start))?;
     let mut trailer = [0; INDEX_CHECKPOINT_TRAILER_LEN];
+    // The trailer protects its own marker and declared length. Compute that
+    // checksum before constructing the lookup source, leaving the file without a
+    // completion marker if directory validation fails.
     trailer[..4].copy_from_slice(INDEX_COMPLETE_MARKER);
     trailer[4..6].copy_from_slice(&(INDEX_CHECKPOINT_TRAILER_LEN as u16).to_le_bytes());
     let trailer_checksum = checksum32(&trailer[..6]);
     trailer[6..].copy_from_slice(&trailer_checksum.to_le_bytes());
+    // Build the in-memory lookup source before emitting the completion marker. It
+    // can still reject duplicate collections. The storage caller applies the
+    // selected durability policy after this writer returns.
     let source = IndexSegmentSource::new(
         offset,
         addressable_payload_len,
@@ -256,10 +360,14 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
         checkpoint.covered_last_commit_sequence_no,
         extents,
     )?;
+    // Emit the completion marker only after the header and extent table are final.
     output.write_all(&trailer)?;
     Ok((payload_len, source))
 }
 
+// Buffering is optional. A zero minimum permits direct writes when segment encoding
+// needs the workspace. The closure runs once, since replay could read different
+// source bytes or duplicate bytes already accepted by the destination.
 fn with_write_buffer<W: Write, T>(
     output: &mut W,
     context: &crate::json::JsonOperationContext,
@@ -277,11 +385,17 @@ fn with_write_buffer<W: Write, T>(
         "operation_scratch",
     )?;
     let mut buffer = BufWriter::with_capacity(capacity, output);
+    // Report success only after all buffered bytes reach the underlying writer.
+    // This flush completes the logical write; file and directory durability are
+    // handled by the caller.
     let result = encode(&mut buffer).and_then(|value| {
         buffer.flush()?;
         Ok(value)
     });
     // Do not retry buffered IO from Drop after an encode/flush failure.
+    // Consume the buffer without flushing it again. The writer may already have
+    // accepted a prefix when encoding failed, and another implicit write could
+    // change the file after the error boundary.
     drop(buffer.into_parts().1);
     result
 }
@@ -296,10 +410,16 @@ fn header(
     payload_crc: u32,
 ) -> Result<[u8; INDEX_CHECKPOINT_HEADER_LEN]> {
     let mut bytes = [0; INDEX_CHECKPOINT_HEADER_LEN];
+    // Writing through a shrinking slice advances the cursor without relying on
+    // native struct layout or alignment. The reader expects fixed-width
+    // little-endian fields in this order.
     let mut remaining = &mut bytes[..];
     remaining.write_all(INDEX_CHECKPOINT_MAGIC)?;
     remaining.write_all(&INDEX_CHECKPOINT_VERSION.to_le_bytes())?;
     remaining.write_all(&(INDEX_CHECKPOINT_HEADER_LEN as u16).to_le_bytes())?;
+    // These three fields have separate meanings on disk. This writer places the
+    // checkpoint immediately after the covered critical end and uses that same
+    // absolute offset as the checkpoint generation.
     for value in [
         offset,
         offset,
@@ -309,8 +429,14 @@ fn header(
     ] {
         remaining.write_all(&value.to_le_bytes())?;
     }
+    // This coverage tag describes a full visible snapshot. The separately stored
+    // coverage hash binds that assertion to the checkpoint metadata checked
+    // against the primary view.
     remaining.write_all(&[INDEX_COVERAGE_FULL_VISIBLE_SNAPSHOT])?;
     remaining.write_all(&checkpoint.coverage_hash.to_le_bytes())?;
+    // Record and extent counts both include the metadata entry. The directory
+    // starts immediately after the outer header and the framed records, measured
+    // relative to the checkpoint start.
     for value in [
         count,
         count,
@@ -323,6 +449,9 @@ fn header(
     ] {
         remaining.write_all(&value.to_le_bytes())?;
     }
+    // The directory and the framed payload have distinct checksum domains.
+    // Preserve their order and lengths in the outer header so the reader can
+    // validate each region separately.
     remaining.write_all(&table_crc.to_le_bytes())?;
     remaining.write_all(&payload_len.to_le_bytes())?;
     remaining.write_all(&payload_crc.to_le_bytes())?;
@@ -340,9 +469,15 @@ fn record_header(
     let mut remaining = &mut bytes[..];
     remaining.write_all(INDEX_RECORD_MAGIC)?;
     remaining.write_all(&kind.to_le_bytes())?;
+    // The record header carries its own format version and length. The segment
+    // body also identifies its payload schema, so changing one encoding requires
+    // checking which reader consumes that version.
     remaining.write_all(&1u16.to_le_bytes())?;
     remaining.write_all(&(INDEX_RECORD_HEADER_LEN as u16).to_le_bytes())?;
     for value in [
+        // The framed length includes the header, whereas payload length counts
+        // only body bytes. A length that cannot represent their sum must fail
+        // before a locator is written for this frame.
         checked_writer_add(
             INDEX_RECORD_HEADER_LEN as u64,
             payload.len,
@@ -354,8 +489,13 @@ fn record_header(
     ] {
         remaining.write_all(&value.to_le_bytes())?;
     }
+    // Include the payload CRC in the header CRC. The only header bytes outside that
+    // checksum are its trailing CRC field.
     remaining.write_all(&payload.crc.finish().to_le_bytes())?;
     debug_assert_eq!(remaining.len(), 4);
+    // Compute the header CRC only after the body length, identity and body
+    // checksum are installed. Copying it into the trailing slot completes a header
+    // that can be verified before reading the body.
     let header_checksum = checksum32(&bytes[..INDEX_RECORD_HEADER_LEN - 4]);
     bytes[INDEX_RECORD_HEADER_LEN - 4..].copy_from_slice(&header_checksum.to_le_bytes());
     Ok(bytes)
@@ -367,13 +507,22 @@ pub(crate) enum Segment<'a> {
     #[cfg(test)]
     TextRecords(TextRecordSegment<'a>),
     StagedText {
+        // Borrow of a complete staged body whose original bytes can be verified
+        // while copying.
         body: StagedText<'a>,
+        // Covered commit to encode in the new frame. The staged body may have been
+        // prepared under an earlier commit.
         commit: u64,
     },
     #[cfg(test)]
     Vector(Cow<'a, VectorIndexSegmentPayload>),
+    // A vector segment already owned by the cache, borrowed for this write.
     BorrowedCachedVector(&'a CachedVectorSegment),
+    // A newly materialized cache entry. The per-segment completion callback
+    // receives it back after encoding.
     CachedVector(CachedVectorSegment),
+    // Borrowed catalog summaries plus any file references needed to obtain
+    // coordinates one embedding at a time.
     VectorRecords(VectorRecordSegment<'a>),
 }
 
@@ -387,6 +536,9 @@ impl Segment<'_> {
             Self::StagedText { .. } => INDEX_TEXT_SEGMENT,
             #[cfg(test)]
             Self::Vector(_) => INDEX_VECTOR_SEGMENT,
+            // All vector representations use the same on-disk record kind. Whether
+            // coordinates came from an owned cache, a borrowed cache, or primary
+            // storage does not change how readers dispatch the segment.
             Self::BorrowedCachedVector(_) | Self::CachedVector(_) | Self::VectorRecords(_) => {
                 INDEX_VECTOR_SEGMENT
             }
@@ -394,6 +546,9 @@ impl Segment<'_> {
     }
 
     fn stream_id(&self) -> Result<u64> {
+        // The staged text body already knows its numeric collection identifier.
+        // Other sources carry a catalog string that must be converted to the
+        // numeric ID used by the extent directory.
         if let Self::StagedText { body, .. } = self {
             return Ok(body.collection_number());
         }
@@ -417,11 +572,17 @@ impl Segment<'_> {
             Self::Text(segment) => write_text_segment(segment, output),
             #[cfg(test)]
             Self::TextRecords(segment) => segment.write(output),
+            // A staged text body may span two checkpoint generations. Its writer
+            // verifies the original bytes and substitutes the covered commit
+            // during emission so the new segment advertises the intended view.
             Self::StagedText { body, commit } => body.write(output, *commit),
             #[cfg(test)]
             Self::Vector(segment) => write_vector_segment(segment, output),
             Self::BorrowedCachedVector(segment) => write_cached_vector_segment(segment, output),
             Self::CachedVector(segment) => write_cached_vector_segment(segment, output),
+            // The record-backed path can materialize one vector at a time.
+            // Choosing it after optional cache construction was refused must still
+            // produce the same vector segment layout.
             Self::VectorRecords(segment) => segment.write(output),
         }
     }
@@ -520,10 +681,20 @@ impl<'a> TextRecordSegment<'a> {
 }
 
 pub(crate) struct VectorRecordSegment<'a> {
+    // Collection settings written into the vector header and used to check each
+    // row's dimension.
     collection: &'a CollectionInfo,
+    // Visible commit sequence covered by the segment.
     commit: u64,
+    // Admitted array of catalog summaries and optional payload references in
+    // numeric chunk order. Coordinates can stay in the underlying file until
+    // needed.
     entries: crate::json::ReservedVec<(&'a Embedding, Option<&'a RecordRef>)>,
+    // Reads referenced EmbeddingPut payloads when the summary does not hold the
+    // coordinates needed for this write.
     reader: PayloadReader,
+    // Operation context shared with payload reads and optional cache
+    // materialization, so their memory competes with this segment's other scratch.
     context: crate::json::JsonOperationContext,
     #[cfg(test)]
     pub(super) encode_calls: usize,
@@ -542,6 +713,10 @@ impl<'a> VectorRecordSegment<'a> {
         I::IntoIter: Clone,
     {
         let entries = entries.into_iter();
+        // Count a clone of the iterator to admit exactly one slot per row before
+        // taking the main traversal. The array holds borrowed catalog summaries
+        // and optional locators, leaving the vector components in their original
+        // storage.
         let mut reserved = crate::json::ReservedVec::with_capacity(
             entries.clone().count(),
             context,
@@ -550,9 +725,15 @@ impl<'a> VectorRecordSegment<'a> {
         for entry in entries {
             reserved.push(entry);
         }
+        // The wire order follows numeric chunk IDs. The fallback key lets sorting
+        // finish for malformed text. The fallible validation immediately afterwards
+        // still rejects it and checks for duplicate numeric IDs.
         reserved.as_mut_slice().sort_unstable_by_key(|(entry, _)| {
             catalog_id_number(&entry.chunk_id).unwrap_or(u64::MAX)
         });
+        // Validate numeric identities after sorting, including distinct text
+        // spellings that encode the same integer. Readers require strict order and
+        // cannot distinguish those spellings on disk.
         validate_vector_order(
             reserved
                 .as_slice()
@@ -571,6 +752,9 @@ impl<'a> VectorRecordSegment<'a> {
     }
 
     fn header(&self) -> VectorSegmentHeader<'_> {
+        // Build both sizing and emission from these same collection settings and
+        // sorted row count. A different dimension or optional model between those
+        // two passes would give the wrong frame length.
         VectorSegmentHeader {
             collection_id: &self.collection.collection_id,
             commit: self.commit,
@@ -583,13 +767,26 @@ impl<'a> VectorRecordSegment<'a> {
     }
 
     pub(crate) fn encoded_len(&self) -> Result<u64> {
+        // The vector layout has fixed component width and a collection-wide
+        // dimension. Its byte length can therefore be checked without opening the
+        // primary payloads whose coordinates will fill the segment.
         self.header().encoded_len()
     }
 
+    // Run the ordinary record-reading and encoding path with a sink to validate
+    // transient input. This checks referenced vectors and their dimensions without
+    // creating an index record.
+    // Writing to a sink still exercises the same per-entry reader, identity checks
+    // and vector encoding used for a real frame. This path validates a collection
+    // even when no persistent segment can be installed.
     pub(crate) fn validate_transient(&mut self) -> Result<()> {
         self.write(&mut std::io::sink())
     }
 
+    // Materialization is an optional cache path. Build it privately so hitting the
+    // cache limit or a memory refusal can drop partial ownership and leave the
+    // caller free to stream the original records. Read and format failures still
+    // propagate.
     pub(crate) fn try_materialize(&mut self, limit: usize) -> Result<Option<CachedVectorSegment>> {
         let Some(mut segment) = CachedVectorSegment::with_capacity(
             self.collection,
@@ -601,17 +798,30 @@ impl<'a> VectorRecordSegment<'a> {
         else {
             return Ok(None);
         };
+        // The cache is private until the complete traversal succeeds. A failure
+        // after some vectors have been retained drops those entries together and
+        // leaves the source descriptions available for streaming.
         for (summary, reference) in self.entries.as_slice() {
             let retained = match reference {
                 Some(reference) => self.reader.read_embedding_in(reference, &self.context),
                 None => RetainedEmbedding::copy(summary, &self.context),
             };
+            // Treat a memory refusal while acquiring a row as an optional cache
+            // miss. A format or I/O error must propagate because retrying the same
+            // primary record through streaming does not establish its validity.
             let retained = match retained {
                 Err(error) if crate::json::is_memory_budget_error(&error) => return Ok(None),
                 result => result?,
             };
+            // Validate the loaded embedding against its catalog summary before
+            // keeping its coordinates. Then check length and finite components
+            // against the destination dimension, including for rows copied
+            // directly from memory.
             validate_embedding_reference(retained.embedding(), summary)?;
             validate_vector_values(&retained.embedding().vector, self.collection.embedding_dim)?;
+            // Adding this row can exceed the cache limit even after the initial
+            // slots fitted. Return no partial segment so a caller cannot mistake a
+            // prefix of the vectors for complete collection coverage.
             if !segment.push_retained(retained, limit) {
                 return Ok(None);
             }
@@ -624,11 +834,22 @@ impl<'a> VectorRecordSegment<'a> {
         {
             self.encode_calls += 1;
         }
+        // The segment CRC starts at the schema header and ends with the last
+        // coordinate. The record writer supplies a separate envelope around this
+        // output. All row encoders feed the same segment digest.
         let mut writer = DigestWriter::new(output);
         write_vector_header(&self.header(), &mut writer)?;
+        // A referenced summary supplies identity, while the retained record
+        // supplies coordinates. Hold at most the currently fetched embedding
+        // through this write. Rows already carrying their values can be borrowed
+        // directly.
         for (summary, reference) in self.entries.as_slice() {
             let retained;
             let embedding = match reference {
+                // A stored locator identifies authoritative bytes for a retained
+                // summary. Materialize and verify the record before writing this
+                // row. The caller handles a partial output if this step fails
+                // after earlier rows were emitted.
                 Some(reference) => {
                     retained = self.reader.read_embedding_in(reference, &self.context)?;
                     validate_embedding_reference(retained.embedding(), summary)?;
@@ -641,6 +862,9 @@ impl<'a> VectorRecordSegment<'a> {
                 &embedding.embedding_id,
                 &embedding.vector,
                 self.collection.embedding_dim,
+                // The dimension comes from the collection definition and applies
+                // to every row. Using each row's own length would let one
+                // malformed vector change the meaning of the next row's offset.
                 &mut writer,
             )?;
         }
@@ -648,7 +872,12 @@ impl<'a> VectorRecordSegment<'a> {
     }
 }
 
+// A readable EmbeddingPut can still be the wrong record. Check its embedding, chunk
+// and collection IDs against the catalog summary before reusing its coordinates.
 fn validate_embedding_reference(embedding: &Embedding, summary: &Embedding) -> Result<()> {
+    // Check all three IDs because checksum validation establishes byte integrity.
+    // A locator for another collection can still point at a valid embedding
+    // record.
     if embedding.embedding_id != summary.embedding_id
         || embedding.chunk_id != summary.chunk_id
         || embedding.collection_id != summary.collection_id
@@ -703,6 +932,9 @@ pub(super) fn write_text_segment(
 }
 
 fn validate_vector_order<'a>(ids: impl Iterator<Item = &'a str>) -> Result<()> {
+    // Compare the numeric suffix that will be written to disk. Text ordering can
+    // differ when widths vary, and distinct spellings with the same suffix would
+    // encode the same row key.
     let mut previous = None;
     for id in ids {
         let number = catalog_id_number(id)?;
@@ -717,11 +949,17 @@ fn validate_vector_order<'a>(ids: impl Iterator<Item = &'a str>) -> Result<()> {
     Ok(())
 }
 
+// Cached input already has an order. Recheck it before emission, since silently
+// sorting here would hide a duplicate or reordered cached row from the canonical
+// segment checks.
 fn write_cached_vector_segment(
     segment: &CachedVectorSegment,
     output: &mut impl Write,
 ) -> Result<()> {
     validate_vector_order(segment.vectors.iter().map(|entry| entry.chunk_id.as_str()))?;
+    // Validate order before writing the header. Coordinate validation still
+    // happens during row encoding, so a failed row can leave an incomplete output.
+    // The caller owns its publication.
     let mut writer = DigestWriter::new(output);
     write_vector_header(&segment.header(), &mut writer)?;
     for entry in &segment.vectors {
@@ -746,6 +984,9 @@ pub(super) fn write_vector_segment(
 }
 
 impl VectorIndexSegmentPayload {
+    // Borrow the on-disk ordering's fields from the materialized segment. Preserve
+    // the declared commit, model and normalization when measuring it. The vector
+    // count comes from the current entries in the payload.
     fn header(&self) -> VectorSegmentHeader<'_> {
         VectorSegmentHeader {
             collection_id: &self.collection_id,
@@ -764,19 +1005,35 @@ impl VectorIndexSegmentPayload {
 }
 
 struct VectorSegmentHeader<'a> {
+    // Catalog spelling of the owning collection ID, written as its numeric suffix.
     collection_id: &'a str,
+    // Commit sequence covered by all rows in this segment.
     commit: u64,
+    // Number of f32 coordinates in every vector, encoded as a u32.
     dim: usize,
+    // Collection distance metric, encoded with the stable segment tag.
     metric: DistanceMetric,
+    // Optional model identity. Presence is encoded separately from its UTF-8 byte
+    // length.
     model: Option<&'a str>,
+    // Collection normalization flag recorded for comparisons when visiting the
+    // saved segment.
     normalized: bool,
+    // Number of chunk and embedding ID pairs, each followed by dim coordinates.
     count: usize,
 }
 
 impl VectorSegmentHeader<'_> {
+    // Use the ordinary header encoder to account exactly for the optional model
+    // string. Every row then contributes two IDs and a fixed number of f32s. Add
+    // the segment checksum and outer record header so callers get the full extent
+    // size.
     fn encoded_len(&self) -> Result<u64> {
         let mut digest = PayloadDigest::default();
         write_vector_header(self, &mut digest)?;
+        // Each row has two eight-byte IDs and four bytes per coordinate. Check the
+        // row size and its product with the count before adding framing so the
+        // extent never depends on a wrapped length.
         let values = (self.dim as u64)
             .checked_mul(4)
             .and_then(|bytes| bytes.checked_add(16))
@@ -801,17 +1058,27 @@ fn write_vector_header(header: &VectorSegmentHeader<'_>, writer: &mut impl Write
             "vector segment dimension exceeds u32",
         )
     })?;
+    // Start with the schema tag before the collection-specific fields. The reader
+    // needs that tag to choose the layout before it can interpret the owner or
+    // covered commit.
     writer.write_all(&INDEX_SEGMENT_SCHEMA_VERSION.to_le_bytes())?;
+    // Repeat the commit and metric in the segment header so the reader can verify
+    // the scoring assumptions against the checkpoint and collection.
     writer.write_all(&catalog_id_number(header.collection_id)?.to_le_bytes())?;
     writer.write_all(&header.commit.to_le_bytes())?;
     writer.write_all(&VECTOR_INDEX_KIND_EXACT_F32.to_le_bytes())?;
     writer.write_all(&dim.to_le_bytes())?;
     writer.write_all(&[distance_metric_segment_id(header.metric)])?;
+    // The presence byte distinguishes an absent model from a zero-length name. A
+    // present name has its own UTF-8 byte length before the normalization flag and
+    // row count.
     writer.write_all(&[u8::from(header.model.is_some())])?;
     if let Some(model) = header.model {
         write_string(writer, model)?;
     }
     writer.write_all(&[u8::from(header.normalized)])?;
+    // The count covers complete fixed-width rows, including an empty vector set.
+    // The trailing segment CRC occupies a separate four-byte footer.
     writer.write_all(&(header.count as u64).to_le_bytes())?;
     Ok(())
 }
@@ -833,7 +1100,12 @@ fn write_vector_values(
     dim: usize,
     writer: &mut impl Write,
 ) -> Result<()> {
+    // Validate dimension and finite values before emitting a row's coordinates.
+    // Retained and record-backed paths use this same encoding, so their resulting
+    // row format does not depend on cache admission.
     validate_vector_values(vector, dim)?;
+    // A row carries its chunk ID first and its embedding ID second. Both are from
+    // the same collection and serve different lookups when the segment is reused.
     writer.write_all(&catalog_id_number(chunk_id)?.to_le_bytes())?;
     writer.write_all(&catalog_id_number(embedding_id)?.to_le_bytes())?;
     codec::write_f32_values(writer, vector)?;
@@ -849,6 +1121,8 @@ fn validate_vector_values(vector: &[f32], dim: usize) -> Result<()> {
         .with_detail("expected", dim)
         .with_detail("actual", vector.len()));
     }
+    // Finiteness excludes NaN and both infinities. Downstream comparisons and
+    // score ordering require finite stored coordinates.
     if vector.iter().any(|value| !value.is_finite()) {
         return Err(Error::new(
             ErrorCode::InvalidVectorLength,
@@ -859,6 +1133,8 @@ fn validate_vector_values(vector: &[f32], dim: usize) -> Result<()> {
 }
 
 fn write_string(output: &mut impl Write, value: &str) -> Result<()> {
+    // Store the UTF-8 byte count before the text. Narrowing a larger length would
+    // let the reader interpret leftover string bytes as the next field.
     let len = u32::try_from(value.len()).map_err(|_| {
         Error::new(
             ErrorCode::FileFormatError,
@@ -871,7 +1147,11 @@ fn write_string(output: &mut impl Write, value: &str) -> Result<()> {
 }
 
 struct DigestWriter<W> {
+    // Destination for successfully encoded bytes. Digest writers can be nested at
+    // the segment and record layers.
     output: W,
+    // Byte length and CRC accumulated from the prefix actually accepted by the
+    // destination.
     digest: PayloadDigest,
 }
 
@@ -883,6 +1163,8 @@ impl<W: Write> DigestWriter<W> {
         }
     }
 
+    // Write the segment CRC straight to the underlying writer. It must not enter
+    // its own digest, but an enclosing record digest must include these four bytes.
     fn finish_segment(mut self) -> Result<()> {
         self.output
             .write_all(&self.digest.crc.finish().to_le_bytes())?;
@@ -890,8 +1172,14 @@ impl<W: Write> DigestWriter<W> {
     }
 }
 
+// This adapter can sit between another digest writer and the file. Let the
+// downstream writer control buffer acceptance and propagate I/O errors. Progress
+// at one layer can precede the final integrity boundary at its enclosing layer.
 impl<W: Write> Write for DigestWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        // The inner writer can accept a short write. Feed only that accepted prefix
+        // to the digest so a subsequent write_all retry never counts the remaining
+        // bytes twice.
         let count = self.output.write(&bytes[..bytes.len().min(BUFFER_BYTES)])?;
         self.digest.write_all(&bytes[..count])?;
         Ok(count)

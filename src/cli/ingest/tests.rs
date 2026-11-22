@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -961,9 +961,10 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     let root = temp_dir("round");
     let input = root.join("in");
     fs::create_dir(&input).unwrap();
-    fs::write(input.join("a.txt"), "one").unwrap();
-    fs::write(input.join("b.txt"), "two").unwrap();
-    fs::write(input.join("c.txt"), "three").unwrap();
+    for (file, word) in [("a.txt", "one"), ("b.txt", "two"), ("c.txt", "three")] {
+        let bytes: Vec<_> = word.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        fs::write(input.join(file), bytes).unwrap();
+    }
     let server = Server::spawn(|recorded| {
         let mut reply = echo_embeddings(recorded);
         if recorded.body.contains("\"one\"") {
@@ -990,6 +991,8 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     let generated = root.join("generated");
     let output = run_at(&[
         "import-dir",
+        "--input-encoding",
+        "utf-16le",
         input.to_str().unwrap(),
         db.to_str().unwrap(),
         "--collection",
@@ -1014,6 +1017,47 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
         "COFFER_INGEST_ROUND_KEY",
     ])
     .unwrap();
+    let offline = root.join("offline");
+    run_at(&[
+        "import-dir",
+        input.to_str().unwrap(),
+        db.to_str().unwrap(),
+        "--collection",
+        "notes",
+        "--chunk-size",
+        "20",
+        "--chunk-overlap",
+        "1",
+        "--emit-jsonl",
+        offline.to_str().unwrap(),
+        "--input-encoding",
+        "utf-16le",
+    ])
+    .unwrap();
+    let mut offline_text: Vec<_> = fs::read_to_string(offline.join("chunks.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|row| {
+            parse(row)
+                .unwrap()
+                .get("text")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let mut sent: Vec<_> = server
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| parsed_inputs(&request.body))
+        .collect();
+    offline_text.sort();
+    sent.sort();
+    assert_eq!(offline_text, ["one", "three", "two"]);
+    assert_eq!(sent, offline_text);
     let embeddings = fs::read_to_string(generated.join("embeddings.jsonl")).unwrap();
     let a = embeddings.find("file://a.txt#chunk-0001").unwrap();
     let b = embeddings.find("file://b.txt#chunk-0001").unwrap();
@@ -1051,6 +1095,8 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     assert!(found.contains("file://a.txt#chunk-0001"));
     let again = run_at(&[
         "import-dir",
+        "--input-encoding",
+        "utf-16le",
         input.to_str().unwrap(),
         db.to_str().unwrap(),
         "--collection",
@@ -1110,6 +1156,8 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     let old_embeddings = fs::read(generated.join("embeddings.jsonl")).unwrap();
     let dim_err = run_at(&[
         "import-dir",
+        "--input-encoding",
+        "utf-16le",
         input.to_str().unwrap(),
         wrong_dim.to_str().unwrap(),
         "--collection",
@@ -1146,6 +1194,8 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     let missing = root.join("absent.coffer");
     let missing_err = run_at(&[
         "import-dir",
+        "--input-encoding",
+        "utf-16le",
         input.to_str().unwrap(),
         missing.to_str().unwrap(),
         "--collection",
@@ -1176,6 +1226,8 @@ fn import_embed_round_trip_preserves_order_and_keeps_core_import_errors() {
     };
     let via = run_at(&[
         "import-dir",
+        "--input-encoding",
+        "utf-16le",
         input.to_str().unwrap(),
         garbage.to_str().unwrap(),
         "--collection",
@@ -1802,4 +1854,97 @@ fn self_check_rejects_a_whitespace_only_chunk() {
     assert_eq!(err.code(), ErrorCode::InvalidJsonlSchema);
     assert_eq!(err.message(), "artifact self-check failed");
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn declared_directory_encodings_match_utf8_artifacts() {
+    let root = temp_dir("directory-encoding");
+    let input = root.join("in");
+    let db = root.join("unopened.coffer");
+    fs::create_dir(&input).unwrap();
+    let run = |label: Option<&str>, out: &Path| {
+        let mut args = vec![
+            "import-dir",
+            input.to_str().unwrap(),
+            db.to_str().unwrap(),
+            "--collection",
+            "notes",
+            "--chunk-size",
+            "5",
+            "--chunk-overlap",
+            "1",
+            "--emit-jsonl",
+            out.to_str().unwrap(),
+        ];
+        if let Some(label) = label {
+            args.extend(["--input-encoding", label]);
+        }
+        run_at(&args)
+    };
+    let cases: &[(&str, &[u8], &str)] = &[
+        ("utf-8", b"\xef\xbb\xbfabc\n\xc3\xa9", "abc\né"),
+        ("utf-8-sig", b"abc\n\xc3\xa9", "abc\né"),
+        (
+            "utf-16le",
+            b"\xff\xfea\0b\0c\0\n\0\x3d\xd8\x00\xde",
+            "abc\n😀",
+        ),
+        ("utf-16be", b"\0a\0b\0c\0\n\xd8\x3d\xde\x00", "abc\n😀"),
+        ("gb18030", b"abc\n\x94\x39\xfc\x36", "abc\n😀"),
+        ("shift_jis", b"abc\n\x93\xfa", "abc\n日"),
+        ("windows-1252", b"abc\n\x80", "abc\n€"),
+    ];
+    for &(label, raw, expected) in cases {
+        let out = root.join(label);
+        let reference = root.join(format!("{label}-reference"));
+        fs::write(input.join("note.txt"), expected).unwrap();
+        run(None, &reference).unwrap();
+        fs::write(input.join("note.txt"), raw).unwrap();
+        run(Some(label), &out).unwrap();
+        for file in ["documents.jsonl", "chunks.jsonl", "import_manifest.json"] {
+            assert_eq!(
+                fs::read(out.join(file)).unwrap(),
+                fs::read(reference.join(file)).unwrap(),
+                "{label}: {file}"
+            );
+        }
+    }
+
+    let out = root.join("mixed");
+    fs::write(input.join("note.txt"), b"o\0k\0").unwrap();
+    fs::write(input.join("bad.txt"), b"\x00\xd8").unwrap();
+    fs::write(input.join("wrong-bom.txt"), b"\xfe\xff\0A").unwrap();
+    let result = parse(&run(Some("utf-16le"), &out).unwrap()).unwrap();
+    let skipped = result
+        .get("result")
+        .unwrap()
+        .get("skipped_files")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(skipped.len(), 2);
+    for item in skipped {
+        assert_eq!(
+            item.get("declared_encoding").and_then(JsonValue::as_str),
+            Some("utf-16le")
+        );
+        assert_eq!(
+            item.get("reason").and_then(JsonValue::as_str),
+            Some("invalid_input_encoding")
+        );
+    }
+
+    fs::remove_file(input.join("note.txt")).unwrap();
+    let failed = root.join("failed");
+    assert_eq!(
+        detail(&run(Some("utf-16le"), &failed).unwrap_err(), "reason"),
+        Some("no_eligible_inputs")
+    );
+    assert_eq!(
+        detail(&run(Some("auto"), &failed).unwrap_err(), "reason"),
+        Some("unsupported_input_encoding")
+    );
+    assert!(!failed.exists());
+    assert!(!db.exists());
+    fs::remove_dir_all(root).unwrap();
 }

@@ -69,6 +69,9 @@ class ConcurrencyTests(unittest.TestCase):
                     with self.assertRaises(BusyError) as failure:
                         self.collection.write_batch(documents=[{"external_id": "rejected"}])
                     self.assertEqual(failure.exception.operation_outcome, {"state": "not_started"})
+                    for method, args in (("compact", ()), ("snapshot", (str(Path(directory) / "refused"),)), ("rebuild_index", ())):
+                        with self.assertRaises(BusyError):
+                            getattr(self.database, method)(*args)
                     body = ValueError("controlled body failure")
                     with self.assertRaises(BaseExceptionGroup) as cleanup:
                         self.database.__exit__(ValueError, body, None)

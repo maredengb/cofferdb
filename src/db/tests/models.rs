@@ -373,6 +373,12 @@ fn healthy_collection_writes_and_scoped_vector_build_remain_available_during_res
         1
     );
     let summary = db.rebuild_index(Some("healthy")).unwrap();
+    // The host entry must preserve the narrower scope and avoid writing a checkpoint.
+    let op = crate::binding::Operation::new(&db);
+    let name = op.input().finish(Some("healthy".to_owned()));
+    let (host, _) = op.rebuild_index(&db, name).unwrap();
+    assert_eq!(host.rebuild_scope, summary.rebuild_scope);
+    assert!(host.rebuild_needed && host.last_index_commit_id.is_none());
     assert_eq!(summary.rebuild_scope, "transient_vector_collection");
     assert!(summary.rebuild_needed);
     assert_eq!(

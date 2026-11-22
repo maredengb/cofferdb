@@ -7,7 +7,11 @@ use crate::json::{
 use crate::Result;
 
 pub(crate) struct RecordReservation {
+    // Credit for retained JSON values, including metadata that can transfer into
+    // the catalog when the batch becomes visible.
     pub(crate) json: JsonReservation,
+    // Credit for owned record buffers such as IDs and text. A record carrying only
+    // a JSON reservation starts with None and can acquire workspace later.
     workspace: Option<WorkspaceReservation>,
 }
 
@@ -23,6 +27,9 @@ impl RecordReservation {
         self.json.reserved_bytes()
     }
 
+    // A JSON-only input can grow native storage later while building a record.
+    // Treat absence of a native reservation as zero current charge so callers can
+    // account both classes independently.
     pub(crate) fn workspace_bytes(&self) -> usize {
         self.workspace
             .as_ref()
@@ -35,6 +42,9 @@ impl RecordReservation {
         json_bytes: usize,
         workspace_bytes: usize,
     ) -> Result<()> {
+        // Move only the specified portions of the two input reservations into the
+        // catalog. Other fields can still belong to the record or its caller while
+        // the catalog starts owning its retained summary.
         catalog.absorb(
             &mut self.json,
             self.workspace.as_mut(),
@@ -44,6 +54,9 @@ impl RecordReservation {
     }
 
     pub(crate) fn merge(&mut self, other: impl Into<Self>) {
+        // Combining reservations consumes the previous owner. Its JSON and native
+        // portions can have different lifetimes in the resulting record and must
+        // remain separately transferable.
         let Self { json, workspace } = other.into();
         self.json.merge(json);
         if let Some(workspace) = workspace {
@@ -52,6 +65,9 @@ impl RecordReservation {
     }
 
     pub(crate) fn merge_workspace(&mut self, workspace: WorkspaceReservation) {
+        // The first native allocation can accompany an input constructed with JSON
+        // credit alone. Preserve its original context by taking that reservation
+        // directly; later allocations merge into the retained owner.
         match &mut self.workspace {
             Some(retained) => retained.merge(workspace),
             None => self.workspace = Some(workspace),
@@ -63,6 +79,9 @@ impl RecordReservation {
         value: &str,
         context: &JsonOperationContext,
     ) -> Result<String> {
+        // The returned String outlives the temporary ReservedString. Transfer its
+        // native workspace into this record before handing out the allocation so
+        // the copy stays charged.
         let (value, work) = ReservedString::copy(value, context)?.into_parts();
         self.merge_workspace(work);
         Ok(value)
@@ -73,20 +92,31 @@ impl RecordReservation {
         values: [&str; N],
         context: &JsonOperationContext,
     ) -> Result<[String; N]> {
+        // Accumulate byte lengths for all inputs in a wide integer before
+        // allocating. Admit their combined capacity as one request while every
+        // source string is still alive.
         let bytes = values.iter().map(|value| value.len() as u128).sum();
         let mut work = context.workspace_reservation();
+        // Minimum and preferred size are the same because every field will be
+        // copied. A smaller grant cannot produce a partial tuple for the caller.
         work.grow_to_wide(bytes, bytes, "operation_scratch")?;
         // Declare copies last so a failed allocation frees them before the lease.
         let mut copies: [String; N] = std::array::from_fn(|_| String::new());
         for (copy, value) in copies.iter_mut().zip(values) {
             *copy = crate::json::copy_precharged_string(value)?;
         }
+        // Transfer the shared credit only after every copy succeeds. An error in a
+        // later string drops earlier copies before the local reservation returns
+        // its bytes.
         self.merge_workspace(work);
         Ok(copies)
     }
 
     pub(crate) fn retain_workspace(&mut self, bytes: usize) {
         match &mut self.workspace {
+            // Shrink the native reservation after fields have moved or been
+            // discarded. A nonzero retained size with no native owner would
+            // advertise an allocation that was never charged.
             Some(workspace) => workspace.retain(bytes),
             None => assert_eq!(bytes, 0),
         }
@@ -95,14 +125,23 @@ impl RecordReservation {
     pub(crate) fn parts_mut(
         &mut self,
     ) -> (&mut JsonReservation, Option<&mut WorkspaceReservation>) {
+        // Give a transfer operation simultaneous access to both portions while
+        // keeping the combined owner alive. Borrowing the fields avoids
+        // temporarily releasing either reservation when reclassifying bytes.
         (&mut self.json, self.workspace.as_mut())
     }
 
+    // Consuming the record here returns its JSON credit and releases its remaining
+    // native workspace. Callers converting a typed value must first transfer any
+    // string allocations still retained in JSON.
     pub(crate) fn into_json(self) -> JsonReservation {
         self.json
     }
 
     pub(crate) fn into_workspace(self) -> WorkspaceReservation {
+        // When no native credit was acquired, create an empty workspace on the
+        // same operation. The returned reservation can grow under that operation
+        // without keeping the record's discarded JSON credit.
         let Self { json, workspace } = self;
         workspace.unwrap_or_else(|| json.context().workspace_reservation())
     }
@@ -120,29 +159,51 @@ impl From<JsonReservation> for RecordReservation {
 // Raw API batches are atomic. Reserve both arrays that coexist during commit;
 // unlike prepared imports, these batches cannot be split to fit the workspace.
 pub(crate) struct OwnedRecordBatch {
+    // Payloads in write order. Their positions determine the order of the record
+    // references returned by the append.
     records: Vec<RecordPayload>,
+    // Byte credit for the payload array and the committed-record array that will
+    // coexist while ownership moves to the append result.
     work: WorkspaceReservation,
+    // Combined credit for heap data reachable from the payloads. It can move with
+    // the records when the array itself changes representation.
     payloads: RecordReservation,
+    // Reserved writable storage for the commit time. The first slot request
+    // acquires it so writing the commit marker can format the time into existing
+    // capacity.
     commit_timestamp: Option<ReservedString>,
 }
 
 // The reclaimer is borrowed only while constructing records, never across IO.
 pub(crate) struct ReclaimingRecordBatch<F> {
+    // Owns every record accepted so far together with the credit for its arrays,
+    // payloads and commit time.
     batch: OwnedRecordBatch,
+    // Caller-supplied eviction callback. Its return value tells the retry helper
+    // whether memory was reclaimed for another admission attempt.
     reclaim: F,
 }
 
 impl<F: FnMut() -> bool> ReclaimingRecordBatch<F> {
     pub(crate) fn into_batch(self) -> OwnedRecordBatch {
+        // Consume this wrapper when record construction is finished. Its reclaim
+        // callback can borrow index caches, and dropping the callback releases
+        // those borrows before the storage append begins.
         self.batch
     }
 
+    // Callers can inspect the staged prefix while deciding whether a commit is
+    // necessary. Exposing a slice keeps them from inserting a record behind the
+    // slot and timestamp accounting.
     pub(crate) fn records(&self) -> &[RecordPayload] {
         self.batch.records()
     }
 
     // Admit one independent field or scratch allocation, not an entire write.
     pub(crate) fn admit<T>(&mut self, attempt: impl FnMut() -> Result<T>) -> Result<T> {
+        // A retry runs the supplied operation again. Keep irreversible actions,
+        // including moving a payload into the batch, outside this closure so
+        // reclamation cannot duplicate earlier work.
         crate::json::retry_after_memory_reclaim(attempt, &mut self.reclaim)
     }
 
@@ -150,6 +211,9 @@ impl<F: FnMut() -> bool> ReclaimingRecordBatch<F> {
         &mut self,
         mut attempt: impl FnMut(&mut OwnedRecordBatch) -> Result<T>,
     ) -> Result<T> {
+        // Each attempt sees the same prepared batch and reservations accumulated
+        // for earlier records. Releasing optional caches must leave those earlier
+        // records owned by the batch.
         crate::json::retry_after_memory_reclaim(|| attempt(&mut self.batch), &mut self.reclaim)
     }
 
@@ -166,10 +230,16 @@ impl<F: FnMut() -> bool> ReclaimingRecordBatch<F> {
     }
 
     pub(crate) fn copy_string(&mut self, value: &str) -> Result<String> {
+        // The source string is borrowed for each admission attempt. A successful
+        // copy moves its reservation into the batch so no separate guard is needed
+        // at the call site.
         self.prepare(|batch| batch.copy_string(value))
     }
 
     pub(crate) fn timestamp(&mut self, millis: u64) -> Result<String> {
+        // Pass a fixed millisecond value through the retry. Reformatting after a
+        // memory refusal then gives the same stored timestamp as the original
+        // attempt.
         self.prepare(|batch| batch.timestamp(millis))
     }
 
@@ -178,15 +248,24 @@ impl<F: FnMut() -> bool> ReclaimingRecordBatch<F> {
     }
 
     pub(crate) fn push_tombstone(&mut self, kind: &str, id: &str, reason: &str) -> Result<()> {
+        // Deletion and replacement both stage this record by stable internal ID.
+        // Copy the kind, ID and reason into batch-owned storage because their
+        // caller may only borrow a catalog row or request field.
         let tombstone = crate::model::Tombstone {
             target_type: self.copy_string(kind)?,
             target_id: self.copy_string(id)?,
             deleted_at: self.timestamp(crate::time::unix_millis_now())?,
             reason: Some(self.copy_string(reason)?),
         };
+        // Submit one complete tombstone after all of its fields have been
+        // admitted. Failure while preparing a field therefore cannot leave a
+        // partially constructed deletion record in the ordered batch.
         self.push(RecordPayload::Tombstone(tombstone))
     }
 
+    // Reserve the input and output slots before moving the record. A retry can
+    // repeat admission while the caller's record is still available to push exactly
+    // once.
     pub(crate) fn push(&mut self, record: RecordPayload) -> Result<()> {
         self.prepare(OwnedRecordBatch::reserve_slot)?;
         self.batch.records.push(record);
@@ -197,7 +276,12 @@ impl<F: FnMut() -> bool> ReclaimingRecordBatch<F> {
 // The encoder is prepared against these immutable payloads before Catalog
 // takes their JSON credit. No mutable record access is exposed after admission.
 pub(crate) struct EncodedRecordBatch {
+    // Owns the exact sequence of payloads used during encoding admission. The
+    // catalog may take JSON credit while the records remain readable.
     pub(super) batch: OwnedRecordBatch,
+    // Collection configurations keyed by record position and the maximum JSON
+    // traversal stack required by this batch. Admission turns that maximum into
+    // reusable encoder workspace.
     pub(super) encoding: super::codec::PreparedBatchEncoding,
 }
 
@@ -207,6 +291,10 @@ impl EncodedRecordBatch {
     }
 
     pub(crate) fn records_and_json(&mut self) -> (&[RecordPayload], &mut JsonReservation) {
+        // Catalog preparation may transfer retained JSON credit while the encoder
+        // still borrows the immutable payload sequence. Split these borrows so
+        // neither ownership transfer nor rollback can reorder the records used by
+        // the encoding plan.
         (&self.batch.records, &mut self.batch.payloads.json)
     }
 }
@@ -214,6 +302,9 @@ impl EncodedRecordBatch {
 impl OwnedRecordBatch {
     pub(crate) fn new(context: &JsonOperationContext) -> Self {
         Self {
+            // Empty batches allocate no record array or commit timestamp yet. Keep
+            // the context's array workspace separate from payload reservations so
+            // a later ownership transfer can move either independently.
             records: Vec::new(),
             work: context.workspace_reservation(),
             payloads: RecordReservation::from(context.reservation()),
@@ -240,6 +331,9 @@ impl OwnedRecordBatch {
     }
 
     pub(crate) fn context(&self) -> &JsonOperationContext {
+        // Use the array reservation's operation context throughout preparation.
+        // Each string or generated field is charged against the same budget
+        // already funding the records that remain live.
         self.work.context()
     }
 
@@ -248,20 +342,31 @@ impl OwnedRecordBatch {
     }
 
     pub(crate) fn retain_workspace(&mut self, work: WorkspaceReservation) {
+        // Workspace here belongs to allocations reachable from payloads, including
+        // native strings. Keep it with those values when the append consumes the
+        // batch and replaces the input array with committed-record slots.
         self.payloads.merge_workspace(work);
     }
 
     pub(crate) fn retain_string(&mut self, value: ReservedString) -> String {
+        // Move the string without copying its bytes, then attach its credit to the
+        // batch before returning the bare String. The record using that string can
+        // outlive the temporary ReservedString handle.
         let (value, work) = value.into_parts();
         self.retain_workspace(work);
         value
     }
 
+    // Return a plain String to simplify construction of record values.
+    // retain_string moves its reservation into the batch so the caller can
+    // assemble the record without releasing that credit early.
     pub(crate) fn copy_string(&mut self, value: &str) -> Result<String> {
         let value = ReservedString::copy_in(value, self.context(), "batch_prepare")?;
         Ok(self.retain_string(value))
     }
 
+    // Format directly into admitted storage for the record timestamp. The append
+    // code separately fills the reserved commit timestamp at the end of the batch.
     pub(crate) fn timestamp(&mut self, millis: u64) -> Result<String> {
         let value = ReservedString::build(self.context(), "batch_prepare", |out| {
             crate::time::write_unix_millis(out, millis)
@@ -269,6 +374,8 @@ impl OwnedRecordBatch {
         Ok(self.retain_string(value))
     }
 
+    // SHA-256 produces 32 bytes. Each byte is printed as two hex characters, so
+    // the text identifier can use a single exact-size allocation.
     pub(crate) fn text_hash(&mut self, text: &str) -> Result<String> {
         let value = ReservedString::build_exact(64, self.context(), "batch_prepare", |out| {
             crate::hash::write_digest_hex(out, crate::hash::sha256(text.as_bytes()))
@@ -280,6 +387,10 @@ impl OwnedRecordBatch {
         mut self,
         reclaim: impl FnOnce() -> bool,
     ) -> Result<EncodedRecordBatch> {
+        // The batch and its payload reservations stay alive during preparation.
+        // The encoder may borrow credit already held for JSON. Retry only the
+        // planning step after releasing optional caches, before any file can have
+        // changed.
         let context = self.context().clone();
         let encoding = crate::json::retry_after_memory_reclaim(
             || {
@@ -291,6 +402,9 @@ impl OwnedRecordBatch {
             },
             reclaim,
         )?;
+        // Keep the prepared plan paired with exactly this sequence of records. Its
+        // position-dependent encoding information must match the owning batch when
+        // the writer consumes it.
         Ok(EncodedRecordBatch {
             batch: self,
             encoding,
@@ -305,6 +419,9 @@ impl OwnedRecordBatch {
     }
 
     fn reserve_slot(&mut self) -> Result<()> {
+        // Provide a future commit timestamp buffer when admitting the first slot.
+        // A write should establish that it has this mandatory storage before it
+        // begins emitting the primary records.
         if self.commit_timestamp.is_none() {
             self.commit_timestamp = Some(ReservedString::with_capacity(
                 crate::time::MAX_TIMESTAMP_BYTES,
@@ -315,22 +432,34 @@ impl OwnedRecordBatch {
         if self.records.len() < self.records.capacity() {
             return Ok(());
         }
+        // Allow geometric growth when there is headroom. The minimum still admits
+        // one record, so a small remaining budget can extend the batch without
+        // paying for spare slots.
         let minimum_capacity = self.records.len() + 1;
         let preferred_capacity = minimum_capacity
             .max(self.records.capacity().saturating_mul(2))
             .max(4);
+        // Budget simultaneously for the input payload vector and the committed
+        // record vector. Append can accumulate completed output while still owning
+        // input allocation, so the two arrays can overlap in lifetime.
         let slot_bytes = size_of::<RecordPayload>() + size_of::<CommittedRecord>();
         let bytes = |capacity: usize| {
             capacity
                 .checked_mul(slot_bytes)
                 .ok_or_else(|| std::io::Error::other("batch array size overflow"))
         };
+        // Save the old grant before asking for more. If the allocator refuses
+        // replacement capacity, its old block is still alive and the previous
+        // credit is sufficient to describe it.
         let previous = self.work.reserved_bytes();
         let granted = self.work.grow_to(
             bytes(minimum_capacity)?,
             bytes(preferred_capacity)?,
             "batch_prepare",
         )?;
+        // The ledger grants bytes and can stop between full rows. Convert to whole
+        // slots before allocating, then keep only credit for the resulting
+        // capacity.
         let capacity = granted / slot_bytes;
         if capacity > self.records.capacity() {
             if let Err(error) = self
@@ -340,6 +469,9 @@ impl OwnedRecordBatch {
                 self.work.retain(previous);
                 return Err(std::io::Error::other(error.to_string()).into());
             }
+            // The exact reservation is also a bound on the actual Vec capacity.
+            // The failed growth path cannot keep an oversized block in the batch,
+            // so discard it and return the allocation error.
             if self.records.capacity() > capacity {
                 // An allocator overgrant must not survive without a reservation.
                 self.records = Vec::new();
@@ -362,10 +494,16 @@ impl OwnedRecordBatch {
         RecordReservation,
         Option<ReservedString>,
     ) {
+        // Construction reserved an output slot for every possible input slot. Once
+        // the batch is closed, only its actual record count will need output slots.
+        // Input capacity remains live until append drains the payloads.
         self.work.retain(
             self.records.capacity() * size_of::<RecordPayload>()
                 + self.records.len() * size_of::<CommittedRecord>(),
         );
+        // Moving the arrays and their reservations out together lets append keep
+        // the input credit until consumption and transfer the output credit with
+        // the committed records.
         (
             self.records,
             self.work,
