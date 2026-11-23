@@ -120,7 +120,7 @@ fn resident_visitors_preserve_shared_terms_empty_dictionary_and_id_order_without
         spool
             .copy_body_from(
                 &mut Cursor::new(&bytes[..bytes.len() - 4]),
-                bytes.len() - 4,
+                (bytes.len() - 4) as u64,
                 7,
                 &context,
                 0,
@@ -288,7 +288,7 @@ fn copies_preserve_raw_fields_and_df_zero_and_replay_with_new_commit() {
     assert_eq!(
         body.copy_body_from(
             &mut Cursor::new(&bytes[..bytes.len() - 4]),
-            bytes.len() - 4,
+            (bytes.len() - 4) as u64,
             7,
             &context,
             0
@@ -348,7 +348,7 @@ fn failed_copy_and_budgeted_output_never_flush_from_drop() {
     let error = body
         .copy_body_from(
             &mut Fault(Cursor::new(&bytes)),
-            bytes.len() - 4,
+            (bytes.len() - 4) as u64,
             7,
             &context,
             4096,
@@ -402,7 +402,7 @@ fn staging_integrity_precedes_consumer_failure_and_every_truncation_is_rejected(
     let mut body = TextSpool::new(1, 7, &directory.0, disk.clone(), &context).unwrap();
     body.copy_body_from(
         &mut Cursor::new(&bytes[..bytes.len() - 4]),
-        bytes.len() - 4,
+        (bytes.len() - 4) as u64,
         7,
         &context,
         0,
@@ -797,7 +797,7 @@ fn append_raw(
     let extent = staging
         .copy_body_from(
             &mut Cursor::new(&bytes[..bytes.len() - 4]),
-            bytes.len() - 4,
+            (bytes.len() - 4) as u64,
             commit,
             context,
             0,
@@ -1378,7 +1378,7 @@ fn append_refusal_and_partial_read_rollback_keep_completed_prefix_and_credit() {
             &mut healthy
         };
         let error = staging
-            .copy_body_from(reader, next.len() - 4, 7, &context, 0)
+            .copy_body_from(reader, (next.len() - 4) as u64, 7, &context, 0)
             .err()
             .unwrap();
         match mode {

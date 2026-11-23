@@ -196,6 +196,20 @@ impl Error {
             self.maintenance_phase("retry_checkpoint", "index_may_need_rebuild")
         }
     }
+    pub(crate) fn checkpoint_verification_failed(mut self) -> Self {
+        // A read-only scan can report its own unchanged effect after the writer
+        // has published a full trailer. Keep that narrower scope as evidence.
+        for (key, _) in &mut self.detail {
+            match key.as_str() {
+                "stage" => *key = "verification_stage".into(),
+                "effect" => *key = "verification_effect".into(),
+                _ => {}
+            }
+        }
+        self.with_detail("stage", "verify_checkpoint")
+            .with_detail("effect", "index_may_need_rebuild")
+    }
+
     pub(crate) fn maintenance_phase(self, stage: &str, effect: &str) -> Self {
         // Preserve the details supplied by the operation that recorded an effect.
         // Skip adding the outer stage and a second effect.

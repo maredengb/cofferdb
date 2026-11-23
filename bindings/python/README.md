@@ -1,6 +1,6 @@
-# CofferDB Python 0.2.0
+# CofferDB Python 0.2.1
 
-This source contains the in-process binding for CofferDB 0.2.0. Use
+This source contains the in-process binding for CofferDB 0.2.1. Use
 `cofferdb.check(path)` for read-only file and index diagnostics. It returns
 a `CheckReport` with findings, or raises `CofferError` if the scan could
 not complete. The extension works independently of the CLI.
@@ -21,7 +21,7 @@ Use a clean virtual environment with `python -m pip` 25.3. Prepare that
 installer version before transferring the environment to an offline machine.
 
 ```console
-python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.2.0-<matching-tags>.whl
+python -m pip install --no-index --no-deps --only-binary=:all: /path/to/cofferdb-0.2.1-<matching-tags>.whl
 ```
 
 The wheel contains the native engine. Using it requires no Rust toolchain,

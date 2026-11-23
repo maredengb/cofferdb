@@ -251,3 +251,103 @@ fn cached_hybrid_finishes_absent_text_terms_before_retaining_vector_candidates()
     drop(db);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+#[ignore = "requires COFFERDB_LARGE_CHECKPOINT_FIXTURE containing the bulk axis-zero reference vector"]
+fn large_checkpoint_query_reports_required_workspace_and_recovers_on_reopen() {
+    use crate::json::{JsonOperationContext, WorkLedger};
+
+    let path = PathBuf::from(std::env::var_os("COFFERDB_LARGE_CHECKPOINT_FIXTURE").unwrap());
+    let digest = || crate::hash::sha256_reader(std::fs::File::open(&path).unwrap()).unwrap();
+    let before = digest();
+    let verified = Database::check_path(
+        &path,
+        CheckOptions {
+            verify_indexes: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(verified.index_check, "ok");
+    let suffix = verified.index_suffix.unwrap();
+    assert!(suffix.payload_len > 512 * 1024 * 1024);
+
+    let work_limit = 32 * 1024 * 1024;
+    let cache_mib = 256;
+    let open = || {
+        let context = JsonOperationContext::new(Arc::new(WorkLedger::with_limits(
+            work_limit, work_limit, work_limit,
+        )));
+        Database::open_in(
+            &path,
+            DatabaseOpenOptions {
+                read_only: true,
+                cache_budget_mb: Some(cache_mib),
+                ..Default::default()
+            },
+            context,
+        )
+        .unwrap()
+    };
+    let db = open();
+    let info = db
+        .list_collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "bulk")
+        .unwrap();
+    let search = |collection: &CollectionHandle| {
+        let mut axis = vec![0.0; info.embedding_dim];
+        axis[0] = 1.0;
+        collection
+            .search()
+            .query_embedding(QueryEmbeddingInput {
+                model_name: info.embedding_model.clone(),
+                dim: info.embedding_dim,
+                vector: axis,
+            })
+            .top_k(1)
+            .execute()
+    };
+    let assert_hit = |collection: &CollectionHandle| {
+        let result = search(collection).unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].chunk_external_id, "bulk#000");
+        assert_eq!(result.results[0].rank, 1);
+        assert_eq!(result.query_context.index_source, "persistent_checkpoint");
+        assert!(!result.query_context.transient_rebuild.started);
+    };
+    let bulk = db.collection("bulk").unwrap();
+    assert_hit(&bulk);
+
+    // Admit the full query embedding and leave just half a row for scanning
+    // the file. The complete encoded segment exceeds the optional cache, so
+    // this exact search needs a second vector's worth of scratch.
+    let context = db.json_context();
+    let row_bytes = info.embedding_dim * std::mem::size_of::<f32>();
+    let remaining = row_bytes + row_bytes / 2;
+    let available = context.available_workspace_bytes();
+    assert!(available > remaining);
+    let mut pressure = context.workspace_reservation();
+    let hold = available - remaining;
+    pressure.grow_to(hold, hold, "operation_scratch").unwrap();
+    let error = search(&bulk).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::ResourceExhausted, "{error:?}");
+    assert!(error
+        .detail()
+        .contains(&("resource".into(), "memory".into())));
+    let stats = db.index_stats().unwrap();
+    assert!(!stats.rebuild_needed);
+    assert_eq!(
+        stats.last_index_commit_id,
+        Some(suffix.covered_last_commit_sequence_no)
+    );
+    eprintln!("P={} cache_mib={cache_mib} work_limit={work_limit} row_bytes={row_bytes} available_before={available} pressure={hold} remaining={remaining} error={:?}",
+        suffix.payload_len, error.detail());
+    drop((pressure, bulk, db));
+
+    let reopened = open();
+    assert_hit(&reopened.collection("bulk").unwrap());
+    drop(reopened);
+    assert_eq!(digest(), before);
+    eprintln!("initial and fresh reads: rank=1 bulk#000 persistent_checkpoint transient_rebuild.started=false unchanged_sha256={before}");
+}

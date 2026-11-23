@@ -1,4 +1,4 @@
-# Python 0.2.0 programming guide
+# Python 0.2.1 programming guide
 
 ## Install the matching package
 
@@ -7,12 +7,12 @@ Silicon (arm64) or Intel (x86_64), or on 64-bit Linux (AArch64 or x86_64)
 with glibc 2.28 or later. Install the matching wheel in a clean virtual environment.
 
 ```console
-python -m pip install --only-binary=:all: cofferdb==0.2.0
+python -m pip install --only-binary=:all: cofferdb==0.2.1
 python -c "import cofferdb; print(cofferdb.__version__, cofferdb.engine_version)"
 ```
 
-Both version values should be `0.2.0`. For offline installation, download the
-matching wheel and checksum list from the [0.2.0 release](https://github.com/maredengb/cofferdb/releases/tag/v0.2.0),
+Both version values should be `0.2.1`. For offline installation, download the
+matching wheel and checksum list from the matching entry in the [release records](https://github.com/maredengb/cofferdb/releases),
 verify the wheel against that list and install the local file with
 `python -m pip install --no-index --no-deps /path/to/the-matching-wheel.whl`.
 

@@ -1381,7 +1381,7 @@ fn build_cli_envelope(
         // The success path samples elapsed time before rendering the envelope. It
         // excludes JSON encoding and stdout delivery. Error envelopes pass zero
         // because that path has no elapsed measurement.
-        ("duration_ms", JsonValue::Number(duration_ms as f64)),
+        ("duration_ms", builder.unsigned(duration_ms)?),
         ("result", result),
     ])?;
     // Successful output omits the optional error member. On a failure, move the

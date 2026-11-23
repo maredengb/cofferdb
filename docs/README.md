@@ -6,7 +6,7 @@ artifact as unreleased until it is identified in the matching release record.
 Use the [release record](https://github.com/maredengb/cofferdb/releases) for
 available artifacts, checksums and validation results for specific environments.
 
-## CofferDB 0.2.0
+## CofferDB 0.2.1
 
 - [Python programming guide](python.md)
 - [Rust programming guide](rust.md)
@@ -18,6 +18,7 @@ available artifacts, checksums and validation results for specific environments.
 
 | Version | Guide | Executable example | Intended reference |
 | --- | --- | --- | --- |
+| 0.2.0 | [Programming guides at the release tag](https://github.com/maredengb/cofferdb/tree/v0.2.0/docs) | [Release examples](https://github.com/maredengb/cofferdb/tree/v0.2.0/examples) | Rust, Python and CLI |
 | Rust 0.1.0 | [Supplemental programming guide](rust-v0.1.0.md) | [Common Rust lifecycle](../examples/programming_guide.rs), also verified against the published 0.1.0 source | 0.1.0 rustdoc in the matching offline reference archive |
 | Rust 0.1.1 | [Programming guide](rust-v0.1.1.md) | [Common lifecycle](../examples/programming_guide.rs) and [source-backed retrieval](../examples/real_corpus_demo.rs) | Generated rustdoc in the matching offline reference archive |
 | Rust 0.1.5 | [Programming guide](rust-v0.1.5.md) | [Common lifecycle](../examples/programming_guide.rs) | Rust API and snapshot recovery |

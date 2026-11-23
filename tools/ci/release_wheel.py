@@ -18,7 +18,7 @@ import tomllib
 import urllib.request
 import zipfile
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 OLD_CRATE = (
     "https://static.crates.io/crates/cofferdb/cofferdb-0.1.4.crate",
     "3a4f00ab817349206b3cc4b3e11e80b0b475ff6e4b895c12838967ee853039e8",

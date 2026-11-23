@@ -5,8 +5,8 @@
 //! An open writer holds exclusive writer admission across processes. A read-only
 //! connection sees a fixed view. Close it and reopen to observe later commits.
 //!
-//! See the matching [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.0/source/docs/rust.md)
-//! and [backup and recovery guide](https://docs.rs/crate/cofferdb/0.2.0/source/docs/backup.md).
+//! See the matching [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.1/source/docs/rust.md)
+//! and [backup and recovery guide](https://docs.rs/crate/cofferdb/0.2.1/source/docs/backup.md).
 //!
 //! # Examples
 //!

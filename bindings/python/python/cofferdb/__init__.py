@@ -1,4 +1,4 @@
-"""In-process CofferDB binding for version 0.2.0.
+"""In-process CofferDB binding for version 0.2.1.
 
 Create a private temporary database, write and retrieve one chunk, then verify
 a snapshot after closing the writer:
@@ -46,7 +46,7 @@ from ._native import (
 )
 
 #: Version of the installed Python distribution.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 # A stale extension can still import after a partial reinstall. Check the
 # extension version before exposing its API with this package's types.
 # Compare the extension package version, which identifies the Python binding it was

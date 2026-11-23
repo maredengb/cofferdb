@@ -1,12 +1,12 @@
-# Rust 0.2.0 programming guide
+# Rust 0.2.1 programming guide
 
 The Rust library and the `coffer` CLI use the same source crate. The maintenance
-operations below support local filesystems on Linux and macOS. To install the CLI, run `cargo install cofferdb --version 0.2.0 --locked`.
+operations below support local filesystems on Linux and macOS. To install the CLI, run `cargo install cofferdb --version 0.2.1 --locked`.
 Use Rust 1.80 or later. Pin the Rust crate in your application's `Cargo.toml`.
 
 ```toml
 [dependencies]
-cofferdb = "=0.2.0"
+cofferdb = "=0.2.1"
 ```
 
 ## Write, search and reopen

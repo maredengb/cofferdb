@@ -24,7 +24,7 @@ pub(crate) struct IndexSegmentSource {
     offset: u64,
     // Length of the framed records in the checkpoint payload, excluding the outer
     // header, directory and trailer. Bounds each extent lookup.
-    payload_len: usize,
+    payload_len: u64,
     // Generation stamped on the checkpoint extents. The source also binds locally
     // retained text statistics to this value.
     generation: u64,
@@ -41,7 +41,7 @@ pub(crate) struct IndexSegmentSource {
 impl IndexSegmentSource {
     pub(super) fn new(
         offset: u64,
-        payload_len: usize,
+        payload_len: u64,
         generation: u64,
         commit_sequence_no: u64,
         mut extents: IndexDirectory,
@@ -591,7 +591,7 @@ impl IndexSegmentSource {
         collection_id: &str,
         capacity: usize,
         context: Option<&JsonOperationContext>,
-        decode: impl FnOnce(&mut dyn Read, usize) -> std::result::Result<(u64, T), IndexReadError>,
+        decode: impl FnOnce(&mut dyn Read, u64) -> std::result::Result<(u64, T), IndexReadError>,
     ) -> Result<Option<T>> {
         // The directory is keyed by the numeric collection ID and record kind. A
         // miss can mean the snapshot has no segment of this kind for the
@@ -616,10 +616,7 @@ impl IndexSegmentSource {
             // reader separately counts actual I/O, which can be smaller when the
             // frame fails early.
             if let Some(context) = context {
-                context.search_cost_add(
-                    crate::search_cost::Counter::IndexRequestedBytes,
-                    length as u64,
-                );
+                context.search_cost_add(crate::search_cost::Counter::IndexRequestedBytes, length);
             }
             // An extent remembered at open time is a locator into a rebuildable
             // suffix. Validate the frame at that offset again before exposing the
@@ -646,7 +643,7 @@ impl IndexSegmentSource {
                 // one reader so prefetched bytes cannot disappear from the
                 // integrity check.
                 let mut source = BufReader::with_capacity(capacity, &mut checked);
-                let decoded = decode(&mut source, record.payload.len as usize - 4);
+                let decoded = decode(&mut source, record.payload.len - 4);
                 // An actual I/O error from the decoder makes further reads in this
                 // attempt unreliable. A semantic or memory failure can still be
                 // compared with the outcome of the frame checks below after the
@@ -2293,7 +2290,7 @@ mod tests {
                 .filter(|extent| extent.record_type == INDEX_VECTOR_SEGMENT)
                 .map(|extent| extent.length)
                 .sum::<u64>();
-            let retained = source.payload_len as u64 - vector_bytes + directory_len;
+            let retained = source.payload_len - vector_bytes + directory_len;
             let load = |mode, budget_bytes| {
                 read_index_checkpoint_suffix(
                     &mut Cursor::new(&bytes),
@@ -2304,26 +2301,25 @@ mod tests {
                     2,
                     IndexReadOptions { mode, budget_bytes },
                 )
-                .unwrap()
             };
-            let parsed = load(IndexReadMode::LazyVectors, retained).unwrap();
+            let parsed = load(IndexReadMode::LazyVectors, retained).unwrap().unwrap();
             assert!(parsed.lazy_vectors.is_some());
             assert!(parsed.diagnostics.is_empty());
             for budget in [retained - 1, directory_len - 1] {
                 assert!(
-                    matches!(load(IndexReadMode::LazyVectors, budget), Err(error) if error.code == "index_checkpoint_load_budget_exceeded")
+                    matches!(load(IndexReadMode::LazyVectors, budget), Err(error) if error.code() == ErrorCode::ResourceExhausted)
                 );
             }
             assert!(
-                matches!(load(IndexReadMode::Full, retained), Err(error) if error.code == "index_checkpoint_load_budget_exceeded")
+                matches!(load(IndexReadMode::Full, retained), Err(error) if error.code() == ErrorCode::ResourceExhausted)
             );
-            assert!(load(
-                IndexReadMode::Full,
-                source.payload_len as u64 + directory_len
-            )
-            .unwrap()
-            .checkpoint
-            .is_some());
+            assert!(
+                load(IndexReadMode::Full, source.payload_len + directory_len)
+                    .unwrap()
+                    .unwrap()
+                    .checkpoint
+                    .is_some()
+            );
         }
     }
 

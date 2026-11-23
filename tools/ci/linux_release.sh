@@ -81,5 +81,5 @@ cp build-environment.json build-tools.json comparison-coffer transfer/
 cp built/build-manifest.json transfer/built/
 for abi in "${abis[@]}"; do
     mkdir "transfer/built/$abi"
-    cp "built/$abi/cofferdb-0.2.0-$abi-$abi-manylinux_2_28_$machine.whl" "transfer/built/$abi/"
+    cp "built/$abi/cofferdb-0.2.1-$abi-$abi-manylinux_2_28_$machine.whl" "transfer/built/$abi/"
 done

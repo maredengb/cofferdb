@@ -630,7 +630,7 @@ pub struct DatabaseStats {
 /// [`Database::compact`](crate::Database::compact) reclaims space.
 /// Separate read-only handles retain the view they opened.
 ///
-/// The [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.0/source/docs/rust.md)
+/// The [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.1/source/docs/rust.md)
 /// explains how to reopen the database and read full chunk content.
 ///
 /// # Examples
@@ -2093,50 +2093,53 @@ impl CollectionStats {
             ("collection", collection),
             (
                 "document_count",
-                JsonValue::Number(self.document_count as f64),
+                builder.unsigned(self.document_count as u128)?,
             ),
-            ("chunk_count", JsonValue::Number(self.chunk_count as f64)),
+            ("chunk_count", builder.unsigned(self.chunk_count as u128)?),
             (
                 "embedding_count",
-                JsonValue::Number(self.embedding_count as f64),
+                builder.unsigned(self.embedding_count as u128)?,
             ),
             // Expose the live counts and tombstone count as separate fields. An
             // alias for deletion remains tied to the tombstone counter, not to a
             // subtraction of live objects.
             (
                 "tombstone_count",
-                JsonValue::Number(self.tombstone_count as f64),
+                builder.unsigned(self.tombstone_count as u128)?,
             ),
             // Retain deleted_count as the legacy alias of tombstone_count. Derive
             // both from the same value to prevent two descriptions of one count
             // from diverging.
             (
                 "deleted_count",
-                JsonValue::Number(self.tombstone_count as f64),
+                builder.unsigned(self.tombstone_count as u128)?,
             ),
             (
                 "text_index_terms",
-                JsonValue::Number(self.text_index_terms as f64),
+                builder.unsigned(self.text_index_terms as u128)?,
             ),
             // Expose segment count separately from term count. A populated text
             // index can organize a different number of terms into a checkpoint's
             // index segments.
             (
                 "text_index_segments",
-                JsonValue::Number(self.text_index_segments as f64),
+                builder.unsigned(self.text_index_segments as u128)?,
             ),
-            ("vector_count", JsonValue::Number(self.vector_count as f64)),
+            ("vector_count", builder.unsigned(self.vector_count as u128)?),
             (
                 "index_size_bytes",
-                JsonValue::Number(self.index_size_bytes as f64),
+                builder.unsigned(u128::from(self.index_size_bytes))?,
             ),
-            ("live_bytes", JsonValue::Number(self.live_bytes as f64)),
+            ("live_bytes", builder.unsigned(u128::from(self.live_bytes))?),
             // Use the live byte count for the compatibility data_size_bytes field.
             // Dead bytes and pending compaction are reported independently.
-            ("data_size_bytes", JsonValue::Number(self.live_bytes as f64)),
+            (
+                "data_size_bytes",
+                builder.unsigned(u128::from(self.live_bytes))?,
+            ),
             (
                 "dead_bytes_estimate",
-                JsonValue::Number(self.dead_bytes_estimate as f64),
+                builder.unsigned(u128::from(self.dead_bytes_estimate))?,
             ),
             (
                 "resource_profile",
@@ -2154,22 +2157,22 @@ impl CollectionStats {
             // usage.
             (
                 "cache_budget_mb",
-                JsonValue::Number(self.cache_budget_mb as f64),
+                builder.unsigned(self.cache_budget_mb as u128)?,
             ),
             (
                 "last_commit_id",
-                JsonValue::Number(self.last_commit_id as f64),
+                builder.unsigned(u128::from(self.last_commit_id))?,
             ),
             // Keep the pending compaction estimate alongside the byte breakdown.
             // It is a separate reported quantity rather than the size of another
             // live object.
             (
                 "pending_compaction_bytes",
-                JsonValue::Number(self.pending_compaction_bytes as f64),
+                builder.unsigned(u128::from(self.pending_compaction_bytes))?,
             ),
             (
                 "format_version",
-                JsonValue::Number(self.format_version as f64),
+                builder.unsigned(self.format_version as u128)?,
             ),
             (
                 "background_compaction_enabled",
@@ -2189,62 +2192,66 @@ impl InsertSummary {
     // Build the shared success shape for inserting or importing rows. Totals are
     // derived from the per-record-type counters rather than tracked separately.
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
-        let skipped = self.documents_skipped + self.chunks_skipped + self.embeddings_skipped;
-        let replaced = self.documents_replaced + self.chunks_replaced + self.embeddings_replaced;
+        let skipped = self.documents_skipped as u128
+            + self.chunks_skipped as u128
+            + self.embeddings_skipped as u128;
+        let replaced = self.documents_replaced as u128
+            + self.chunks_replaced as u128
+            + self.embeddings_replaced as u128;
         builder.object([
             (
                 "documents_inserted",
-                JsonValue::Number(self.documents_inserted as f64),
+                builder.unsigned(self.documents_inserted as u128)?,
             ),
             // Preserve the imported spellings as aliases for inserted counts in
             // the same success payload. An alias must always read the same source
             // counter.
             (
                 "documents_imported",
-                JsonValue::Number(self.documents_inserted as f64),
+                builder.unsigned(self.documents_inserted as u128)?,
             ),
             (
                 "chunks_inserted",
-                JsonValue::Number(self.chunks_inserted as f64),
+                builder.unsigned(self.chunks_inserted as u128)?,
             ),
             (
                 "chunks_imported",
-                JsonValue::Number(self.chunks_inserted as f64),
+                builder.unsigned(self.chunks_inserted as u128)?,
             ),
             (
                 "embeddings_inserted",
-                JsonValue::Number(self.embeddings_inserted as f64),
+                builder.unsigned(self.embeddings_inserted as u128)?,
             ),
             (
                 "embeddings_imported",
-                JsonValue::Number(self.embeddings_inserted as f64),
+                builder.unsigned(self.embeddings_inserted as u128)?,
             ),
             (
                 "documents_skipped",
-                JsonValue::Number(self.documents_skipped as f64),
+                builder.unsigned(self.documents_skipped as u128)?,
             ),
             (
                 "chunks_skipped",
-                JsonValue::Number(self.chunks_skipped as f64),
+                builder.unsigned(self.chunks_skipped as u128)?,
             ),
             (
                 "embeddings_skipped",
-                JsonValue::Number(self.embeddings_skipped as f64),
+                builder.unsigned(self.embeddings_skipped as u128)?,
             ),
-            ("skipped", JsonValue::Number(skipped as f64)),
+            ("skipped", builder.unsigned(skipped)?),
             (
                 "documents_replaced",
-                JsonValue::Number(self.documents_replaced as f64),
+                builder.unsigned(self.documents_replaced as u128)?,
             ),
             (
                 "chunks_replaced",
-                JsonValue::Number(self.chunks_replaced as f64),
+                builder.unsigned(self.chunks_replaced as u128)?,
             ),
             (
                 "embeddings_replaced",
-                JsonValue::Number(self.embeddings_replaced as f64),
+                builder.unsigned(self.embeddings_replaced as u128)?,
             ),
-            ("replaced", JsonValue::Number(replaced as f64)),
+            ("replaced", builder.unsigned(replaced)?),
             // Preserve the historical failure-counter keys in a successful insert
             // summary. Operational failures are propagated as errors instead of
             // incrementing these placeholder values.
@@ -2266,15 +2273,15 @@ impl IndexStats {
     // rebuild-needed index reports zero checkpoint bytes and no last index commit.
     pub(crate) fn build_json(&self, builder: &JsonBuilder<'_>) -> Result<JsonValue> {
         builder.object([
-            ("text_terms", JsonValue::Number(self.text_terms as f64)),
+            ("text_terms", builder.unsigned(self.text_terms as u128)?),
             (
                 "text_segments",
-                JsonValue::Number(self.text_segments as f64),
+                builder.unsigned(self.text_segments as u128)?,
             ),
-            ("vector_count", JsonValue::Number(self.vector_count as f64)),
+            ("vector_count", builder.unsigned(self.vector_count as u128)?),
             (
                 "vector_segments",
-                JsonValue::Number(self.vector_segments as f64),
+                builder.unsigned(self.vector_segments as u128)?,
             ),
             // Expose the rebuild status directly. Consumers should read it
             // alongside the nullable commit field instead of inferring freshness
@@ -2282,16 +2289,14 @@ impl IndexStats {
             ("rebuild_needed", JsonValue::Bool(self.rebuild_needed)),
             (
                 "index_size_bytes",
-                JsonValue::Number(self.index_size_bytes as f64),
+                builder.unsigned(u128::from(self.index_size_bytes))?,
             ),
             // Represent an absent index commit as null. Zero would look like an
             // actual commit identity rather than unavailable checkpoint
             // information.
             (
                 "last_index_commit_id",
-                self.last_index_commit_id
-                    .map(|value| JsonValue::Number(value as f64))
-                    .unwrap_or(JsonValue::Null),
+                builder.optional_u64(self.last_index_commit_id)?,
             ),
         ])
     }
@@ -2310,42 +2315,48 @@ impl DatabaseStats {
         builder.object([
             (
                 "collection_count",
-                JsonValue::Number(self.collection_count as f64),
+                builder.unsigned(self.collection_count as u128)?,
             ),
             (
                 "document_count",
-                JsonValue::Number(self.document_count as f64),
+                builder.unsigned(self.document_count as u128)?,
             ),
-            ("chunk_count", JsonValue::Number(self.chunk_count as f64)),
+            ("chunk_count", builder.unsigned(self.chunk_count as u128)?),
             (
                 "embedding_count",
-                JsonValue::Number(self.embedding_count as f64),
+                builder.unsigned(self.embedding_count as u128)?,
             ),
             (
                 "tombstone_count",
-                JsonValue::Number(self.tombstone_count as f64),
+                builder.unsigned(self.tombstone_count as u128)?,
             ),
             // Both tombstone and deleted counts name the same observation. Keep
             // them synchronized in the aggregate just as in collection statistics.
             (
                 "deleted_count",
-                JsonValue::Number(self.tombstone_count as f64),
+                builder.unsigned(self.tombstone_count as u128)?,
             ),
             // Preserve the original file_size spelling and its explicit byte-unit
             // alias. Neither key substitutes for live or index-owned bytes.
-            ("file_size", JsonValue::Number(self.file_size as f64)),
-            ("file_size_bytes", JsonValue::Number(self.file_size as f64)),
+            ("file_size", builder.unsigned(u128::from(self.file_size))?),
+            (
+                "file_size_bytes",
+                builder.unsigned(u128::from(self.file_size))?,
+            ),
             (
                 "index_size_bytes",
-                JsonValue::Number(self.index_size_bytes as f64),
+                builder.unsigned(u128::from(self.index_size_bytes))?,
             ),
-            ("live_bytes", JsonValue::Number(self.live_bytes as f64)),
+            ("live_bytes", builder.unsigned(u128::from(self.live_bytes))?),
             // Use live_bytes as the value of data_size_bytes. Physical file size
             // also includes other extents such as dead or index data.
-            ("data_size_bytes", JsonValue::Number(self.live_bytes as f64)),
+            (
+                "data_size_bytes",
+                builder.unsigned(u128::from(self.live_bytes))?,
+            ),
             (
                 "dead_bytes_estimate",
-                JsonValue::Number(self.dead_bytes_estimate as f64),
+                builder.unsigned(u128::from(self.dead_bytes_estimate))?,
             ),
             // Serialize the active database resource profile separately from the
             // reported cache allowance. Callers can inspect the preset without
@@ -2356,19 +2367,19 @@ impl DatabaseStats {
             ),
             (
                 "cache_budget_mb",
-                JsonValue::Number(self.cache_budget_mb as f64),
+                builder.unsigned(self.cache_budget_mb as u128)?,
             ),
             (
                 "last_commit_id",
-                JsonValue::Number(self.last_commit_id as f64),
+                builder.unsigned(u128::from(self.last_commit_id))?,
             ),
             (
                 "pending_compaction_bytes",
-                JsonValue::Number(self.pending_compaction_bytes as f64),
+                builder.unsigned(u128::from(self.pending_compaction_bytes))?,
             ),
             (
                 "format_version",
-                JsonValue::Number(self.format_version as f64),
+                builder.unsigned(self.format_version as u128)?,
             ),
             (
                 "background_compaction_enabled",

@@ -1,4 +1,4 @@
-# Import a folder of text with the CofferDB 0.2.0 CLI
+# Import a folder of text with the CofferDB 0.2.1 CLI
 
 Use this workflow to make a directory of notes, Markdown or source text
 searchable. For keyword search you need only the `coffer` executable and your

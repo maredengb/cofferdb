@@ -148,7 +148,7 @@ impl TextStaging {
     pub(in crate::storage) fn copy_body_from(
         &mut self,
         reader: &mut dyn Read,
-        length: usize,
+        length: u64,
         commit: u64,
         context: &JsonOperationContext,
         capacity: usize,
@@ -162,7 +162,7 @@ impl TextStaging {
         // The supplied length excludes the source's CRC word. Reserve room for the
         // body and the new staging footer together. The reservation remains with
         // the owner if the copy needs rollback.
-        let bytes = (length as u64)
+        let bytes = length
             .checked_add(4)
             .ok_or_else(|| IndexReadError::Resource(invalid_staging()))?;
         let end = offset
@@ -199,7 +199,7 @@ impl TextStaging {
             // A successfully decoded prefix is insufficient when the caller
             // declared more body bytes. Treat a short copy as a truncated extent
             // before returning its collection number.
-            if copying.bytes != length as u64 {
+            if copying.bytes != length {
                 return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
             }
             Ok((
@@ -344,6 +344,10 @@ impl TextExtent {
 }
 
 impl StagedText<'_> {
+    pub(super) fn encoded_len(&self) -> u64 {
+        self.extent.length
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn staging_identity(&self) -> Result<(u64, u64)> {
         use std::os::unix::fs::MetadataExt;
@@ -437,8 +441,8 @@ impl StagedText<'_> {
         let mut file = self.reader()?;
         // reader() has established the minimum framing length and positioned this
         // descriptor at the extent start. Exclude the stored four-byte CRC from
-        // the body limit converted to the decoder's address size.
-        let length = usize::try_from(self.extent.length - 4).map_err(|_| invalid_staging())?;
+        // the u64 extent passed to the streaming decoder.
+        let length = self.extent.length - 4;
         let mut error = None;
         // Read only the body through CrcReader so the file is at the stored footer
         // afterwards. A callback may fail early, but the remainder of the body
@@ -448,7 +452,7 @@ impl StagedText<'_> {
                 // Place the byte limit below the buffer. Read-ahead can then fill
                 // from the body only, leaving the fixed footer available on the
                 // same descriptor after the buffered reader is dropped.
-                source: BufReader::with_capacity(capacity, (&mut file).take(length as u64)),
+                source: BufReader::with_capacity(capacity, (&mut file).take(length)),
                 crc: Crc32c::default(),
             };
             let parsed = decode_text_index_segment_with(
@@ -854,7 +858,7 @@ impl TextSpool {
     fn copy_body_from(
         &mut self,
         reader: &mut dyn Read,
-        length: usize,
+        length: u64,
         commit: u64,
         context: &JsonOperationContext,
         capacity: usize,

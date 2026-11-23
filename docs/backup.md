@@ -50,6 +50,18 @@ A missing index may require a transient index within the reader's budget.
 The file may contain paths and deleted history. The digest checks integrity
 and requires separate trusted provenance for publisher authentication.
 
+## Using 0.2.0 and 0.2.1 on the same file
+
+Upgrade writers and maintenance tools to 0.2.1 before maintaining a file with
+more than 512 MiB of index records. A 0.2.0 reader can still read committed
+data, but it skips the large checkpoint and can rebuild indexes in memory
+during a query. Its check can recommend rebuilding, and its explicit
+`repair --truncate-tail` can remove the entire reusable index. A 0.2.0 write
+can replace it as well. If the suffix has been removed, run 0.2.1
+`coffer rebuild-index DB --json`, then `coffer check DB --verify-indexes --json`.
+A 0.2.1 read-only open uses a healthy large checkpoint in place. A physical
+snapshot preserves the same index and the same version compatibility.
+
 ## Copying a database file
 
 Stop all writes and maintenance, close the writer successfully, and prevent any

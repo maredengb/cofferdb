@@ -1,8 +1,8 @@
-# CofferDB 0.2.0 command-line manual
+# CofferDB 0.2.1 command-line manual
 
 Use `coffer` from a terminal to create a local database, load data, search it,
 inspect results and perform maintenance. Install the CLI from the matching Rust
-crate with `cargo install cofferdb --version 0.2.0 --locked`. From the matching
+crate with `cargo install cofferdb --version 0.2.1 --locked`. From the matching
 source tree, use `cargo build --locked --bin coffer` and run
 `./target/debug/coffer`. The Python wheel has a separate in-process API.
 
@@ -68,7 +68,17 @@ version. Use `coffer profile-help` for the resource profiles.
 See [backup and recovery](backup.md) for space requirements, concurrent
 readers, interrupted operations and what to verify before resuming writes.
 
+A check reports two document counts. Inside the check report, `result.live_documents`
+counts all visible committed documents. `index_suffix.live_document_count` counts
+distinct documents represented by at least one live chunk in the checkpoint text
+segments. With two documents and chunks in only one of them, a healthy report
+shows 2 and 1 respectively. Multiple chunks of one document count once.
+
 ## Output and exit status
+
+File sizes, byte offsets, commit identifiers, counts and durations in maintenance reports use
+ordinary numbers through `2^53 - 1` and decimal strings above that value.
+The snapshot package always stores its size and commit identifier as decimal strings.
 
 Add `--json` to consume the result in a script. Completed commands write a
 report to stdout. Inspect `ok`, `result` and `warnings`. On an operation error,

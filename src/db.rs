@@ -1373,37 +1373,16 @@ impl Database {
         // the independent scan to verify.
         if let Some(written) = &report {
             context.maintenance.update(|state| state.verifying_index());
-            #[cfg(all(feature = "native-test-support", unix))]
-            crate::maintenance_probe::pause("verify_checkpoint")
-                .map_err(|e| e.maintenance_phase("verify_checkpoint", "index_may_need_rebuild"))?;
-            // Verify the result through the same check path used to inspect an
-            // existing database. Successfully writing index bytes does not establish
-            // that the new suffix covers the visible catalog.
-            let checked = build_check_report_reclaiming(
+            if let Err(error) = verify_written_checkpoint(
                 &inner.path,
-                Some(inner.storage.descriptor()),
-                CheckOptions {
-                    verify_indexes: true,
-                },
+                inner.storage.descriptor(),
+                written,
                 &context,
-                || false,
-            )
-            .map_err(|e| e.maintenance_phase("verify_checkpoint", "index_may_need_rebuild"))?;
-            // Compare the sequence number reported by the readback and its
-            // classification. A readable suffix from an older commit or a suffix
-            // demoted to rebuild-needed cannot satisfy this write's verification.
-            if checked
-                .index_suffix
-                .as_ref()
-                .map(|v| v.covered_last_commit_sequence_no)
-                != Some(written.covered_last_commit_sequence_no)
-                || checked.index_suffix_status != written.status
-            {
-                return Err(Error::new(
-                    ErrorCode::IndexCorruption,
-                    "rebuilt checkpoint did not verify",
-                )
-                .maintenance_phase("verify_checkpoint", "index_may_need_rebuild"));
+            ) {
+                // The complete trailer may already be durable. Retire this
+                // handle's directory and coverage without modifying the file.
+                inner.mark_index_checkpoint_rebuild_needed();
+                return Err(error.checkpoint_verification_failed());
             }
         }
         // Take the covered commit sequence from the report that actually reached
@@ -6063,6 +6042,24 @@ impl Inner {
         pending: PendingIndexUpdate,
         context: &crate::json::JsonOperationContext,
     ) -> Result<()> {
+        // Preparation reads committed records and may still encounter a real
+        // resource or I/O error. Tell every caller exactly which data is visible
+        // before returning such an error; replaying the batch would duplicate it.
+        self.refresh_committed_index(pending, context)
+            .map_err(|error| {
+                error
+                    .maintenance_phase("prepare_checkpoint", "index_may_need_rebuild")
+                    .with_detail("primary_effect", "committed")
+                    .with_detail("last_valid_commit", self.catalog.last_commit_id)
+                    .with_detail("commit_sequence_no", self.last_commit_sequence_no)
+            })
+    }
+
+    fn refresh_committed_index(
+        &mut self,
+        pending: PendingIndexUpdate,
+        context: &crate::json::JsonOperationContext,
+    ) -> Result<()> {
         // Refresh model witnesses for the touched collections that still exist. A
         // collection dropped by this batch must not be looked up as a live target
         // during maintenance.
@@ -6517,7 +6514,10 @@ impl Inner {
             text.as_mut(),
             context,
         ) {
-            Err(error) if crate::json::is_memory_budget_error(&error) => {
+            Err(error)
+                if crate::json::is_memory_budget_error(&error)
+                    && !error.detail().iter().any(|(k, _)| k == "cleanup_error") =>
+            {
                 // Only the rebuildable suffix is retried. Failed attempt caches have
                 // already dropped; never repeat a committed primary-data write.
                 // The retry starts with no reusable vector cache, skips optional
@@ -6587,11 +6587,11 @@ impl Inner {
                 "missing prepared text checkpoint",
             )
         })?;
-        // Invalidate the old directory and covered position before fallible
-        // assembly. The storage writer may truncate or partially replace the
-        // suffix. Until its entire replacement is installed, a later search must
-        // use another source.
-        self.mark_index_checkpoint_rebuild_needed();
+        // Release optional decoded vectors before building their replacements.
+        // Keep the trusted directory until storage has actually disturbed its
+        // suffix. Admission of the new directory can still fail before that.
+        self.persistent_vector_segments = None;
+        self.lazy_vector_segment = None;
         #[cfg(test)]
         {
             self.index_checkpoint_refreshes += 1;
@@ -6730,7 +6730,7 @@ impl Inner {
         // checksums and completion marker. Segment callbacks occur before this
         // entire operation has succeeded, so keep their cache local until the
         // writer returns its report.
-        let (report, source) = self.storage.write_index_segments_in(
+        let write = self.storage.write_index_segments_in(
             &checkpoint,
             text_segments.chain(vector_segments),
             |segment, bytes| {
@@ -6747,7 +6747,17 @@ impl Inner {
             self.config.durability,
             context,
             allow_optional_memory,
-        )?;
+        );
+        let (report, source) = write.map_err(|error| {
+            if error
+                .detail()
+                .iter()
+                .any(|(k, v)| k == "effect" && v == "index_may_need_rebuild")
+            {
+                self.mark_index_checkpoint_rebuild_needed();
+            }
+            error
+        })?;
         // The committed directory is now the common source for text and vector
         // reads. Attach statistics derived from these same staged bodies and
         // publish its status, covered sequence and footprint from the writer's
@@ -7290,7 +7300,18 @@ impl Inner {
                 context,
             )?,
             collection_count,
-            live_document_count: self.catalog.live_documents().count(),
+            // Text segments contain one entry per live chunk. Use the catalog's
+            // membership lists to count each represented document just once.
+            live_document_count: self
+                .catalog
+                .live_documents()
+                .filter(|doc| {
+                    self.catalog
+                        .live_document_chunks(&doc.document_id)
+                        .next()
+                        .is_some()
+                })
+                .count(),
             live_chunk_count: self.catalog.live_chunks().count(),
             live_embedding_count: self.catalog.live_embeddings().count(),
             // Declare both segment types for each live collection, including
@@ -7827,6 +7848,50 @@ fn build_text_index_matching(
     Ok((index, bytes_read))
 }
 
+// Independently reload the completed suffix through the same descriptor. A
+// successful write alone cannot establish that its directory covers this commit.
+fn verify_written_checkpoint(
+    path: &Path,
+    file: &crate::physical_file::ManagedFile,
+    written: &IndexSuffixReport,
+    context: &crate::json::JsonOperationContext,
+) -> Result<()> {
+    #[cfg(all(feature = "native-test-support", unix))]
+    crate::maintenance_probe::pause("verify_checkpoint")?;
+    #[cfg(all(test, unix))]
+    crate::maintenance_faults::check(crate::maintenance_faults::Stage::VerifyCheckpoint)?;
+    let checked = build_check_report_reclaiming(
+        path,
+        Some(file),
+        CheckOptions {
+            verify_indexes: true,
+        },
+        context,
+        || false,
+    )?;
+    #[cfg(all(test, unix))]
+    let checked = crate::maintenance_faults::readback(checked);
+    if checked
+        .index_suffix
+        .as_ref()
+        .map(|v| v.covered_last_commit_sequence_no)
+        != Some(written.covered_last_commit_sequence_no)
+    {
+        return Err(Error::new(
+            ErrorCode::IndexCorruption,
+            "rebuilt checkpoint covers a different commit sequence",
+        ));
+    }
+    if checked.index_suffix_status != written.status {
+        return Err(Error::new(
+            ErrorCode::IndexCorruption,
+            "rebuilt checkpoint has an unexpected suffix status",
+        )
+        .with_detail("index_suffix_status", checked.index_suffix_status));
+    }
+    Ok(())
+}
+
 // A path-only check works on the view opened by the storage scanner. A database
 // handle can instead provide an already bound file and a one-shot cache reclaim
 // operation. Both paths build their findings from the committed view they actually
@@ -8172,31 +8237,31 @@ impl CompactSummary {
         builder.object([
             (
                 "before_file_size",
-                JsonValue::Number(self.before_file_size as f64),
+                builder.optional_u64(Some(self.before_file_size))?,
             ),
             (
                 "before_file_size_bytes",
-                JsonValue::Number(self.before_file_size as f64),
+                builder.optional_u64(Some(self.before_file_size))?,
             ),
             (
                 "after_file_size",
-                JsonValue::Number(self.after_file_size as f64),
+                builder.optional_u64(Some(self.after_file_size))?,
             ),
             (
                 "after_file_size_bytes",
-                JsonValue::Number(self.after_file_size as f64),
+                builder.optional_u64(Some(self.after_file_size))?,
             ),
             (
                 "records_removed",
-                JsonValue::Number(self.records_removed as f64),
+                builder.unsigned(self.records_removed as u128)?,
             ),
             (
                 "tombstones_removed",
-                JsonValue::Number(self.tombstones_removed as f64),
+                builder.unsigned(self.tombstones_removed as u128)?,
             ),
             (
                 "segments_merged",
-                JsonValue::Number(self.segments_merged as f64),
+                builder.unsigned(self.segments_merged as u128)?,
             ),
             // A successful main-file replacement and a later index rebuild are
             // separate events. Include the rebuild outcome and its reason in the
@@ -8207,7 +8272,7 @@ impl CompactSummary {
                 "index_rebuild_reason",
                 builder.optional_str(self.index_rebuild_reason.as_deref())?,
             ),
-            ("duration_ms", JsonValue::Number(self.duration_ms as f64)),
+            ("duration_ms", builder.unsigned(self.duration_ms)?),
         ])
     }
 }
@@ -8236,19 +8301,19 @@ impl RebuildIndexSummary {
             ),
             (
                 "index_record_count",
-                JsonValue::Number(self.index_record_count as f64),
+                builder.unsigned(self.index_record_count as u128)?,
             ),
             (
                 "index_extent_count",
-                JsonValue::Number(self.index_extent_count as f64),
+                builder.unsigned(self.index_extent_count as u128)?,
             ),
             (
                 "text_segment_count",
-                JsonValue::Number(self.text_segment_count as f64),
+                builder.unsigned(self.text_segment_count as u128)?,
             ),
             (
                 "vector_segment_count",
-                JsonValue::Number(self.vector_segment_count as f64),
+                builder.unsigned(self.vector_segment_count as u128)?,
             ),
             ("rebuild_needed", JsonValue::Bool(self.rebuild_needed)),
             (
@@ -8256,11 +8321,9 @@ impl RebuildIndexSummary {
                 // An absent index commit is carried as JSON null. Consumers can
                 // distinguish a rebuild with no persistent segment generation from
                 // a concrete checkpoint covering a commit.
-                self.last_index_commit_id
-                    .map(|commit| JsonValue::Number(commit as f64))
-                    .unwrap_or(JsonValue::Null),
+                builder.optional_u64(self.last_index_commit_id)?,
             ),
-            ("duration_ms", JsonValue::Number(self.duration_ms as f64)),
+            ("duration_ms", builder.unsigned(self.duration_ms)?),
         ])
     }
 }
@@ -8282,31 +8345,31 @@ impl RepairSummary {
             ("repaired", JsonValue::Bool(self.repaired)),
             (
                 "before_file_size",
-                JsonValue::Number(self.before_file_size as f64),
+                builder.optional_u64(Some(self.before_file_size))?,
             ),
             (
                 "before_file_size_bytes",
-                JsonValue::Number(self.before_file_size as f64),
+                builder.optional_u64(Some(self.before_file_size))?,
             ),
             (
                 "after_file_size",
-                JsonValue::Number(self.after_file_size as f64),
+                builder.optional_u64(Some(self.after_file_size))?,
             ),
             (
                 "after_file_size_bytes",
-                JsonValue::Number(self.after_file_size as f64),
+                builder.optional_u64(Some(self.after_file_size))?,
             ),
             (
                 "bytes_removed",
-                JsonValue::Number(self.bytes_removed as f64),
+                builder.optional_u64(Some(self.bytes_removed))?,
             ),
             (
                 "critical_end_offset",
-                JsonValue::Number(self.critical_end_offset as f64),
+                builder.optional_u64(Some(self.critical_end_offset))?,
             ),
             (
                 "issues_repaired",
-                JsonValue::Number(self.issues_repaired as f64),
+                builder.unsigned(self.issues_repaired as u128)?,
             ),
         ])
     }
@@ -8355,16 +8418,18 @@ impl SnapshotSummary {
                 ])?,
             ),
             // Keep the top-level numeric summary for callers of the snapshot
-            // command. Exact large offsets are separately available as strings in
-            // the package object.
-            ("bytes_copied", JsonValue::Number(self.bytes_copied as f64)),
+            // command. Wide compatibility fields also preserve the exact decimal value.
+            (
+                "bytes_copied",
+                builder.optional_u64(Some(self.bytes_copied))?,
+            ),
             (
                 "last_valid_commit",
-                JsonValue::Number(self.last_valid_commit as f64),
+                builder.optional_u64(Some(self.last_valid_commit))?,
             ),
             (
                 "critical_end_offset",
-                JsonValue::Number(self.critical_end_offset as f64),
+                builder.optional_u64(Some(self.critical_end_offset))?,
             ),
             (
                 "index_suffix_status",
@@ -9214,6 +9279,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_checkpoint_text_cache_is_released_before_transient_budget_rejection() {
         let path = query_preflight_fixture("failed-checkpoint-cache", &"query ".repeat(4096));
@@ -9225,7 +9291,7 @@ mod tests {
             },
         )
         .unwrap();
-        fail_next_index_checkpoint_refresh(&db);
+        crate::maintenance_faults::fail_next(crate::maintenance_faults::Stage::WriteCheckpoint);
         assert_eq!(
             db.rebuild_index(None).unwrap_err().code(),
             ErrorCode::IoError
@@ -10630,6 +10696,14 @@ mod tests {
             let limit = crate::json::JsonProcessingPolicyV1::WORK_BUDGET_BYTES;
             assert_eq!(error.code(), ErrorCode::ResourceExhausted);
             for (key, value) in [
+                ("primary_effect", "committed".into()),
+                ("last_valid_commit", committed.to_string()),
+                (
+                    "commit_sequence_no",
+                    inner.last_commit_sequence_no.to_string(),
+                ),
+                ("stage", "prepare_checkpoint".into()),
+                ("effect", "index_may_need_rebuild".into()),
                 ("resource", "memory".into()),
                 ("operation", "operation_scratch".into()),
                 ("limit_bytes", limit.to_string()),
@@ -12827,8 +12901,9 @@ mod tests {
             ErrorCode::IoError
         );
         assert_eq!(inner.index_checkpoint_refreshes - calls, 1);
-        assert!(inner.lazy_vector_source.is_none());
+        assert!(inner.lazy_vector_source.is_some());
         assert_eq!(fs::read(&path).unwrap(), before);
+        inner.mark_index_checkpoint_rebuild_needed();
         let mut remaining = context.workspace_reservation();
         let available = crate::json::JsonProcessingPolicyV1::WORK_BUDGET_BYTES - 17;
         remaining
@@ -18238,15 +18313,15 @@ mod tests {
             assert!(inner.lazy_vector_source.is_none());
             assert!(inner.lazy_vector_segment.is_none());
         }
-        let partial = fs::read(&path).unwrap();
-        assert_eq!(&partial[..prefix_len], &prefix);
-        assert!(partial.len() > prefix_len);
+        // The failure occurred before the completion marker. Cleanup leaves the
+        // committed prefix and no damaged suffix for the next reader to diagnose.
+        assert_eq!(fs::read(&path).unwrap(), prefix);
         let scan = scan_file(&path).unwrap();
         assert!(scan.index_checkpoint.is_none());
         assert!(scan
             .findings
             .iter()
-            .any(|finding| finding.stream == "index"));
+            .all(|finding| finding.stream != "index"));
         let fresh = Database::open_with_options(
             &path,
             DatabaseOpenOptions {
@@ -18614,6 +18689,77 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_counts_distinct_documents_with_live_chunks_across_reopen() {
+        let path = temp_path("indexed-document-count");
+        let db = Database::create(&path, DatabaseConfig::default()).unwrap();
+        let notes = db
+            .create_collection(CollectionConfig {
+                name: "notes".into(),
+                tokenizer: Default::default(),
+                embedding_dim: 2,
+                distance_metric: DistanceMetric::Cosine,
+                embedding_model: None,
+                vectors_normalized: false,
+                vector_index: VectorIndexConfig::Exact,
+            })
+            .unwrap();
+        for (name, count) in [("empty", 0), ("full", 2)] {
+            let chunks = (0..count)
+                .map(|ordinal| ChunkInput {
+                    chunk_external_id: format!("row{ordinal}"),
+                    text: "needle".into(),
+                    ordinal,
+                    metadata: JsonValue::object(),
+                    source_span: None,
+                })
+                .collect();
+            notes
+                .insert_document(DocumentInput {
+                    external_id: name.into(),
+                    title: None,
+                    source_uri: None,
+                    metadata: JsonValue::object(),
+                    chunks,
+                })
+                .unwrap();
+        }
+        let check_counts = |owner: &Database| {
+            let report = owner
+                .check(CheckOptions {
+                    verify_indexes: true,
+                })
+                .unwrap();
+            assert_eq!(report.index_check, "ok");
+            assert_eq!(report.live_documents, 2);
+            assert_eq!(report.index_suffix.unwrap().live_document_count, 1);
+            let col = owner.collection("notes").unwrap();
+            for name in ["empty", "full"] {
+                assert_eq!(
+                    col.get_document_by_external_id(name).unwrap().external_id,
+                    name
+                );
+            }
+        };
+        check_counts(&db);
+        // The writer returns its own directory report before any rescan.
+        let written = db
+            .lock()
+            .unwrap()
+            .refresh_index_checkpoint(&db.json_context())
+            .unwrap()
+            .unwrap();
+        assert_eq!(written.live_document_count, 1);
+        db.rebuild_index(None).unwrap();
+        check_counts(&db);
+        drop(notes);
+        db.close().unwrap();
+        let reader = Database::open_read_only(&path).unwrap();
+        check_counts(&reader);
+        reader.close().unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn rebuild_index_rewrites_corrupt_suffix() {
         let path = temp_path("rebuild-index-corrupt-suffix");
         let db = Database::create(&path, DatabaseConfig::default()).unwrap();
@@ -18717,6 +18863,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rebuild_index_failure_clears_persistent_index_state() {
         let path = temp_path("rebuild-index-failure-clears-state");
@@ -18735,7 +18882,7 @@ mod tests {
         assert!(!stats_before.rebuild_needed);
         assert!(stats_before.last_index_commit_id.is_some());
 
-        fail_next_index_checkpoint_refresh(&db);
+        crate::maintenance_faults::fail_next(crate::maintenance_faults::Stage::WriteCheckpoint);
         let err = db.rebuild_index(Some("notes")).unwrap_err();
         assert_eq!(err.code(), ErrorCode::IoError);
         let stats_after = db.index_stats().unwrap();

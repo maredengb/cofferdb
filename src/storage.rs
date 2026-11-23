@@ -121,10 +121,6 @@ const VECTOR_INDEX_KIND_EXACT_F32: u16 = 2;
 const INDEX_SEGMENT_SCHEMA_VERSION: u16 = 1;
 const TEXT_SEGMENT_SCHEMA_VERSION: u16 = 2;
 const DEFAULT_EN_TOKENIZER_ID: u16 = 1;
-// Limit the payload length independently of the header, extent table and trailer.
-// It comes from the file and is checked before the reader uses the declared range
-// for index traversal.
-const MAX_INDEX_CHECKPOINT_PAYLOAD_LEN: u64 = 512 * 1024 * 1024;
 
 // Main-log record type numbers appear on disk. The payload decoder uses the type
 // from the record header, and the commit validator also includes binary data-frame
@@ -413,7 +409,7 @@ pub struct IndexCheckpointMetadata {
     pub coverage_hash: u32,
     /// Number of live collections included in the covered catalog.
     pub collection_count: usize,
-    /// Visible document count at the covered commit.
+    /// Distinct live documents represented by at least one chunk in the text segments.
     pub live_document_count: usize,
     /// Visible chunk count at the covered commit, including chunks with no
     /// embedding.
@@ -539,7 +535,7 @@ pub struct IndexSuffixReport {
     pub coverage_hash: u32,
     /// Number of collections recorded in the checkpoint's coverage metadata.
     pub collection_count: usize,
-    /// Number of visible documents covered by the checkpoint.
+    /// Number of distinct documents represented by at least one chunk in the text segments.
     pub live_document_count: usize,
     /// Number of visible chunks covered by the checkpoint.
     pub live_chunk_count: usize,
@@ -1307,34 +1303,42 @@ impl Storage {
         // Reserve the directory before disturbing the old suffix. Once truncation
         // starts, errors must tell the caller the index may need rebuilding; the
         // main-log commit ends at critical_end_offset and is outside this rewrite.
-        let directory = checkpoint_writer::reserve_directory(checkpoint, context)?;
-        let phase_error = |err: Error| {
-            err.with_detail("effect", "index_may_need_rebuild")
-                .with_detail("stage", "write_checkpoint")
-        };
-        // Once the old suffix is shortened, an error in segment iteration, encoding
-        // or persistence can leave this commit with a missing or partial index.
-        // Mark errors in that phase as requiring a possible rebuild. The main
-        // stream ends immediately before those bytes.
-        let (payload_len, vectors) = (|| -> Result<_> {
-            context.maintenance.update(|state| state.writing_index());
-            if self.file.metadata()?.len() > self.critical_end_offset {
-                self.file.set_len(self.critical_end_offset)?;
-            }
+        let boundary = self.critical_end_offset;
+        let directory = checkpoint_writer::reserve_directory(checkpoint, boundary, context)?;
+        let file_len = self.file.metadata()?.len();
+        if file_len < boundary {
+            return Err(Error::new(
+                ErrorCode::FileFormatError,
+                "checkpoint boundary exceeds the primary file length",
+            ));
+        }
+        #[cfg(all(test, unix))]
+        crate::maintenance_faults::check(crate::maintenance_faults::Stage::BeforeCheckpoint)?;
+        context.maintenance.update(|state| state.writing_index());
+        if file_len > boundary {
+            self.file.set_len(boundary).map_err(|e| {
+                Error::from(e)
+                    .maintenance_phase("truncate_previous_checkpoint", "index_may_need_rebuild")
+            })?;
+        }
+        let write = (|| {
             #[cfg(all(feature = "native-test-support", unix))]
             crate::maintenance_probe::pause("write_checkpoint")?;
-            // The directory reservation follows the output writer even if optional
-            // write buffering is disabled. Directory entries are required to locate
-            // every emitted segment and finalize the suffix.
-            let (payload_len, vectors) = checkpoint_writer::write_checkpoint_segments_in(
+            checkpoint_writer::write_checkpoint_segments_in(
                 &mut self.file,
                 checkpoint,
                 segments,
-                self.critical_end_offset,
                 completed,
                 directory,
                 allow_optional_memory,
-            )?;
+            )
+        })();
+        // Only the bound descriptor under this content lock can be shortened, and
+        // only before a complete trailer was accepted. Never extend a short file
+        // to the saved boundary. Preserve the first failure if cleanup also fails.
+        let (payload_len, vectors) = write
+            .map_err(|error| clean_partial_checkpoint(&self.file, boundary, durability, error))?;
+        (|| -> Result<()> {
             // Flush the completed suffix before honoring the requested durability.
             // Commit durability adds a data sync. If that sync fails the bytes may
             // already be present, and the durability detail records what the writer
@@ -1347,18 +1351,21 @@ impl Storage {
                     .maintenance
                     .update(|state| state.syncing_index(true));
                 #[cfg(all(feature = "native-test-support", unix))]
-                crate::maintenance_probe::pause("sync_checkpoint")
-                    .map_err(|err| err.with_detail("durability", "unknown"))?;
-                self.file
-                    .sync_data()
-                    .map_err(|e| Error::from(e).with_detail("durability", "unknown"))?;
+                crate::maintenance_probe::pause("sync_checkpoint")?;
+                #[cfg(all(test, unix))]
+                crate::maintenance_faults::check(crate::maintenance_faults::Stage::SyncCheckpoint)?;
+                self.file.sync_data()?;
                 context
                     .maintenance
                     .update(|state| state.syncing_index(false));
             }
-            Ok((payload_len, vectors))
+            Ok(())
         })()
-        .map_err(phase_error)?;
+        .map_err(|error| {
+            error
+                .maintenance_phase("sync_checkpoint", "index_may_need_rebuild")
+                .with_detail("durability", "unknown")
+        })?;
         // A completed suffix can consist solely of its metadata record. Report it
         // distinctly so a reader can distinguish checkpoint coverage information
         // from persisted index segments that a search can actually open.
@@ -1972,6 +1979,10 @@ pub(crate) fn scan_check_view(
     mut visit: impl FnMut(CommittedRecord, &mut RecordReservation) -> Result<()>,
 ) -> Result<ScanReport> {
     let view = try_read_view(path, bound, context)?;
+    #[cfg(all(test, unix))]
+    let view = view.filter(|_| {
+        !crate::maintenance_faults::take(crate::maintenance_faults::Stage::VerifyViewUnavailable)
+    });
     let (mut file, _lock) = view.ok_or_else(|| {
         Error::new(
             ErrorCode::RecoveryError,
@@ -2595,7 +2606,20 @@ fn scan_binary_file(
                 report.last_valid_commit,
                 report.last_valid_commit_sequence_no,
                 (index_options, context),
-            )?;
+            )
+            .map_err(|error| {
+                // Reaching this boundary proves the committed frames through the
+                // named sequence. An interrupted index inspection cannot certify
+                // the remaining bytes or authorize truncation.
+                error
+                    .with_detail("completed_scope", "committed_main_prefix")
+                    .with_detail("uncompleted_scope", "index")
+                    .with_detail("critical_end_offset", report.critical_end_offset)
+                    .with_detail(
+                        "last_valid_commit_sequence_no",
+                        report.last_valid_commit_sequence_no,
+                    )
+            })?;
             match parsed {
                 // All mandatory per-record, referenced-segment and completion
                 // checks have passed. The aggregate payload CRC can still disagree,
@@ -5128,6 +5152,52 @@ fn checked_segment_record_count(checkpoint: &IndexCheckpointMetadata) -> Result<
     })
 }
 
+// The caller still holds the content write lock and has not published a complete
+// trailer. A secondary error describes the last cleanup phase alongside the
+// original error that stopped the write.
+fn clean_partial_checkpoint(
+    file: &ManagedFile,
+    boundary: u64,
+    durability: Durability,
+    error: Error,
+) -> Error {
+    let error = error.maintenance_phase("write_checkpoint", "index_may_need_rebuild");
+    let truncate = (|| -> std::io::Result<()> {
+        #[cfg(all(test, unix))]
+        crate::maintenance_faults::check(crate::maintenance_faults::Stage::CleanCheckpoint)?;
+        if file.metadata()?.len() < boundary {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "checkpoint cleanup boundary exceeds file length",
+            ));
+        }
+        file.set_len(boundary)
+    })();
+    if let Err(cause) = truncate {
+        return error
+            .with_detail("cleanup_stage", "truncate_checkpoint")
+            .with_detail("cleanup_error", cause)
+            .with_detail("durability", "unknown");
+    }
+    if durability == Durability::Commit {
+        let sync = (|| -> std::io::Result<()> {
+            #[cfg(all(test, unix))]
+            crate::maintenance_faults::check(
+                crate::maintenance_faults::Stage::SyncCheckpointCleanup,
+            )?;
+            file.sync_data()
+        })();
+        if let Err(cause) = sync {
+            return error
+                .with_detail("cleanup_stage", "sync_checkpoint_cleanup")
+                .with_detail("cleanup_error", cause)
+                .with_detail("cleanup_effect", "suffix_truncated")
+                .with_detail("durability", "unknown");
+        }
+    }
+    error
+}
+
 // Layout arithmetic is performed in the u64 coordinate system used for file
 // positions. An address-space or allocation check can follow when a caller really
 // needs a usize. Neither check replaces detecting an overflow in the wire range.
@@ -5549,17 +5619,21 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     // Use the caller's observed file length for the outer boundary. A start offset
     // beyond that length has no suffix at all. Treat it as a bad coordinate before
     // testing for a partially written checkpoint.
-    let suffix_len = match file_len.checked_sub(offset) {
-        Some(value) => value,
-        None => {
-            return Ok(Err(index_suffix_diagnostic(
-                "index_checkpoint_length_overflow",
-                "ignored index checkpoint whose offset is beyond file length",
-                offset,
-            )));
-        }
+    if offset > file_len {
+        return Ok(Err(index_suffix_diagnostic(
+            "index_checkpoint_length_overflow",
+            "ignored index checkpoint whose offset is beyond file length",
+            offset,
+        )));
+    }
+    let Some(expected_end) = offset.checked_add(expected_len) else {
+        return Ok(Err(index_suffix_diagnostic(
+            "index_checkpoint_length_overflow",
+            "ignored index checkpoint with overflowing absolute file boundary",
+            offset,
+        )));
     };
-    if expected_len > suffix_len {
+    if expected_end > file_len {
         return Ok(Err(index_suffix_diagnostic(
             "index_checkpoint_incomplete",
             "ignored incomplete index checkpoint suffix after last valid commit",
@@ -5569,11 +5643,11 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     // Point to the first extra byte when the declared footprint is shorter than the
     // actual suffix. Putting a new trailer at the end cannot reconcile unrelated
     // bytes with the header's claimed length.
-    if expected_len < suffix_len {
+    if expected_end < file_len {
         return Ok(Err(index_suffix_diagnostic(
             "index_suffix_trailing_bytes",
             "ignored index checkpoint with trailing bytes after complete marker",
-            checked_diagnostic_offset(offset, expected_len),
+            expected_end,
         )));
     }
     // Check the row count from the header against the table length independently of
@@ -5590,17 +5664,23 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
                 )));
             }
         };
-    // The payload format limit applies even when the query can read large segments
-    // lazily. The separate runtime load budget below controls whether an otherwise
-    // supported checkpoint can be inspected in the requested mode.
-    if extent_table_len != expected_extent_table_len
-        || payload_len > MAX_INDEX_CHECKPOINT_PAYLOAD_LEN
-    {
+    if extent_table_len != expected_extent_table_len {
         return Ok(Err(index_suffix_diagnostic(
             "unsupported_index_checkpoint",
-            "ignored unsupported index checkpoint payload or extent table size",
+            "ignored index checkpoint with inconsistent extent table size",
             offset,
         )));
+    }
+    // The contiguous table must fit a single allocation. Check that host limit
+    // before traversing the payload. The payload itself is streamed using u64.
+    let table_len = index_host_size(extent_table_len, isize::MAX as u64, "extent table bytes")?;
+    if options.mode == IndexReadMode::LazyIndexes {
+        // A full v1 directory retains one native entry per row except its metadata.
+        index_host_size(
+            u128::from(index_extent_count - 1) * std::mem::size_of::<IndexExtentEntry>() as u128,
+            isize::MAX as u64,
+            "segment directory bytes",
+        )?;
     }
 
     // Summary scans apply the configured load limit to the declared payload and
@@ -5613,19 +5693,18 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         IndexReadMode::LazyVectors => 0,
         _ => payload_len,
     };
-    // A scan deferred here has only examined the header and geometry. Its
-    // diagnostic identifies a configured load limit. It offers no conclusion about
-    // the contents of the segment bytes that were skipped.
+    // A mode-specific load refusal interrupts inspection after the header. Return
+    // it through the error channel so it cannot become a repairable finding.
+    let retained_bytes = u128::from(retained_payload_len) + u128::from(extent_table_len);
     if options.mode != IndexReadMode::LazyIndexes
-        && retained_payload_len
-            .checked_add(extent_table_len)
-            .map_or(true, |bytes| bytes > options.budget_bytes)
+        && retained_bytes > u128::from(options.budget_bytes)
     {
-        return Ok(Err(index_suffix_diagnostic(
-            "index_checkpoint_load_budget_exceeded",
-            "checkpoint decoding deferred because it exceeds the runtime load budget",
-            offset,
-        )));
+        return Err(Error::resource_exhausted(
+            "checkpoint_load_bytes",
+            "index_read",
+            options.budget_bytes,
+            retained_bytes,
+        ));
     }
     // The writer publishes the completion trailer last. Check it before the
     // expensive payload pass. Subsequent seeks change the cursor, so the final
@@ -5645,16 +5724,6 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     // Keep the exact table bytes available. The metadata digest covers the encoded
     // extent rows in their original order, while lookups below need their decoded
     // fields.
-    let table_len = match usize::try_from(extent_table_len) {
-        Ok(value) => value,
-        Err(_) => {
-            return Ok(Err(index_suffix_diagnostic(
-                "index_checkpoint_length_overflow",
-                "ignored index checkpoint whose extent table exceeds address space",
-                offset,
-            )));
-        }
-    };
     let record_count = table_len / INDEX_EXTENT_ENTRY_LEN;
     let mut extent_table =
         match crate::json::ReservedVec::zeroed(table_len, context, "operation_scratch") {
@@ -5701,15 +5770,16 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
             .chunks_exact(INDEX_EXTENT_ENTRY_LEN)
             .map(parse_extent_entry)
             .filter(|extent| extent.record_type != INDEX_VECTOR_SEGMENT)
-            .try_fold(extent_table_len, |total, extent| {
-                total.checked_add(extent.length)
+            .fold(u128::from(extent_table_len), |total, extent| {
+                total + u128::from(extent.length)
             });
-        if retained_bytes.map_or(true, |bytes| bytes > options.budget_bytes) {
-            return Ok(Err(index_suffix_diagnostic(
-                "index_checkpoint_load_budget_exceeded",
-                "checkpoint text and directory decoding exceeds the runtime load budget",
-                offset,
-            )));
+        if retained_bytes > u128::from(options.budget_bytes) {
+            return Err(Error::resource_exhausted(
+                "checkpoint_load_bytes",
+                "index_read",
+                options.budget_bytes,
+                retained_bytes,
+            ));
         }
     }
     // Index records are named by ID in commit metadata. Build a unique directory
@@ -5724,7 +5794,7 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
         let extent = parse_extent_entry(entry);
         let index_record = match parse_index_record_from_extent(
             reader,
-            payload_len as usize,
+            payload_len,
             &extent,
             checkpoint_generation,
             offset,
@@ -5790,7 +5860,7 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
     // rejects its length.
     let metadata = match with_checked_index_payload(reader, index_record, context, |source| {
         let mut payload = [0u8; INDEX_COMMIT_METADATA_LEN];
-        let len = (index_record.payload.len as usize).min(payload.len());
+        let len = index_record.payload.len.min(payload.len() as u64) as usize;
         source.read_exact(&mut payload[..len])?;
         // Pass a non-canonical length without allocating an untrusted metadata payload.
         let payload = if index_record.payload.len == payload.len() as u64 {
@@ -5957,7 +6027,7 @@ fn read_index_checkpoint_suffix_in<R: Read + Seek>(
                 text_segments: segment_summary.text_segments,
                 vectors: IndexSegmentSource::new(
                     offset,
-                    payload_len as usize,
+                    payload_len,
                     checkpoint_generation,
                     covered_last_commit_sequence_no,
                     directory,
@@ -6251,15 +6321,15 @@ fn validate_record_segment_checksum(
 }
 
 // Translate from the extent table's suffix-relative coordinates to a file position
-// and a host-addressable length. Bound the record within the payload before
+// and a 64-bit byte length. Bound the record within the payload before
 // seeking, since a file position inside the table itself could otherwise look
 // readable.
 fn index_extent_range(
-    checkpoint_payload_len: usize,
+    checkpoint_payload_len: u64,
     extent: &IndexExtentEntry,
     checkpoint_generation: u64,
     checkpoint_start_offset: u64,
-) -> std::result::Result<(u64, usize), IndexReadError> {
+) -> std::result::Result<(u64, u64), IndexReadError> {
     // The diagnostic can always point to the checkpoint start. Compute the absolute
     // header address with checked arithmetic before using the file-supplied
     // relative offset as a more precise location.
@@ -6285,24 +6355,8 @@ fn index_extent_range(
     }
     // After ruling out offsets inside the header, measure the range from the
     // beginning of the payload. This is the origin of checkpoint_payload_len.
-    let start_u64 = extent.suffix_relative_offset - INDEX_CHECKPOINT_HEADER_LEN as u64;
-    // The file stores offsets and lengths as u64. This validator uses a host-sized
-    // payload bound. Convert the two operands separately so an unaddressable start
-    // or length cannot be narrowed into a small valid range.
-    let start = usize::try_from(start_u64).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_record_length_overflow",
-            "ignored index checkpoint with index record start offset that does not fit usize",
-            extent_offset,
-        )
-    })?;
-    let length = usize::try_from(extent.length).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_record_length_overflow",
-            "ignored index checkpoint with index record length that does not fit usize",
-            extent_offset,
-        )
-    })?;
+    let start = extent.suffix_relative_offset - INDEX_CHECKPOINT_HEADER_LEN as u64;
+    let length = extent.length;
     // An end that wraps would pass an ordinary comparison against the payload
     // length. Keep arithmetic overflow distinct from a representable range that
     // extends into the directory.
@@ -6318,7 +6372,7 @@ fn index_extent_range(
     // directory starts. At the other boundary, reserve room for a full framed
     // header. Segment-specific minimum body sizes are checked after the type is
     // known.
-    if end > checkpoint_payload_len || length < INDEX_RECORD_HEADER_LEN {
+    if end > checkpoint_payload_len || length < INDEX_RECORD_HEADER_LEN as u64 {
         return Err(index_suffix_diagnostic(
             "index_extent_table_mismatch",
             "ignored index checkpoint with extent outside checkpoint payload",
@@ -6326,7 +6380,7 @@ fn index_extent_range(
         )
         .into());
     }
-    // The payload-relative end can fit in usize while the corresponding absolute
+    // The payload-relative end can fit in u64 while the corresponding absolute
     // file position overflows u64. Any later seek or checksum range needs both sums
     // to be representable.
     checked_index_add(
@@ -6344,7 +6398,7 @@ fn index_extent_range(
 // description of those same bytes.
 fn parse_index_record_from_extent<R: Read + Seek>(
     reader: &mut R,
-    checkpoint_payload_len: usize,
+    checkpoint_payload_len: u64,
     extent: &IndexExtentEntry,
     checkpoint_generation: u64,
     checkpoint_start_offset: u64,
@@ -6360,7 +6414,7 @@ fn parse_index_record_from_extent<R: Read + Seek>(
     reader.read_exact(&mut record)?;
     let mut record_crc = Crc32c::default();
     record_crc.update(&record);
-    let actual_payload_len = length - INDEX_RECORD_HEADER_LEN;
+    let actual_payload_len = length - INDEX_RECORD_HEADER_LEN as u64;
     let mut payload_crc = Crc32c::default();
     // Reserve the last four bytes for a separate comparison. The segment CRC covers
     // the body before that word. Both the payload CRC and the whole-record CRC
@@ -6368,18 +6422,18 @@ fn parse_index_record_from_extent<R: Read + Seek>(
     let mut remaining = actual_payload_len.saturating_sub(4);
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
-        let count = remaining.min(buffer.len());
+        let count = remaining.min(buffer.len() as u64) as usize;
         reader.read_exact(&mut buffer[..count])?;
         record_crc.update(&buffer[..count]);
         payload_crc.update(&buffer[..count]);
-        remaining -= count;
+        remaining -= count as u64;
     }
     let segment_crc = payload_crc.finish();
     // Read even a short tail into the outer checksums. A payload too small for a
     // segment footer then has a defined CRC and fails the segment check when its
     // type is examined.
     let mut tail = [0u8; 4];
-    let tail = &mut tail[..actual_payload_len.min(4)];
+    let tail = &mut tail[..actual_payload_len.min(4) as usize];
     reader.read_exact(tail)?;
     record_crc.update(tail);
     payload_crc.update(tail);
@@ -6427,7 +6481,7 @@ fn parse_index_record_header(
     extent: &IndexExtentEntry,
     checkpoint_generation: u64,
     extent_offset: u64,
-    length: usize,
+    length: u64,
 ) -> std::result::Result<ParsedIndexRecord, IndexReadError> {
     // The remembered extent can remain in bounds after its bytes have been
     // replaced. Verify that its first bytes still identify the expected framing
@@ -6446,25 +6500,13 @@ fn parse_index_record_header(
     // The length in this header counts the header itself. Keep it independent of
     // the extent's length and the payload's length. Agreement of all three is
     // needed to locate the next byte safely.
-    let record_len = usize::try_from(read_u64(&record[10..18])).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_record_length_overflow",
-            "ignored index checkpoint with index record length that does not fit usize",
-            extent_offset,
-        )
-    })?;
+    let record_len = read_u64(&record[10..18]);
     // Opening another generation can put a correctly encoded header at this
     // address. Generation, record ID and type together bind the bytes to the
     // directory entry used for this read.
     let generation = read_u64(&record[18..26]);
     let index_record_id = read_u64(&record[26..34]);
-    let payload_len = usize::try_from(read_u64(&record[34..42])).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_record_length_overflow",
-            "ignored index checkpoint with index record payload length that does not fit usize",
-            extent_offset,
-        )
-    })?;
+    let payload_len = read_u64(&record[34..42]);
     // The header CRC covers the payload CRC and the framing fields that locate it.
     // Its own trailing word is outside the protected prefix.
     let payload_checksum = read_u32(&record[42..46]);
@@ -6472,7 +6514,7 @@ fn parse_index_record_header(
     // Use the supported header width to compute the total. A file-supplied header
     // length cannot move the payload start past unknown extension data in this
     // version.
-    let expected_record_len = INDEX_RECORD_HEADER_LEN
+    let expected_record_len = (INDEX_RECORD_HEADER_LEN as u64)
         .checked_add(payload_len)
         .ok_or_else(|| {
             index_suffix_diagnostic(
@@ -6513,7 +6555,7 @@ fn parse_index_record_header(
         // header and payload inside it.
         payload: PayloadRef {
             offset: extent_offset + INDEX_RECORD_HEADER_LEN as u64,
-            len: payload_len as u64,
+            len: payload_len,
             checksum: payload_checksum as u64,
         },
         // A valid header does not yet vouch for the segment footer. The caller
@@ -6650,7 +6692,7 @@ fn validate_index_segments<R: Read + Seek>(
                     decode_text_index_segment_with(
                         &mut IndexPayloadReader::new(
                             source,
-                            record.payload.len as usize - 4,
+                            record.payload.len - 4,
                             checkpoint_start_offset,
                         ),
                         expected_commit_sequence_no,
@@ -6701,7 +6743,12 @@ fn validate_index_segments<R: Read + Seek>(
                 )?;
                 text_collections.insert(segment.collection_number);
                 summary.text_segment_count += 1;
-                summary.live_chunk_count += segment.chunk_count;
+                summary.live_chunk_count = index_host_size(
+                    summary.live_chunk_count as u128 + segment.chunk_count as u128,
+                    usize::MAX as u64,
+                    "checkpoint live chunk count",
+                )
+                .map_err(IndexReadError::Resource)?;
                 // Several chunks can belong to the same document. The live document
                 // total counts distinct document IDs across the referenced text
                 // segments.
@@ -6734,7 +6781,7 @@ fn validate_index_segments<R: Read + Seek>(
                     decode_vector_index_segment_in(
                         &mut IndexPayloadReader::new(
                             source,
-                            record.payload.len as usize - 4,
+                            record.payload.len - 4,
                             checkpoint_start_offset,
                         ),
                         expected_commit_sequence_no,
@@ -6773,7 +6820,12 @@ fn validate_index_segments<R: Read + Seek>(
                 // directory contract without adding to the embedding total.
                 vector_collections.insert(segment.collection_number);
                 summary.vector_segment_count += 1;
-                summary.live_embedding_count += segment.vector_count;
+                summary.live_embedding_count = index_host_size(
+                    summary.live_embedding_count as u128 + segment.vector_count as u128,
+                    usize::MAX as u64,
+                    "checkpoint live embedding count",
+                )
+                .map_err(IndexReadError::Resource)?;
                 #[cfg(test)]
                 if mode == IndexReadMode::Full {
                     summary.vector_segments.push(segment.payload.unwrap());
@@ -6852,7 +6904,7 @@ fn parse_text_index_segment_payload(
     decode_text_index_segment(
         &mut IndexPayloadReader::new(
             &payload[..payload.len() - 4],
-            payload.len() - 4,
+            payload.len() as u64 - 4,
             checkpoint_start_offset,
         ),
         expected_commit_sequence_no,
@@ -7025,6 +7077,12 @@ fn decode_text_index_segment_with<R: Read>(
     // Each fixed-width chunk row has three u64 fields. Bound its count by the room
     // left in the segment before using it to size either ID vector.
     let chunk_count = reader.read_count("text segment chunk count", 24)?;
+    index_host_size(
+        chunk_count as u128 * 8,
+        isize::MAX as u64,
+        "text segment ID array bytes",
+    )
+    .map_err(IndexReadError::Resource)?;
     mode.emit(TextSegmentEntry::Header {
         chunks: chunk_count,
     });
@@ -7050,8 +7108,12 @@ fn decode_text_index_segment_with<R: Read>(
     for _ in 0..chunk_count {
         let chunk_id = reader.read_u64("text segment chunk id")?;
         let document_id = reader.read_u64("text segment document id")?;
-        let token_count = usize::try_from(reader.read_u64("text segment token count")?)
-            .map_err(|_| reader.invalid("text segment token count"))?;
+        let token_count = index_host_size(
+            reader.read_u64("text segment token count")?,
+            usize::MAX as u64,
+            "text segment token count",
+        )
+        .map_err(IndexReadError::Resource)?;
         if previous_chunk_id >= Some(chunk_id) {
             return Err(index_suffix_diagnostic(
                 "index_segment_non_canonical",
@@ -7169,8 +7231,12 @@ fn decode_text_index_segment_with<R: Read>(
                 .into());
             }
             previous_posting_chunk_id = Some(posting_chunk_id);
-            let term_frequency = usize::try_from(term_frequency)
-                .map_err(|_| reader.invalid("text segment term frequency"))?;
+            let term_frequency = index_host_size(
+                term_frequency,
+                usize::MAX as u64,
+                "text segment term frequency",
+            )
+            .map_err(IndexReadError::Resource)?;
             mode.emit(TextSegmentEntry::Posting {
                 term: term_text,
                 chunk: posting_chunk_id,
@@ -7253,9 +7319,10 @@ impl TextTermOrder {
     ) -> std::result::Result<(), IndexReadError> {
         let field = "text segment term";
         let len = reader.read_u32(field)? as usize;
-        if len > reader.remaining {
+        if len as u64 > reader.remaining {
             return Err(reader.invalid(field).into());
         }
+        index_host_size(len as u64, isize::MAX as u64, field).map_err(IndexReadError::Resource)?;
         // Growing the previous key can require an allocation before the old storage
         // is freed. Admit that peak first. If allocation fails, keep only the
         // charge for the buffer that survived.
@@ -7380,7 +7447,7 @@ fn parse_vector_index_segment_payload(
     decode_vector_index_segment(
         &mut IndexPayloadReader::new(
             &payload[..payload.len() - 4],
-            payload.len() - 4,
+            payload.len() as u64 - 4,
             checkpoint_start_offset,
         ),
         expected_commit_sequence_no,
@@ -7479,17 +7546,23 @@ fn decode_vector_index_segment_in<R: Read>(
     }
     // Each row has two u64 IDs and dim little-endian f32 coordinates. Check the
     // byte width before using it to bound the declared row count.
-    let entry_len = dim
-        .checked_mul(4)
-        .and_then(|len| len.checked_add(16))
-        .ok_or_else(|| reader.invalid("vector segment dimension"))?;
+    let entry_len = dim as u64 * 4 + 16;
     // Read the count against the available body bytes before allocating or starting
     // the loop. A zero count still leaves a header to validate and must leave zero
     // unconsumed body bytes at the end.
     let vector_count = reader.read_count("vector segment vector count", entry_len)?;
     let mut previous_chunk_id = None;
     let mut vectors = if matches!(&mode, VectorDecodeMode::Retain) {
-        Vec::with_capacity(vector_count)
+        index_host_size(
+            vector_count as u128 * std::mem::size_of::<VectorIndexEntry>() as u128,
+            isize::MAX as u64,
+            "retained vector row array bytes",
+        )
+        .map_err(IndexReadError::Resource)?;
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(vector_count)
+            .map_err(std::io::Error::other)?;
+        rows
     } else {
         Vec::new()
     };
@@ -7498,6 +7571,14 @@ fn decode_vector_index_segment_in<R: Read>(
     // rows than would fit in a retained cache entry.
     let mut scratch_work = None;
     let mut scratch = Vec::new();
+    if vector_count != 0 && !matches!(mode, VectorDecodeMode::Summary) {
+        index_host_size(
+            dim as u128 * 4,
+            isize::MAX as u64,
+            "vector coordinate array bytes",
+        )
+        .map_err(IndexReadError::Resource)?;
+    }
     for _ in 0..vector_count {
         let chunk_id = reader.read_u64("vector segment chunk id")?;
         let embedding_id = reader.read_u64("vector segment embedding id")?;
@@ -7653,6 +7734,25 @@ enum IndexStringMode<'a> {
     Match(Option<&'a str>),
 }
 
+// A format-consistent count can exceed a host integer or allocation limit.
+// Report that boundary as a resource error so repair cannot treat it as damage.
+fn index_host_size(value: impl Into<u128>, limit: u64, field: &'static str) -> Result<usize> {
+    let value = value.into();
+    usize::try_from(value)
+        .ok()
+        .filter(|_| value <= u128::from(limit))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::ResourceExhausted,
+                "checkpoint exceeds this platform's addressable range",
+            )
+            .with_detail("reason", "index_platform_limit")
+            .with_detail("field", field)
+            .with_detail("value", value)
+            .with_detail("limit", limit)
+        })
+}
+
 // Field reader for the body of a single segment. The caller excludes the trailing
 // CRC from the byte allowance so a bad nested length cannot borrow its checksum
 // bytes.
@@ -7661,14 +7761,14 @@ struct IndexPayloadReader<R> {
     source: R,
     // Number of body bytes still available to the typed decoder. A successful
     // finish consumes all of them.
-    remaining: usize,
+    remaining: u64,
     // Absolute checkpoint start used to give format diagnostics a stable location
     // even when the underlying stream has no seek position.
     checkpoint_start_offset: u64,
 }
 
 impl<R: Read> IndexPayloadReader<R> {
-    fn new(source: R, remaining: usize, checkpoint_start_offset: u64) -> Self {
+    fn new(source: R, remaining: u64, checkpoint_start_offset: u64) -> Self {
         Self {
             source,
             remaining,
@@ -7684,7 +7784,7 @@ impl<R: Read> IndexPayloadReader<R> {
         output: &mut [u8],
         field: &'static str,
     ) -> std::result::Result<(), IndexReadError> {
-        if output.len() > self.remaining {
+        if output.len() as u64 > self.remaining {
             return Err(self.invalid(field).into());
         }
         for part in output.chunks_mut(64 * 1024) {
@@ -7693,7 +7793,7 @@ impl<R: Read> IndexPayloadReader<R> {
         // Advance the logical range only after the complete output slice has been
         // filled. If a read error follows a partial transfer the underlying cursor
         // may have advanced, and the error path abandons this decode.
-        self.remaining -= output.len();
+        self.remaining -= output.len() as u64;
         Ok(())
     }
 
@@ -7728,16 +7828,16 @@ impl<R: Read> IndexPayloadReader<R> {
     fn read_count(
         &mut self,
         field: &'static str,
-        min_entry_len: usize,
+        min_entry_len: u64,
     ) -> std::result::Result<usize, IndexReadError> {
-        let count = usize::try_from(self.read_u64(field)?).map_err(|_| self.invalid(field))?;
+        let count = self.read_u64(field)?;
         // Divide the available bytes by a nonzero minimum entry size supplied by
         // the decoder. A multiplication using an untrusted count could overflow and
         // make a count that cannot fit look small.
         if count > self.remaining / min_entry_len {
             return Err(self.invalid(field).into());
         }
-        Ok(count)
+        index_host_size(count, usize::MAX as u64, field).map_err(IndexReadError::Resource)
     }
 
     fn read_f32(&mut self, field: &'static str) -> std::result::Result<f32, IndexReadError> {
@@ -7761,11 +7861,7 @@ impl<R: Read> IndexPayloadReader<R> {
         // Check the entire row width before reserving a vector or consuming any
         // value. A truncated dimension cannot allocate beyond, or read across, the
         // segment body's allowed range.
-        if dim
-            .checked_mul(4)
-            .filter(|bytes| *bytes <= self.remaining)
-            .is_none()
-        {
+        if dim as u64 > self.remaining / 4 {
             return Err(self.invalid("vector segment value").into());
         }
         // Only materialization owns a result vector. Validation traverses the same
@@ -7808,9 +7904,10 @@ impl<R: Read> IndexPayloadReader<R> {
     // string.
     fn read_string(&mut self, field: &'static str) -> std::result::Result<String, IndexReadError> {
         let len = self.read_u32(field)? as usize;
-        if len > self.remaining {
+        if len as u64 > self.remaining {
             return Err(self.invalid(field).into());
         }
+        index_host_size(len as u64, isize::MAX as u64, field).map_err(IndexReadError::Resource)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(len)
@@ -7861,7 +7958,7 @@ impl<R: Read> IndexPayloadReader<R> {
         expected: Option<&str>,
     ) -> std::result::Result<(), IndexReadError> {
         let len = self.read_u32(field)? as usize;
-        if len > self.remaining || expected.is_some_and(|value| value.len() != len) {
+        if len as u64 > self.remaining || expected.is_some_and(|value| value.len() != len) {
             return Err(self.invalid(field).into());
         }
         let mut bytes = [0; 4096];
@@ -7979,38 +8076,11 @@ fn parse_index_commit_metadata_payload(
                 + INDEX_RECORD_HEADER_LEN as u64,
         ));
     }
-    // The outer header locates the extent table relative to the checkpoint. This
-    // inner offset is instead relative to the first byte of that table. Convert to
-    // a native slice range only after the identity and count fields have checked
-    // out.
-    let extent_start = usize::try_from(index_extent_table_offset).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_commit_metadata_invalid",
-            "ignored index checkpoint with IndexCommitMetadata extent offset that does not fit usize",
-            checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
-        )
-    })?;
-    let extent_len = usize::try_from(index_extent_table_length).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_commit_metadata_invalid",
-            "ignored index checkpoint with IndexCommitMetadata extent length that does not fit usize",
-            checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
-        )
-    })?;
-    // Convert the declared row count before computing a native slice size. A count
-    // that fits u64 need not be usable as an entry count on the reading host.
-    let index_extent_count = usize::try_from(index_extent_count).map_err(|_| {
-        index_suffix_diagnostic(
-            "index_commit_metadata_invalid",
-            "index count exceeds address space",
-            checkpoint_start_offset,
-        )
-    })?;
-    // Prove that the range fits the table and holds exactly one packed entry per
-    // reference. The count and byte length arrive independently from disk. Checking
-    // only an in-bounds end would permit a shortened or overlong list.
+    // Prove the inner table geometry in wire units before converting any
+    // coordinate to a slice index. The two counts already agree; their byte
+    // length and endpoint must also agree with the actual resident table.
     let expected_extent_len = index_extent_count
-        .checked_mul(INDEX_EXTENT_ENTRY_LEN)
+        .checked_mul(INDEX_EXTENT_ENTRY_LEN as u64)
         .ok_or_else(|| {
             index_suffix_diagnostic(
                 "index_commit_metadata_invalid",
@@ -8018,27 +8088,23 @@ fn parse_index_commit_metadata_payload(
                 checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
             )
         })?;
-    // A representable row count does not make the range end representable. Check
-    // the table-relative offset plus the claimed length separately before borrowing
-    // from the table.
-    let Some(extent_end) = extent_start.checked_add(extent_len) else {
+    let Some(extent_end) = index_extent_table_offset.checked_add(index_extent_table_length) else {
         return Err(index_suffix_diagnostic(
             "index_commit_metadata_invalid",
             "ignored index checkpoint with overflowing IndexCommitMetadata extent range",
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ));
     };
-    if extent_len != expected_extent_len || extent_end > extent_table.len() {
+    if index_extent_table_length != expected_extent_len || extent_end > extent_table.len() as u64 {
         return Err(index_suffix_diagnostic(
             "index_commit_metadata_invalid",
             "ignored index checkpoint with IndexCommitMetadata extent subrange outside table",
             checkpoint_start_offset + INDEX_CHECKPOINT_HEADER_LEN as u64,
         ));
     }
-    // The metadata identifies a slice of the extent table. Its checksum covers the
-    // encoded entries in that slice, and the following order check prevents a
-    // duplicate record ID from standing in for another segment.
-    let referenced_extent_bytes = &extent_table[extent_start..extent_end];
+    // Both endpoints now fit the table's native slice length.
+    let extent_range = index_extent_table_offset as usize..extent_end as usize;
+    let referenced_extent_bytes = &extent_table[extent_range.clone()];
     // The outer table CRC covers every row, including metadata itself. This
     // checksum covers the particular subrange chosen by the metadata, so a changed
     // reference range cannot rely solely on the outer CRC.
@@ -8083,9 +8149,9 @@ fn parse_index_commit_metadata_payload(
     // and the directory comparison can reread the same original bytes, avoiding a
     // second reference list whose order would also have to be maintained.
     Ok(ParsedIndexCommitMetadata {
-        index_record_count: index_extent_count,
+        index_record_count: referenced_extent_bytes.len() / INDEX_EXTENT_ENTRY_LEN,
         index_checksum,
-        extent_range: extent_start..extent_end,
+        extent_range,
     })
 }
 
@@ -10171,7 +10237,6 @@ mod tests {
         assert_eq!(TEXT_INDEX_KIND_BM25, 1);
         assert_eq!(VECTOR_INDEX_KIND_EXACT_F32, 2);
         assert_eq!(INDEX_SEGMENT_SCHEMA_VERSION, 1);
-        assert_eq!(MAX_INDEX_CHECKPOINT_PAYLOAD_LEN, 512 * 1024 * 1024);
         assert_eq!(COLLECTION_CREATE, 1);
         assert_eq!(COLLECTION_DROP, 2);
         assert_eq!(DOCUMENT_PUT, 3);
@@ -12881,12 +12946,11 @@ mod tests {
             });
             let mut retained = None;
             let context = crate::json::JsonOperationContext::standalone();
-            let directory = reserve_directory(&checkpoint.metadata, &context).unwrap();
+            let directory = reserve_directory(&checkpoint.metadata, 37, &context).unwrap();
             write_checkpoint_segments_in(
                 &mut output,
                 &checkpoint.metadata,
                 producer,
-                37,
                 |segment, len| {
                     assert!(len > INDEX_RECORD_HEADER_LEN as u64);
                     completed.set(completed.get() + 1);
@@ -13274,7 +13338,7 @@ mod tests {
             bytes: &[u8],
             mode: IndexStringMode<'_>,
         ) -> std::result::Result<Option<String>, IndexReadError> {
-            let mut reader = IndexPayloadReader::new(bytes, bytes.len(), 0);
+            let mut reader = IndexPayloadReader::new(bytes, bytes.len() as u64, 0);
             let result = reader.read_optional_string("model", mode)?;
             reader.finish_before_checksum("model")?;
             Ok(result)
@@ -13303,7 +13367,7 @@ mod tests {
                 ));
             }
             for end in [0, 1, 4, 5, 4096, bytes.len() - 1] {
-                let mut reader = IndexPayloadReader::new(&bytes[..end], bytes.len(), 0);
+                let mut reader = IndexPayloadReader::new(&bytes[..end], bytes.len() as u64, 0);
                 assert!(
                     matches!(reader.read_optional_string("model", IndexStringMode::Validate), Err(IndexReadError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
                 );
@@ -13533,7 +13597,7 @@ mod tests {
                 let result = with_checked_index_payload(&mut input, &record, &context, |source| {
                     calls += 1;
                     decode_text_index_segment_in(
-                        &mut IndexPayloadReader::new(source, payload.len() - 4, 0),
+                        &mut IndexPayloadReader::new(source, payload.len() as u64 - 4, 0),
                         11,
                         0,
                         false,
@@ -13813,7 +13877,7 @@ mod tests {
                 checkpoint_generation: seed,
                 extent_record_checksum: checksum32(&record),
             };
-            let payload_len = bytes.len() - base;
+            let payload_len = (bytes.len() - base) as u64;
             let parsed = parse_index_record_from_extent(
                 &mut std::io::Cursor::new(&bytes),
                 payload_len,
@@ -13966,7 +14030,7 @@ mod tests {
                 fail: false,
             };
             let decoded = decode_vector_index_segment(
-                &mut IndexPayloadReader::new(&mut source, body_len, 0),
+                &mut IndexPayloadReader::new(&mut source, body_len as u64, 0),
                 seed as u64,
                 0,
             )
@@ -13982,7 +14046,7 @@ mod tests {
                 fail: false,
             };
             let summary = decode_vector_index_segment_in(
-                &mut IndexPayloadReader::new(&mut source, body_len, 0),
+                &mut IndexPayloadReader::new(&mut source, body_len as u64, 0),
                 seed as u64,
                 0,
                 VectorDecodeMode::Summary,
@@ -14006,7 +14070,7 @@ mod tests {
             for length in [body_len - 1, body_len + 1] {
                 assert!(matches!(
                     decode_vector_index_segment(
-                        &mut IndexPayloadReader::new(payload.as_slice(), length, 0),
+                        &mut IndexPayloadReader::new(payload.as_slice(), length as u64, 0),
                         seed as u64,
                         0
                     ),
@@ -14020,7 +14084,7 @@ mod tests {
                 fail: false,
             };
             assert!(
-                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(&mut truncated, body_len, 0), seed as u64, 0), Err(IndexReadError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(&mut truncated, body_len as u64, 0), seed as u64, 0), Err(IndexReadError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
             );
             let mut failed = Fragmented {
                 bytes: &payload,
@@ -14029,13 +14093,13 @@ mod tests {
                 fail: true,
             };
             assert!(
-                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(&mut failed, body_len, 0), seed as u64, 0), Err(IndexReadError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
+                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(&mut failed, body_len as u64, 0), seed as u64, 0), Err(IndexReadError::Io(error)) if error.kind() == std::io::ErrorKind::Other)
             );
             let mut oversized = payload.clone();
             oversized[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
             assert!(matches!(
                 decode_vector_index_segment(
-                    &mut IndexPayloadReader::new(oversized.as_slice(), body_len, 0),
+                    &mut IndexPayloadReader::new(oversized.as_slice(), body_len as u64, 0),
                     seed as u64,
                     0
                 ),
@@ -14045,12 +14109,12 @@ mod tests {
             let vector_start = body_len - dim * 4;
             nonfinite[vector_start..vector_start + 4].copy_from_slice(&f32::NAN.to_le_bytes());
             assert!(
-                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(nonfinite.as_slice(), body_len, 0), seed as u64, 0), Err(IndexReadError::Invalid(error)) if error.code == "index_segment_non_canonical")
+                matches!(decode_vector_index_segment(&mut IndexPayloadReader::new(nonfinite.as_slice(), body_len as u64, 0), seed as u64, 0), Err(IndexReadError::Invalid(error)) if error.code == "index_segment_non_canonical")
             );
             for invalid in [&oversized, &nonfinite] {
                 assert!(matches!(
                     decode_vector_index_segment_in(
-                        &mut IndexPayloadReader::new(invalid.as_slice(), body_len, 0),
+                        &mut IndexPayloadReader::new(invalid.as_slice(), body_len as u64, 0),
                         seed as u64,
                         0,
                         VectorDecodeMode::Summary,
@@ -14084,7 +14148,7 @@ mod tests {
                 fail: false,
             };
             let decoded = decode_text_index_segment(
-                &mut IndexPayloadReader::new(&mut source, body_len, 0),
+                &mut IndexPayloadReader::new(&mut source, body_len as u64, 0),
                 seed as u64,
                 0,
             )
@@ -14101,7 +14165,7 @@ mod tests {
                 fail: false,
             };
             let summary = decode_text_index_segment_in(
-                &mut IndexPayloadReader::new(&mut source, body_len, 0),
+                &mut IndexPayloadReader::new(&mut source, body_len as u64, 0),
                 seed as u64,
                 0,
                 false,
@@ -14121,7 +14185,7 @@ mod tests {
             };
             assert!(matches!(
                 decode_text_index_segment(
-                    &mut IndexPayloadReader::new(&mut failed, body_len, 0),
+                    &mut IndexPayloadReader::new(&mut failed, body_len as u64, 0),
                     seed as u64,
                     0
                 ),
@@ -14150,7 +14214,8 @@ mod tests {
                 2 * limit,
                 if parent { limit } else { 2 * limit },
             )));
-            let mut reader = IndexPayloadReader::new(Cursor::new(&encoded), encoded.len(), 37);
+            let mut reader =
+                IndexPayloadReader::new(Cursor::new(&encoded), encoded.len() as u64, 37);
             let mut order = TextTermOrder::new(&context);
             order.read_next(&mut reader).unwrap();
             order.read_next(&mut reader).unwrap();
@@ -14200,7 +14265,7 @@ mod tests {
                         if parent { limit } else { 2 * limit },
                     )));
                     let mut reader =
-                        IndexPayloadReader::new(Cursor::new(&encoded), encoded.len(), 37);
+                        IndexPayloadReader::new(Cursor::new(&encoded), encoded.len() as u64, 37);
                     let mut order = TextTermOrder::new(&context);
                     order.read_next(&mut reader).unwrap();
                     order.read_next(&mut reader).unwrap();
@@ -14270,7 +14335,8 @@ mod tests {
             let context = JsonOperationContext::new(Arc::new(WorkLedger::with_limits(
                 capacity, capacity, capacity,
             )));
-            let mut reader = IndexPayloadReader::new(Cursor::new(&encoded), encoded.len(), 37);
+            let mut reader =
+                IndexPayloadReader::new(Cursor::new(&encoded), encoded.len() as u64, 37);
             let mut order = TextTermOrder::new(&context);
             order.read_next(&mut reader).unwrap();
             let pointer = order.previous.as_ptr();
@@ -14362,10 +14428,11 @@ mod tests {
                         bytes: &encoded,
                         calls: 0,
                     },
-                    encoded.len(),
+                    encoded.len() as u64,
                     37,
                 );
-                let mut reference = IndexPayloadReader::new(encoded.as_slice(), encoded.len(), 37);
+                let mut reference =
+                    IndexPayloadReader::new(encoded.as_slice(), encoded.len() as u64, 37);
                 let mut previous: Option<String> = None;
                 for _ in &sequence {
                     let expected = reference.read_string("text segment term").and_then(|term| {
@@ -14465,7 +14532,7 @@ mod tests {
                     .unwrap();
                 let mut source = Cursor::new(&bytes);
                 let result = decode_text_index_segment_in(
-                    &mut IndexPayloadReader::new(&mut source, bytes.len() - 4, 0),
+                    &mut IndexPayloadReader::new(&mut source, bytes.len() as u64 - 4, 0),
                     11,
                     0,
                     false,
@@ -14588,7 +14655,7 @@ mod tests {
                 )));
                 let result = with_checked_index_payload(&mut input, &record, &context, |source| {
                     decode_text_index_segment_in(
-                        &mut IndexPayloadReader::new(source, payload.len() - 4, 0),
+                        &mut IndexPayloadReader::new(source, payload.len() as u64 - 4, 0),
                         11,
                         0,
                         false,
@@ -14652,16 +14719,16 @@ mod tests {
             let mut positions = Vec::new();
             let mut requests = Vec::new();
             let result = with_checked_index_payload(&mut input, &record, &context, |source| {
-                let mut reader = IndexPayloadReader::new(source, payload.len() - 4, 0);
+                let mut reader = IndexPayloadReader::new(source, payload.len() as u64 - 4, 0);
                 let result = decode_text_index_segment_in(&mut reader, 11, 0, false, &context);
-                positions.push(payload.len() - 4 - reader.remaining);
+                positions.push(payload.len() as u64 - 4 - reader.remaining);
                 let Err(IndexReadError::Resource(error)) = &result else {
                     panic!("each attempt must reach its independent budget refusal");
                 };
                 requests.push(error.detail().to_vec());
                 result
             });
-            assert_eq!(positions, [38, second_term_body]);
+            assert_eq!(positions, [38, second_term_body as u64]);
             assert_eq!(input.seeks, 2);
             for (detail, requested) in requests.iter().zip([limit + 16, needed]) {
                 assert!(detail.contains(&("resource".into(), "memory".into())));
@@ -14735,7 +14802,7 @@ mod tests {
                     let competing = JsonOperationContext::new(ledger);
                     let mut source = Cursor::new(&bytes);
                     let parsed = decode_text_index_segment_in(
-                        &mut IndexPayloadReader::new(&mut source, bytes.len() - 4, 0),
+                        &mut IndexPayloadReader::new(&mut source, bytes.len() as u64 - 4, 0),
                         7,
                         0,
                         retain,
@@ -15538,7 +15605,7 @@ mod tests {
             let context = crate::json::JsonOperationContext::standalone();
             let decode = |retain| {
                 decode_text_index_segment_in(
-                    &mut IndexPayloadReader::new(bytes, bytes.len(), 37),
+                    &mut IndexPayloadReader::new(bytes, bytes.len() as u64, 37),
                     seed,
                     37,
                     retain,
@@ -15657,7 +15724,7 @@ mod tests {
                 calls: 0,
             };
             let decoded = decode_text_index_segment(
-                &mut IndexPayloadReader::new(&mut source, body_len, 0),
+                &mut IndexPayloadReader::new(&mut source, body_len as u64, 0),
                 2,
                 0,
             )
@@ -15761,6 +15828,323 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_reader_keeps_full_width_ranges_on_controlled_files() {
+        // Map one small, complete suffix to a virtual absolute file position.
+        // A seek outside that window cannot accidentally succeed on another record.
+        struct Window {
+            start: u64,
+            max_seek: u64,
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+        impl Read for Window {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.bytes.read(output)
+            }
+        }
+        impl Seek for Window {
+            fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+                let SeekFrom::Start(target) = from else {
+                    return Err(std::io::Error::other("absolute checkpoint seek expected"));
+                };
+                if target > self.max_seek {
+                    return Err(std::io::Error::other("filesystem seek limit"));
+                }
+                let relative = target
+                    .checked_sub(self.start)
+                    .filter(|position| *position <= self.bytes.get_ref().len() as u64)
+                    .ok_or_else(|| std::io::Error::other("seek outside checkpoint window"))?;
+                self.bytes.set_position(relative);
+                Ok(target)
+            }
+        }
+
+        let snapshot = empty_directory_checkpoint(1, 1);
+        let length = build_index_checkpoint_suffix(&snapshot, 0).unwrap().len() as u64;
+        for start in [
+            (1u64 << 32) - 1,
+            1u64 << 32,
+            (1u64 << 32) + 1,
+            i64::MAX as u64 - 1,
+            i64::MAX as u64,
+            i64::MAX as u64 + 1,
+            u64::MAX - length,
+        ] {
+            let mut file = Window {
+                start,
+                max_seek: u64::MAX,
+                bytes: std::io::Cursor::new(
+                    build_index_checkpoint_suffix(&snapshot, start).unwrap(),
+                ),
+            };
+            let end = start + length;
+            let load = |file: &mut Window, eof| {
+                read_index_checkpoint_suffix(file, start, eof, start, 1, 2, u64::MAX)
+            };
+            let parsed = load(&mut file, end).unwrap().unwrap();
+            assert_eq!(parsed.report.offset, start);
+            assert_eq!(parsed.report.status, "persistent_checkpoint");
+            assert!(
+                matches!(load(&mut file, end - 1), Ok(Err(d)) if d.code == "index_checkpoint_incomplete")
+            );
+            if start == i64::MAX as u64 {
+                file.max_seek = i64::MAX as u64;
+                assert!(
+                    matches!(load(&mut file, end), Err(e) if e.code() == ErrorCode::IoError && e.message().contains("filesystem seek limit"))
+                );
+                file.max_seek = u64::MAX;
+            }
+            let excessive_count = u64::MAX / INDEX_EXTENT_ENTRY_LEN as u64 + 1;
+            file.bytes.get_mut()[57..65].copy_from_slice(&excessive_count.to_le_bytes());
+            file.bytes.get_mut()[65..73].copy_from_slice(&excessive_count.to_le_bytes());
+            assert!(
+                matches!(load(&mut file, end), Ok(Err(d)) if d.code == "index_checkpoint_length_overflow")
+            );
+        }
+
+        let start = u64::MAX - length + 1;
+        let mut file = Window {
+            start,
+            max_seek: u64::MAX,
+            bytes: std::io::Cursor::new(build_index_checkpoint_suffix(&snapshot, start).unwrap()),
+        };
+        assert!(matches!(
+            read_index_checkpoint_suffix(&mut file, start, u64::MAX, start, 1, 2, u64::MAX),
+            Ok(Err(d)) if d.code == "index_checkpoint_length_overflow"
+        ));
+
+        for length in [(1u64 << 32) - 1, 1u64 << 32, (1u64 << 32) + 1] {
+            let extent = IndexExtentEntry {
+                index_record_id: 2,
+                record_type: INDEX_VECTOR_SEGMENT,
+                stream_id: 1,
+                suffix_relative_offset: INDEX_CHECKPOINT_HEADER_LEN as u64,
+                length,
+                checkpoint_generation: 3,
+                extent_record_checksum: 0,
+            };
+            let (record_offset, bounded_length) =
+                index_extent_range(length, &extent, 3, 0).unwrap();
+            assert_eq!(bounded_length, length);
+            let body = length - INDEX_RECORD_HEADER_LEN as u64;
+            let mut header: [u8; INDEX_RECORD_HEADER_LEN] =
+                build_index_record(INDEX_VECTOR_SEGMENT, 3, 2, &[])
+                    .try_into()
+                    .unwrap();
+            header[10..18].copy_from_slice(&length.to_le_bytes());
+            header[34..42].copy_from_slice(&body.to_le_bytes());
+            let crc = checksum32(&header[..46]);
+            header[46..50].copy_from_slice(&crc.to_le_bytes());
+            let record =
+                parse_index_record_header(&header, &extent, 3, record_offset, bounded_length)
+                    .unwrap();
+            assert_eq!(record.payload.len, body);
+            assert!(
+                matches!(index_extent_range(length - 1, &extent, 3, 0), Err(IndexReadError::Invalid(d)) if d.code == "index_extent_table_mismatch")
+            );
+            assert!(
+                matches!(index_extent_range(length, &extent, 3, u64::MAX - length), Err(IndexReadError::Invalid(d)) if d.code == "index_record_length_overflow")
+            );
+
+            let mut reader = IndexPayloadReader::new(&b"x"[..], length, 0);
+            assert_eq!(reader.read_u8("first byte").unwrap(), b'x');
+            assert_eq!(reader.remaining, length - 1);
+            assert!(
+                matches!(reader.read_u8("unavailable byte"), Err(IndexReadError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof)
+            );
+        }
+
+        // Exercise the conversion used for one contiguous allocation with a
+        // 32-bit allocator ceiling, without accessing or reserving those bytes.
+        let limit = i32::MAX as u64;
+        assert_eq!(
+            index_host_size(limit, limit, "extent table bytes").unwrap() as u64,
+            limit
+        );
+        let error = index_host_size(limit + 1, limit, "extent table bytes").unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+        assert!(error
+            .detail()
+            .contains(&("reason".into(), "index_platform_limit".into())));
+    }
+
+    #[test]
+    fn incomplete_checkpoint_inspection_preserves_the_file_for_check_and_repair() {
+        use crate::json::{JsonOperationContext, WorkLedger};
+
+        let path = temp_path("inspection-resource-error");
+        let db = crate::Database::create(&path, Default::default()).unwrap();
+        for number in 0..24 {
+            db.create_collection(crate::CollectionConfig {
+                name: format!("collection_{number}"),
+                tokenizer: Default::default(),
+                embedding_dim: 2,
+                distance_metric: DistanceMetric::Cosine,
+                embedding_model: None,
+                vectors_normalized: false,
+                vector_index: VectorIndexConfig::Exact,
+            })
+            .unwrap();
+        }
+        drop(db);
+        let original = fs::read(&path).unwrap();
+        let scan = scan_file(&path).unwrap();
+        assert_eq!(
+            scan.index_suffix.as_ref().unwrap().status,
+            "persistent_checkpoint"
+        );
+        assert!(scan.findings.is_empty());
+        for repair in [false, true] {
+            // Main frames are delivered individually. The complete index
+            // directory requires more live memory than any one main frame.
+            let mut refused_index = false;
+            for limit in [4096, 8192, 16384] {
+                let context = JsonOperationContext::new(std::sync::Arc::new(
+                    WorkLedger::with_limits(limit, limit, limit),
+                ));
+                let mut lock = None;
+                let result = if repair {
+                    Storage::open_for_repair(&path, &context, &mut lock, |_, _| Ok(())).map(|_| ())
+                } else {
+                    scan_check_view(&path, None, &context, |_, _| Ok(())).map(|_| ())
+                };
+                if let Err(error) = result {
+                    assert!(
+                        crate::json::is_memory_budget_error(&error),
+                        "{repair} {limit}: {error:?}"
+                    );
+                    if error
+                        .detail()
+                        .contains(&("uncompleted_scope".into(), "index".into()))
+                    {
+                        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+                        assert!(error
+                            .detail()
+                            .contains(&("completed_scope".into(), "committed_main_prefix".into())));
+                        assert!(error.detail().contains(&(
+                            "critical_end_offset".into(),
+                            scan.critical_end_offset.to_string()
+                        )));
+                        refused_index = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                refused_index,
+                "index admission must fail on the {repair:?} repair path"
+            );
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
+        assert!(
+            !crate::Database::repair_truncate_tail(&path)
+                .unwrap()
+                .repaired
+        );
+        let db = crate::Database::open_read_only(&path).unwrap();
+        assert_eq!(
+            db.check(crate::CheckOptions {
+                verify_indexes: true
+            })
+            .unwrap()
+            .index_check,
+            "ok"
+        );
+        drop(db);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires COFFERDB_LARGE_CHECKPOINT_FIXTURE naming a healthy v1 database over the legacy payload limit"]
+    fn large_checkpoint_survives_incomplete_check_and_repair() {
+        use crate::json::{JsonOperationContext, WorkLedger};
+
+        let source = std::env::var_os("COFFERDB_LARGE_CHECKPOINT_FIXTURE").unwrap();
+        let path = temp_path("large-checkpoint-budget");
+        fs::copy(&source, &path).unwrap();
+        let digest = || crate::hash::sha256_reader(File::open(&path).unwrap()).unwrap();
+        let before = digest();
+        let verify = || {
+            crate::Database::check_path(
+                &path,
+                crate::CheckOptions {
+                    verify_indexes: true,
+                },
+            )
+            .unwrap()
+        };
+        let baseline = verify();
+        assert_eq!(baseline.index_check, "ok");
+        let suffix = baseline.index_suffix.unwrap();
+        assert!(suffix.payload_len > 512 * 1024 * 1024);
+        let limit = 32 * 1024 * 1024;
+        for repair in [false, true] {
+            let context = JsonOperationContext::new(std::sync::Arc::new(WorkLedger::with_limits(
+                limit, limit, limit,
+            )));
+            let mut catalog = crate::catalog::Catalog::new_in(&context);
+            let mut pressure = context.workspace_reservation();
+            // The public standalone operations choose a fresh default budget.
+            // Use their actual scan and catalog replay, then occupy the remaining
+            // workspace after the last primary data record has been applied.
+            let visit = |record: CommittedRecord, work: &mut RecordReservation| {
+                let last = record.record_ref.sequence_no.checked_add(1)
+                    == Some(suffix.covered_last_commit_sequence_no);
+                catalog.apply_retained(record, work, &context)?;
+                if last {
+                    pressure.grow_to(0, limit, "operation_scratch")?;
+                }
+                Ok(())
+            };
+            let mut lock = None;
+            let result = if repair {
+                Storage::open_for_repair(&path, &context, &mut lock, visit).map(|_| ())
+            } else {
+                scan_check_view(&path, None, &context, visit).map(|_| ())
+            };
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), ErrorCode::ResourceExhausted, "{error:?}");
+            for (key, expected) in [
+                ("completed_scope", "committed_main_prefix".into()),
+                ("uncompleted_scope", "index".into()),
+                (
+                    "critical_end_offset",
+                    baseline.critical_end_offset.to_string(),
+                ),
+                (
+                    "last_valid_commit_sequence_no",
+                    suffix.covered_last_commit_sequence_no.to_string(),
+                ),
+            ] {
+                assert!(
+                    error.detail().contains(&(key.into(), expected)),
+                    "{error:?}"
+                );
+            }
+            drop(lock);
+            assert_eq!(digest(), before);
+            eprintln!(
+                "{}: P={} limit={} pressure={} unchanged_sha256={} error={:?}",
+                if repair { "repair" } else { "check" },
+                suffix.payload_len,
+                limit,
+                pressure.reserved_bytes(),
+                before,
+                error.detail()
+            );
+        }
+        let repair = crate::Database::repair_truncate_tail(&path).unwrap();
+        assert!(!repair.repaired);
+        assert_eq!(repair.bytes_removed, 0);
+        assert_eq!(verify().index_check, "ok");
+        assert_eq!(digest(), before);
+        eprintln!(
+            "restored budget: repair.bytes_removed=0, index_check=ok, unchanged_sha256={before}"
+        );
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
     fn checkpoint_budget_is_checked_before_payload_is_read() {
         let path = temp_path("checkpoint-read-budget");
         let mut storage = Storage::create(&path).unwrap();
@@ -15781,11 +16165,8 @@ mod tests {
             append.commit.batch_id,
             append.commit_sequence_no,
             0,
-        )
-        .unwrap();
-        assert!(
-            matches!(result, Err(diagnostic) if diagnostic.code == "index_checkpoint_load_budget_exceeded")
         );
+        assert!(matches!(result, Err(error) if error.code() == ErrorCode::ResourceExhausted));
         assert_eq!(
             header_only.position(),
             offset + INDEX_CHECKPOINT_HEADER_LEN as u64
@@ -16032,13 +16413,12 @@ mod tests {
         let context =
             JsonOperationContext::new(Arc::new(WorkLedger::with_limits(needed, needed, needed)));
         let directory =
-            checkpoint_writer::reserve_directory(&checkpoint.metadata, &context).unwrap();
+            checkpoint_writer::reserve_directory(&checkpoint.metadata, 37, &context).unwrap();
         let mut prefix = [7u8; 37];
         let error = checkpoint_writer::write_checkpoint_segments_in(
             &mut std::io::Cursor::new(&mut prefix[..]),
             &checkpoint.metadata,
             segments(),
-            37,
             |_, _| {},
             directory,
             true,
@@ -16053,13 +16433,13 @@ mod tests {
         for missing in 1..=INDEX_CHECKPOINT_TRAILER_LEN {
             let mut bytes = original[..original.len() - missing].to_vec();
             let directory =
-                checkpoint_writer::reserve_directory(&checkpoint.metadata, &context).unwrap();
+                checkpoint_writer::reserve_directory(&checkpoint.metadata, critical, &context)
+                    .unwrap();
             let mut output = std::io::Cursor::new(&mut bytes[..]);
             let error = checkpoint_writer::write_checkpoint_segments_in(
                 &mut output,
                 &checkpoint.metadata,
                 segments(),
-                critical,
                 |_, _| {},
                 directory,
                 true,

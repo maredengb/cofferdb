@@ -138,19 +138,23 @@ impl<'a> JsonBuilder<'a> {
         let Some(value) = value else {
             return Ok(JsonValue::Null);
         };
+        self.unsigned(u128::from(value))
+    }
+
+    pub(crate) fn unsigned(&self, value: u128) -> Result<JsonValue> {
         // JSON numbers here are binary64. Use decimal text above the safe integer
-        // range so adjacent u64 counters remain distinguishable in the serialized
+        // range so adjacent counters remain distinguishable in the serialized
         // output.
         if value <= 9_007_199_254_740_991 {
             return Ok(JsonValue::Number(value as f64));
         }
         use std::io::Write;
-        // Twenty ASCII digits suffice for every u64. Format in a fixed stack
+        // Thirty-nine ASCII digits suffice for every u128. Format in a fixed stack
         // buffer and pass only the initialized prefix to the ordinary string
         // builder so a large counter incurs just one owned string.
-        let mut bytes = [0; 20];
+        let mut bytes = [0; 39];
         let mut output = std::io::Cursor::new(bytes.as_mut_slice());
-        write!(output, "{value}").expect("u64 decimal fits in 20 bytes");
+        write!(output, "{value}").expect("u128 decimal fits in 39 bytes");
         let length = output.position() as usize;
         self.string(std::str::from_utf8(&bytes[..length]).expect("decimal digits are UTF-8"))
     }

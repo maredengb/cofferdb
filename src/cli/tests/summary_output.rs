@@ -54,7 +54,7 @@ fn fixed_summary_field_tables_preserve_aliases_null_and_number_semantics() {
         );
         expected.as_object_mut().unwrap().insert(
             "last_index_commit_id".into(),
-            JsonValue::Number(9_007_199_254_740_992.0),
+            JsonValue::String("9007199254740992".into()),
         );
         assert_eq!(value, expected);
         assert_eq!(r.to_json(), expected);
@@ -85,7 +85,7 @@ fn fixed_summary_field_tables_preserve_aliases_null_and_number_semantics() {
         );
         assert_eq!(
             value.get("last_index_commit_id"),
-            Some(&JsonValue::Number(9_007_199_254_740_992.0))
+            Some(&JsonValue::String("9007199254740992".into()))
         );
         assert_eq!(
             value.get("index_record_count"),

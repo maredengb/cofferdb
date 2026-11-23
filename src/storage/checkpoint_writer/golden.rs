@@ -402,11 +402,14 @@ fn vector_fixed_bytes_cover_borrowed_owned_cache_and_direct_decode() {
 
 fn reject_body_truncations(
     golden: &[u8],
-    decode: impl Fn(&[u8], usize) -> std::result::Result<(), IndexReadError>,
+    decode: impl Fn(&[u8], u64) -> std::result::Result<(), IndexReadError>,
 ) {
     let body = golden.len() - 4;
     for end in 0..body {
-        assert!(decode(&golden[..end], body).is_err(), "body end {end}");
+        assert!(
+            decode(&golden[..end], body as u64).is_err(),
+            "body end {end}"
+        );
     }
 }
 
@@ -494,6 +497,107 @@ fn fixed_segments_reject_semantic_damage_even_with_valid_independent_crc() {
 }
 
 #[test]
+fn checkpoint_writer_checks_absolute_boundaries_before_io_and_preserves_device_errors() {
+    // Back only the metadata checkpoint itself, while presenting arbitrary absolute
+    // file positions to the real writer. The signed limit models a narrower device.
+    struct Window {
+        start: u64,
+        limit: u64,
+        bytes: Cursor<Vec<u8>>,
+    }
+    impl Seek for Window {
+        fn seek(&mut self, at: SeekFrom) -> std::io::Result<u64> {
+            let local = match at {
+                SeekFrom::Start(pos) => SeekFrom::Start(pos.checked_sub(self.start).unwrap()),
+                other => other,
+            };
+            let position = self.bytes.seek(local)?.checked_add(self.start).unwrap();
+            if position > self.limit {
+                return Err(std::io::Error::other("device seek limit"));
+            }
+            Ok(position)
+        }
+    }
+    impl Write for Window {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            let end = self
+                .start
+                .checked_add(self.bytes.position())
+                .unwrap()
+                .checked_add(data.len() as u64)
+                .unwrap();
+            if end > self.limit {
+                return Err(std::io::Error::other("device write limit"));
+            }
+            self.bytes.write(data)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut meta = metadata();
+    meta.text_segment_count = 0;
+    meta.vector_segment_count = 0;
+    let size = 105 + 108 + 46 + 10;
+    let signed = i64::MAX as u64;
+    for end in [
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        signed,
+        signed + 1,
+        u64::MAX,
+    ] {
+        let start = end - size;
+        let mut file = Window {
+            start,
+            limit: u64::MAX,
+            bytes: Cursor::new(Vec::new()),
+        };
+        let result =
+            write_checkpoint_segments(&mut file, &meta, std::iter::empty(), start, |_, _| {});
+        assert_eq!(result.unwrap().0, 108);
+        assert_eq!(file.stream_position().unwrap(), end);
+        assert_eq!(&file.bytes.get_ref()[259..263], b"CFOK");
+    }
+    let mut overflow = Window {
+        start: u64::MAX - size + 1,
+        limit: u64::MAX,
+        bytes: Cursor::new(Vec::new()),
+    };
+    let start = overflow.start;
+    let error =
+        write_checkpoint_segments(&mut overflow, &meta, std::iter::empty(), start, |_, _| {})
+            .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::FileFormatError);
+    assert!(overflow.bytes.get_ref().is_empty());
+    assert_eq!(overflow.bytes.position(), 0);
+
+    let mut device = Window {
+        start: signed - size + 1,
+        limit: signed,
+        bytes: Cursor::new(Vec::new()),
+    };
+    let start = device.start;
+    let error = write_checkpoint_segments(&mut device, &meta, std::iter::empty(), start, |_, _| {})
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::IoError);
+    assert!(error.message().contains("device write limit"));
+    assert_eq!(device.bytes.get_ref().len(), 259);
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        meta.vector_segment_count = (u64::MAX / 46) as usize;
+        let before = device.bytes.get_ref().clone();
+        let error =
+            write_checkpoint_segments(&mut device, &meta, std::iter::empty(), start, |_, _| {})
+                .unwrap_err();
+        assert!(error.message().contains("table length overflow"));
+        assert_eq!(device.bytes.get_ref(), &before);
+    }
+}
+
+#[test]
 fn real_checkpoint_writer_matches_independent_metadata_and_segment_goldens() {
     let text = text_payload(false);
     let catalog = text_catalog(&text);
@@ -517,9 +621,8 @@ fn real_checkpoint_writer_matches_independent_metadata_and_segment_goldens() {
             ))),
             Ok(Segment::BorrowedCachedVector(&cached)),
         ],
-        37,
         |_, _| {},
-        reserve_directory(&metadata(), &context).unwrap(),
+        reserve_directory(&metadata(), 37, &context).unwrap(),
         false,
     )
     .unwrap();
@@ -587,4 +690,21 @@ fn record_backed_vector_writer_reads_real_payloads_into_fixed_wire_bytes() {
     drop(source);
     drop(storage);
     drop(guard);
+}
+
+#[test]
+fn directory_capacity_checks_both_contiguous_allocations_on_narrow_hosts() {
+    let limit = i32::MAX as u64;
+    let entry_size = std::mem::size_of::<IndexExtentEntry>() as u64;
+    let last = limit / entry_size.max(INDEX_EXTENT_ENTRY_LEN as u64);
+    let slots = |n| directory_slots(n, n * INDEX_EXTENT_ENTRY_LEN as u64, limit);
+    assert_eq!(slots(last).unwrap() as u64, last);
+    for n in [last + 1, limit / INDEX_EXTENT_ENTRY_LEN as u64 + 1] {
+        let error = slots(n).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::ResourceExhausted);
+        assert!(error
+            .detail()
+            .iter()
+            .any(|(key, value)| key == "reason" && value == "index_platform_limit"));
+    }
 }

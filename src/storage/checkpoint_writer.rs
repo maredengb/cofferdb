@@ -46,38 +46,107 @@ pub(super) fn write_checkpoint_segments<'a, W: Write + Seek>(
     offset: u64,
     completed: impl FnMut(Segment<'a>, u64),
 ) -> Result<(u64, IndexSegmentSource)> {
-    let directory =
-        reserve_directory(checkpoint, &crate::json::JsonOperationContext::standalone())?;
-    write_checkpoint_segments_in(
-        output, checkpoint, segments, offset, completed, directory, true,
+    let directory = reserve_directory(
+        checkpoint,
+        offset,
+        &crate::json::JsonOperationContext::standalone(),
+    )?;
+    write_checkpoint_segments_in(output, checkpoint, segments, completed, directory, true)
+}
+
+// Bound the fixed part of the layout and admit its directory before replacing
+// an old suffix. All file positions remain in the wire format's u64 coordinates.
+pub(super) struct PreparedDirectory {
+    // Absolute start of this checkpoint at the committed primary boundary.
+    offset: u64,
+    // Absolute position of the metadata frame, immediately after the outer header.
+    records_start: u64,
+    // Number of frames including commit metadata, also the number of directory rows.
+    count: u64,
+    // Encoded size of the packed directory that follows all frames.
+    table_len: u64,
+    // Budgeted slots for the installed lookup directory.
+    extents: IndexDirectory,
+}
+
+fn checkpoint_end(records_end: u64, table_len: u64) -> Result<u64> {
+    let trailer = checked_writer_add(
+        records_end,
+        table_len,
+        "index extent table boundary overflow",
+    )?;
+    checked_writer_add(
+        trailer,
+        INDEX_CHECKPOINT_TRAILER_LEN as u64,
+        "index trailer boundary overflow",
     )
 }
 
-// Reserve one slot per text or vector record plus one for commit metadata. The
-// storage writer does this before removing the old suffix, so a directory admission
-// failure can leave that suffix intact.
 pub(super) fn reserve_directory(
     checkpoint: &IndexCheckpointMetadata,
+    offset: u64,
     context: &crate::json::JsonOperationContext,
-) -> Result<IndexDirectory> {
-    // Reserve space for a commit metadata extent even for a checkpoint with no
-    // collections. A valid empty checkpoint still describes the committed primary
-    // boundary and has one index record.
+) -> Result<PreparedDirectory> {
     let count = checked_writer_add(
         checked_segment_record_count(checkpoint)?,
         1,
         "index checkpoint record count overflow",
     )?;
-    // The number of extent rows is a wire-format quantity. Reject a directory that
-    // cannot be indexed by this process before passing a truncated capacity to the
-    // reserved vector.
-    let count = usize::try_from(count).map_err(|_| {
-        Error::new(
-            ErrorCode::FileFormatError,
-            "index extent count exceeds address space",
-        )
-    })?;
-    IndexDirectory::with_capacity(count, context, "operation_scratch")
+    let table_len = count
+        .checked_mul(INDEX_EXTENT_ENTRY_LEN as u64)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::FileFormatError,
+                "index extent table length overflow",
+            )
+        })?;
+    let records_start = checked_writer_add(
+        offset,
+        INDEX_CHECKPOINT_HEADER_LEN as u64,
+        "index header boundary overflow",
+    )?;
+    let metadata_end = checked_writer_add(
+        records_start,
+        (INDEX_RECORD_HEADER_LEN + INDEX_COMMIT_METADATA_LEN) as u64,
+        "index metadata boundary overflow",
+    )?;
+    // Even an empty segment needs its frame header. Reject impossible declared
+    // counts before asking for memory or disturbing an existing suffix.
+    let segment_headers = (count - 1)
+        .checked_mul(INDEX_RECORD_HEADER_LEN as u64)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::FileFormatError,
+                "index segment header lengths overflow",
+            )
+        })?;
+    let minimum_end = checked_writer_add(
+        metadata_end,
+        segment_headers,
+        "index record boundary overflow",
+    )?;
+    checkpoint_end(minimum_end, table_len)?;
+    let slots = directory_slots(count, table_len, isize::MAX as u64)?;
+    let extents = IndexDirectory::with_capacity(slots, context, "operation_scratch")?;
+    Ok(PreparedDirectory {
+        offset,
+        records_start,
+        count,
+        table_len,
+        extents,
+    })
+}
+
+// A directory must fit both its on-disk table (read by a fresh opener) and
+// the writer's native entries, which can include padding. The payload streams.
+fn directory_slots(count: u64, table_len: u64, allocation_limit: u64) -> Result<usize> {
+    index_host_size(table_len, allocation_limit, "extent table bytes")?;
+    index_host_size(
+        u128::from(count) * std::mem::size_of::<IndexExtentEntry>() as u128,
+        allocation_limit,
+        "segment directory bytes",
+    )?;
+    index_host_size(count, allocation_limit, "extent count")
 }
 
 // The metadata refers to segment extents and checksums that are known only
@@ -88,30 +157,17 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     output: &mut W,
     checkpoint: &IndexCheckpointMetadata,
     segments: impl IntoIterator<Item = Result<Segment<'a>>>,
-    offset: u64,
     mut completed: impl FnMut(Segment<'a>, u64),
-    mut extents: IndexDirectory,
+    directory: PreparedDirectory,
     allow_optional_memory: bool,
 ) -> Result<(u64, IndexSegmentSource)> {
-    // Use the declared record count for the preliminary header even though the
-    // iterator can still fail or produce the wrong number of segments. The
-    // completion trailer is the recovery evidence for a finished stream.
-    let count = checked_writer_add(
-        checked_segment_record_count(checkpoint)?,
-        1,
-        "index checkpoint record count overflow",
-    )?;
-    // The encoded table contains a fixed-width row for every record, including the
-    // metadata row. Keep this byte length distinct from the number of bytes
-    // occupied by record frames.
-    let table_len = count
-        .checked_mul(INDEX_EXTENT_ENTRY_LEN as u64)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::FileFormatError,
-                "index extent table length overflow",
-            )
-        })?;
+    let PreparedDirectory {
+        offset,
+        records_start,
+        count,
+        table_len,
+        mut extents,
+    } = directory;
     // The metadata record precedes the segments on disk but depends on their
     // checksums. Reserve its wire position and fill it after streaming them.
     output.seek(SeekFrom::Start(offset))?;
@@ -119,8 +175,6 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     #[cfg(test)]
     tests::crash_boundary("index_suffix_partial")?;
     output.write_all(&[0; INDEX_RECORD_HEADER_LEN + INDEX_COMMIT_METADATA_LEN])?;
-    #[cfg(all(test, unix))]
-    crate::maintenance_faults::check(crate::maintenance_faults::Stage::WriteCheckpoint)?;
     // Keep the metadata row in the same on-disk order as its reserved frame. Its
     // location and size are fixed at this point; its checksum becomes known only
     // after every referenced segment is encoded.
@@ -138,7 +192,12 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     // Track the planned end of the previous frame explicitly. Reading
     // record-backed input or seeking backward to fill a header can leave a shared
     // file description's cursor elsewhere.
-    let mut next_offset = output.stream_position()?;
+    let mut payload_len = (INDEX_RECORD_HEADER_LEN + INDEX_COMMIT_METADATA_LEN) as u64;
+    let mut next_offset = checked_writer_add(
+        records_start,
+        payload_len,
+        "index metadata boundary overflow",
+    )?;
     for (index, segment) in segments.into_iter().enumerate() {
         let mut segment = segment?;
         // Count text and vector records independently. A checkpoint declaring one
@@ -173,8 +232,14 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
         let record_id = index as u64 + 2;
         // Producing a segment may read through a clone of the same file handle.
         let start = next_offset;
+        let length = segment.framed_len()?;
+        next_offset = checked_writer_add(start, length, "index record boundary overflow")?;
+        checkpoint_end(next_offset, table_len)?;
+        payload_len = checked_writer_add(payload_len, length, "index payload length overflow")?;
         output.seek(SeekFrom::Start(start))?;
         output.write_all(&[0; INDEX_RECORD_HEADER_LEN])?;
+        #[cfg(all(test, unix))]
+        crate::maintenance_faults::check(crate::maintenance_faults::Stage::WriteCheckpoint)?;
         // Leave a header-sized hole. The encoder streams the body through a digest
         // to learn the exact length and payload CRC. Filling the hole afterwards
         // requires only a small fixed header, even for uncached vectors.
@@ -188,11 +253,17 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
                 // recorded for this segment.
                 Ok(writer.digest)
             })?;
-        let length = checked_writer_add(
+        let emitted = checked_writer_add(
             INDEX_RECORD_HEADER_LEN as u64,
             payload.len,
             "index record length overflow",
         )?;
+        if emitted != length || output.stream_position()? != next_offset {
+            return Err(Error::new(
+                ErrorCode::FileFormatError,
+                "encoded index frame length differs from its planned extent",
+            ));
+        }
         // The frame header includes the payload length and checksum. Backpatching
         // the reserved header now leaves the cursor near the start of the segment;
         // the next frame must use its remembered end.
@@ -217,7 +288,6 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
             checkpoint_generation: offset,
             extent_record_checksum: record_crc.finish(),
         });
-        next_offset = checked_writer_add(start, length, "index record boundary overflow")?;
         // Return ownership of this input segment after its own frame is written.
         // The callback can recover a newly materialized cache entry here. There are
         // still later operations that can fail before the whole checkpoint is
@@ -240,16 +310,12 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     // count used to check individual record extents.
     let records_end = next_offset;
     output.seek(SeekFrom::Start(records_end))?;
-    let payload_len = records_end - offset - INDEX_CHECKPOINT_HEADER_LEN as u64;
-    // The wire length is a u64, while queries use a host-sized payload bound in the
-    // retained segment source. Check that conversion before publishing a checkpoint
-    // the writer could not search.
-    let addressable_payload_len = usize::try_from(payload_len).map_err(|_| {
-        Error::new(
+    if records_end.checked_sub(records_start) != Some(payload_len) {
+        return Err(Error::new(
             ErrorCode::FileFormatError,
-            "index payload length exceeds address space",
-        )
-    })?;
+            "index payload length differs from its frame boundaries",
+        ));
+    }
     // The metadata covers the segment entries, excluding its own slot. Including its
     // own checksum here would make that checksum depend on the metadata that
     // contains it.
@@ -299,7 +365,7 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     // slot needs a different checksum over the header and payload together, just
     // like each segment slot.
     let metadata_header = record_header(INDEX_COMMIT_METADATA, offset, 1, &metadata_digest)?;
-    output.seek(SeekFrom::Start(offset + INDEX_CHECKPOINT_HEADER_LEN as u64))?;
+    output.seek(SeekFrom::Start(records_start))?;
     let mut metadata_record = DigestWriter::new(&mut *output);
     metadata_record.write_all(&metadata_header)?;
     metadata_record.write_all(&metadata)?;
@@ -331,6 +397,12 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     // header. The trailer belongs at that saved position, independent of how many
     // earlier records were backpatched.
     let trailer_start = output.stream_position()?;
+    if trailer_start.checked_sub(records_end) != Some(table_len) {
+        return Err(Error::new(
+            ErrorCode::FileFormatError,
+            "encoded index directory length differs from its declared size",
+        ));
+    }
     output.seek(SeekFrom::Start(offset))?;
     output.write_all(&header(
         checkpoint,
@@ -355,13 +427,21 @@ pub(super) fn write_checkpoint_segments_in<'a, W: Write + Seek>(
     // selected durability policy after this writer returns.
     let source = IndexSegmentSource::new(
         offset,
-        addressable_payload_len,
+        payload_len,
         offset,
         checkpoint.covered_last_commit_sequence_no,
         extents,
     )?;
     // Emit the completion marker only after the header and extent table are final.
-    output.write_all(&trailer)?;
+    #[cfg(all(test, unix))]
+    if crate::maintenance_faults::take(crate::maintenance_faults::Stage::PartialTrailer) {
+        output.write_all(&trailer[..4])?;
+        return Err(Error::from(std::io::Error::from_raw_os_error(libc::ENOSPC))
+            .maintenance_phase("write_checkpoint_trailer", "index_may_need_rebuild"));
+    }
+    output.write_all(&trailer).map_err(|e| {
+        Error::from(e).maintenance_phase("write_checkpoint_trailer", "index_may_need_rebuild")
+    })?;
     Ok((payload_len, source))
 }
 
@@ -527,6 +607,43 @@ pub(crate) enum Segment<'a> {
 }
 
 impl Segment<'_> {
+    // A staged text body includes its own CRC. Vector length calculations also
+    // include the outer frame header. Check these lengths before starting a frame.
+    fn framed_len(&self) -> Result<u64> {
+        match self {
+            Self::StagedText { body, .. } => checked_writer_add(
+                body.encoded_len(),
+                INDEX_RECORD_HEADER_LEN as u64,
+                "text index frame length overflow",
+            ),
+            Self::BorrowedCachedVector(segment) => segment.encoded_len(),
+            Self::CachedVector(segment) => segment.encoded_len(),
+            Self::VectorRecords(segment) => segment.encoded_len(),
+            #[cfg(test)]
+            Self::Vector(segment) => segment.encoded_len(),
+            #[cfg(test)]
+            Self::Text(segment) => {
+                let mut body = PayloadDigest::default();
+                write_text_segment(segment, &mut body)?;
+                checked_writer_add(
+                    body.len,
+                    INDEX_RECORD_HEADER_LEN as u64,
+                    "text index frame length overflow",
+                )
+            }
+            #[cfg(test)]
+            Self::TextRecords(segment) => {
+                let mut body = PayloadDigest::default();
+                segment.write(&mut body)?;
+                checked_writer_add(
+                    body.len,
+                    INDEX_RECORD_HEADER_LEN as u64,
+                    "text index frame length overflow",
+                )
+            }
+        }
+    }
+
     fn record_type(&self) -> u16 {
         match self {
             #[cfg(test)]
@@ -1378,7 +1495,7 @@ mod framing_tests {
             };
             let expected = build_index_checkpoint_suffix(&checkpoint, 37).unwrap();
             let context = crate::json::JsonOperationContext::standalone();
-            let directory = reserve_directory(&checkpoint.metadata, &context).unwrap();
+            let directory = reserve_directory(&checkpoint.metadata, 37, &context).unwrap();
             let mut bytes = [0; 306];
             bytes[..37].fill(7);
             let mut output = std::io::Cursor::new(bytes.as_mut_slice());
@@ -1387,7 +1504,6 @@ mod framing_tests {
                     &mut output,
                     &checkpoint.metadata,
                     std::iter::empty(),
-                    37,
                     |_, _| panic!("metadata-only checkpoint completed a segment"),
                     directory,
                     false,

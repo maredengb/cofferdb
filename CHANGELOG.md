@@ -4,6 +4,11 @@ Entries describe version contents. The
 [releases page](https://github.com/maredengb/cofferdb/releases) records published
 artifacts and their validation results.
 
+## 0.2.1
+
+- Open and query valid v1 index checkpoints whose combined records exceed 512 MiB, including files written by 0.2.0. The on-disk layout stays compatible.
+- Report when a persistent rebuild could not be verified. Preserve committed data if writing the derived index fails.
+
 ## 0.2.0
 
 - Use an open Python writer to create a standalone snapshot, rebuild indexes or compact the database between write batches. Each method returns a report describing the resulting file or index.

@@ -1,4 +1,4 @@
-# Build and read the CofferDB 0.2.0 offline API reference
+# Build and read the CofferDB 0.2.1 offline API reference
 
 **Following a link from a 0.1.x guide?** Open the [archived 0.1.1 build instructions](reference-v0.1.1.md) for the original procedure and archive layout.
 
@@ -15,7 +15,7 @@ example, look up `CompactReport.index_rebuild` to interpret the index outcome
 after file replacement. With the wheel installed, `help(cofferdb.Database.compact)`
 also shows the calling and recovery instructions after `import cofferdb`.
 
-The steps below are for someone building the 0.2.0 pages from source.
+The steps below are for someone building the 0.2.1 pages from source.
 
 ## Run the API examples
 
@@ -104,7 +104,7 @@ its packaged type hints. Rustdoc uses each Rust version's own source.
 
 Obtain a clean Rust 0.1.0 checkout at the public `v0.1.0` tag to build the supplemental
 old-version reference. It is not generated from newer source. From the prepared
-0.2.0 root, with a wheel built from that same prepared source installed in
+0.2.1 root, with a wheel built from that same prepared source installed in
 this environment:
 
 ```console
@@ -114,7 +114,7 @@ python tools/build_reference.py /a/new/reference-output --rust-v010-source /path
 The tool rejects a mismatched installed package/source identity, changed input
 files, unpinned documentation tools or the wrong legacy source. It generates:
 
-- `cofferdb-0.2.0-reference/index.html`, linking the rendered guides, both Rust
+- `cofferdb-0.2.1-reference/index.html`, linking the rendered guides, both Rust
   references, the Python reference and generated public symbol inventories.
 - Rust indexes of types, functions, methods, fields, variants and return
   structures from normal public rustdoc, excluding doc-hidden implementation

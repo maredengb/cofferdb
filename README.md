@@ -3,10 +3,10 @@
 CofferDB is an embedded retrieval database for explainable local search and RAG
 applications. Use it from Rust, Python, or the `coffer` CLI.
 
-Start with the [Rust 0.2.0 guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/rust.md) or the
-[Python 0.2.0 guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/python.md). For terminal use, see the
-[CLI manual](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/cli.md). The
-[text ingestion guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/ingestion.md) shows how to prepare text offline
+Start with the [Rust 0.2.1 guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/rust.md) or the
+[Python 0.2.1 guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/python.md). For terminal use, see the
+[CLI manual](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/cli.md). The
+[text ingestion guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/ingestion.md) shows how to prepare text offline
 and optionally generate embeddings for import.
 
 See the [release records](https://github.com/maredengb/cofferdb/releases) for
@@ -101,7 +101,7 @@ For this sample the search should return `wal#commit`. For your own database,
 compare the restored records and queries with known results. To copy a live
 database path with operating-system tools, first stop writes and maintenance,
 close the writer successfully and keep writers out until the copy finishes.
-See the [backup guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/backup.md) for verification and privacy details.
+See the [backup guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/backup.md) for verification and privacy details.
 Keep original inputs and independent backups. File-format compatibility across
 future releases and production durability are not guaranteed. The documented
 commit, recovery and integrity contracts apply.
@@ -116,10 +116,10 @@ application’s `Cargo.toml`, pin the dependency:
 
 ```toml
 [dependencies]
-cofferdb = "=0.2.0"
+cofferdb = "=0.2.1"
 ```
 
-The [Rust 0.2.0 guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/rust.md) covers the API and links to the ingestion workflow.
+The [Rust 0.2.1 guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/rust.md) covers the API and links to the ingestion workflow.
 
 ```rust
 use cofferdb::{
@@ -161,7 +161,7 @@ fn main() -> cofferdb::Result<()> {
 ```
 
 For Python, select a matching wheel as described in the
-[Python 0.2.0 guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/python.md).
+[Python 0.2.1 guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/python.md).
 
 ```python
 from cofferdb import Database
@@ -192,11 +192,11 @@ text search and do not supply embeddings.
 
 The library exposes `Database`, `CollectionConfig`, `SearchBuilder` and related
 types. Search builders accept text, a query embedding, filters, weights and a
-resource profile. See the complete [embedded Rust example](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/embedded.rs)
-and [public exports](https://github.com/maredengb/cofferdb/blob/v0.2.0/src/lib.rs).
+resource profile. See the complete [embedded Rust example](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/embedded.rs)
+and [public exports](https://github.com/maredengb/cofferdb/blob/v0.2.1/src/lib.rs).
 
-The [guide index](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/README.md) lists documentation by language and version.
-See the [reference build instructions](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/reference.md)
+The [guide index](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/README.md) lists documentation by language and version.
+See the [reference build instructions](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/reference.md)
 for the versioned offline API references.
 
 To run these examples, use a checkout of this source tree and start from its
@@ -211,13 +211,13 @@ cargo run --locked --example real_corpus_demo -- "$coffer_demo_dir/real-corpus.c
 
 | Example | What to inspect |
 | --- | --- |
-| [Embedded Rust](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/embedded.rs) | Create a collection, insert text and vectors, and run hybrid search. |
-| [Explain and ranking](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/explain_troubleshooting.rs) | Compare weights and resource profiles on small synthetic fixtures. |
-| [Source-backed demos](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/real_corpus_demo.rs) | Markdown retrieval, Rust code filtering and ranking explanations using bundled source snapshots and precomputed model vectors. |
+| [Embedded Rust](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/embedded.rs) | Create a collection, insert text and vectors, and run hybrid search. |
+| [Explain and ranking](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/explain_troubleshooting.rs) | Compare weights and resource profiles on small synthetic fixtures. |
+| [Source-backed demos](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/real_corpus_demo.rs) | Markdown retrieval, Rust code filtering and ranking explanations using bundled source snapshots and precomputed model vectors. |
 
 The examples need no model download or embedding service. The source-backed
 fixtures use pinned Rust by Example sources with matching BGE-M3 vectors and
-include their [provenance](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/data/real_corpus/provenance.json). Source
+include their [provenance](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/data/real_corpus/provenance.json). Source
 snapshots and their MIT/Apache-2.0 notices are bundled. Rust snippets are retrieval
 inputs; some intentionally illustrate compile errors or panics. These small
 examples do not measure representative application relevance.
@@ -225,7 +225,7 @@ Example output demonstrates functionality, not general retrieval quality or
 performance. Generate local Rust API documentation with `cargo doc --no-deps --open`.
 
 With a matching Python wheel installed, run the complete
-[offline code example](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/code_retrieval.py):
+[offline code example](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/code_retrieval.py):
 
 ```console
 python examples/code_retrieval.py /a/new/path/code.coffer
@@ -235,7 +235,7 @@ It uses the same pinned sources and precomputed vectors, checks complete stored
 text and source spans after close/reopen, and needs no model provider or download.
 Python wheels target regular-GIL CPython 3.12, 3.13 and 3.14 on macOS 15+
 on Apple Silicon (arm64) or Intel (x86_64), and Linux ARM64 (AArch64) or x86_64 with glibc 2.28+.
-See the [release notes](https://github.com/maredengb/cofferdb/releases/tag/v0.2.0) for the environments tested.
+See the [release records](https://github.com/maredengb/cofferdb/releases) for the environments tested for each published version.
 
 ## Search inputs and weights
 
@@ -282,7 +282,7 @@ has no complete relevance judgments and does not report application recall.
 ## Memory metadata
 
 Memory entries use ordinary documents and chunks. The bundled
-[metadata template](https://github.com/maredengb/cofferdb/blob/v0.2.0/examples/data/memory/metadata-template.json) provides `type`,
+[metadata template](https://github.com/maredengb/cofferdb/blob/v0.2.1/examples/data/memory/metadata-template.json) provides `type`,
 `source`, `scope`, `project_id`, `session_id`, `importance`, `created_at`,
 `last_accessed_at`, `expires_at` and `supersedes`. Store these on chunk metadata
 and filter with keys such as `chunk.type` or `chunk.project_id`.
@@ -338,7 +338,7 @@ they are not core runtime dependencies.
 Source checkouts include representative quality and cost observations, per-query
 results, failures and replay materials in the
 [0.1.0 evaluation archive](https://github.com/maredengb/coffered/tree/v0.1.0/benchmarks/evaluation-v1).
-The archive is excluded from Cargo packages; see the [benchmark guide](https://github.com/maredengb/cofferdb/blob/v0.2.0/benchmarks/README.md)
+The archive is excluded from Cargo packages; see the [benchmark guide](https://github.com/maredengb/cofferdb/blob/v0.2.1/benchmarks/README.md)
 for its scope and replay instructions.
 These observations do not establish release readiness or certify a
 model/configuration. CofferDB makes no fixed application Recall/MRR guarantee and no
@@ -354,13 +354,13 @@ your source text and metadata; control where those outputs are shared.
 
 ## Documentation
 
-- [Architecture overview](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/architecture.md) and [file-format boundaries](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/file-format.md).
-- [Backup, export and data handling](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/backup.md), including privacy and deletion limits.
-- [Explain JSON and ranking troubleshooting](https://github.com/maredengb/cofferdb/blob/v0.2.0/docs/explain.md).
-- [Benchmark reproduction](https://github.com/maredengb/cofferdb/blob/v0.2.0/benchmarks/README.md) and [SQLite reference notes](https://github.com/maredengb/cofferdb/blob/v0.2.0/benchmarks/sqlite-baseline.md).
-- [Contributing](https://github.com/maredengb/cofferdb/blob/v0.2.0/CONTRIBUTING.md), [security policy](https://github.com/maredengb/cofferdb/blob/v0.2.0/SECURITY.md) and [governance/naming](https://github.com/maredengb/cofferdb/blob/v0.2.0/GOVERNANCE.md).
+- [Architecture overview](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/architecture.md) and [file-format boundaries](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/file-format.md).
+- [Backup, export and data handling](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/backup.md), including privacy and deletion limits.
+- [Explain JSON and ranking troubleshooting](https://github.com/maredengb/cofferdb/blob/v0.2.1/docs/explain.md).
+- [Benchmark reproduction](https://github.com/maredengb/cofferdb/blob/v0.2.1/benchmarks/README.md) and [SQLite reference notes](https://github.com/maredengb/cofferdb/blob/v0.2.1/benchmarks/sqlite-baseline.md).
+- [Contributing](https://github.com/maredengb/cofferdb/blob/v0.2.1/CONTRIBUTING.md), [security policy](https://github.com/maredengb/cofferdb/blob/v0.2.1/SECURITY.md) and [governance/naming](https://github.com/maredengb/cofferdb/blob/v0.2.1/GOVERNANCE.md).
 
 ## License
 
-[Apache-2.0](https://github.com/maredengb/cofferdb/blob/v0.2.0/LICENSE). See the [dependency and license summary](https://github.com/maredengb/cofferdb/blob/v0.2.0/DEPENDENCIES.md)
+[Apache-2.0](https://github.com/maredengb/cofferdb/blob/v0.2.1/LICENSE). See the [dependency and license summary](https://github.com/maredengb/cofferdb/blob/v0.2.1/DEPENDENCIES.md)
 for the distinction between source dependencies and compiled runtime notices.

@@ -273,39 +273,39 @@ class WriteSummary(TypedDict):
     """
 
     #: Number of documents inserted.
-    documents_inserted: Number
+    documents_inserted: Number | str
     #: Alias for documents_inserted.
-    documents_imported: Number
+    documents_imported: Number | str
     #: Number of chunks inserted.
-    chunks_inserted: Number
+    chunks_inserted: Number | str
     #: Alias for chunks_inserted.
-    chunks_imported: Number
+    chunks_imported: Number | str
     #: Number of embeddings inserted.
-    embeddings_inserted: Number
+    embeddings_inserted: Number | str
     #: Alias for embeddings_inserted.
-    embeddings_imported: Number
+    embeddings_imported: Number | str
     #: Number of documents skipped under the conflict policy.
-    documents_skipped: Number
+    documents_skipped: Number | str
     #: Number of chunks skipped under the conflict policy.
-    chunks_skipped: Number
+    chunks_skipped: Number | str
     #: Number of embeddings skipped under the conflict policy.
-    embeddings_skipped: Number
+    embeddings_skipped: Number | str
     #: Total skipped records across documents, chunks and embeddings.
-    skipped: Number
+    skipped: Number | str
     #: Number of documents replaced under the conflict policy.
-    documents_replaced: Number
+    documents_replaced: Number | str
     #: Number of chunks replaced under the conflict policy.
-    chunks_replaced: Number
+    chunks_replaced: Number | str
     #: Number of embeddings replaced under the conflict policy.
-    embeddings_replaced: Number
+    embeddings_replaced: Number | str
     #: Total replacements across documents, chunks and embeddings.
-    replaced: Number
+    replaced: Number | str
     #: Missing-chunk error count; zero in a successful write summary.
-    missing_chunks: Number
+    missing_chunks: Number | str
     #: Model mismatch error count; zero in a successful write summary.
-    model_mismatches: Number
+    model_mismatches: Number | str
     #: Error count in the successful summary. Failed calls raise exceptions.
-    errors: Number
+    errors: Number | str
     #: Non-fatal diagnostics collected while processing input records.
     warnings: list[Warning]
 
@@ -463,7 +463,7 @@ class CollectionInfo(TypedDict):
 
 class DatabaseStats(TypedDict):
     """Counts and storage estimates across the owner's current view, with its effective
-    resource configuration.
+    resource configuration. Byte counts and commit IDs above 2**53-1 use decimal strings.
     """
 
     #: Resource preset active on this database owner.
@@ -471,48 +471,48 @@ class DatabaseStats(TypedDict):
     #: Whether background compaction is enabled for this owner.
     background_compaction_enabled: bool
     #: Effective cache budget in MiB for this owner; it does not cap process RSS.
-    cache_budget_mb: Number
+    cache_budget_mb: Number | str
     #: Number of visible chunks in the reported scope.
-    chunk_count: Number
+    chunk_count: Number | str
     #: Number of visible collections covered by this report.
-    collection_count: Number
+    collection_count: Number | str
     # File length is a filesystem measurement. Live and obsolete bytes are
     # estimates derived from the catalog; adding them does not reconstruct the
     # physical length.
     #: Alias for live_bytes, the estimated size of live data in bytes.
-    data_size_bytes: Number
+    data_size_bytes: Number | str
     #: Estimated obsolete bytes based on the number of recorded tombstones.
-    dead_bytes_estimate: Number
+    dead_bytes_estimate: Number | str
     #: Alias for tombstone_count; counts deletion markers.
-    deleted_count: Number
+    deleted_count: Number | str
     #: Number of visible documents in the reported scope.
-    document_count: Number
+    document_count: Number | str
     #: Number of visible embeddings in the reported scope.
-    embedding_count: Number
+    embedding_count: Number | str
     #: Length of the database file in bytes; also returned as file_size_bytes.
-    file_size: Number
+    file_size: Number | str
     #: Length of the database file in bytes.
-    file_size_bytes: Number
+    file_size_bytes: Number | str
     #: On-disk format version of the database being reported.
-    format_version: Number
+    format_version: Number | str
     #: Encoded size in bytes of the usable database-wide index checkpoint, or zero
     #: when unavailable.
-    index_size_bytes: Number
+    index_size_bytes: Number | str
     #: Identifier of the last committed batch visible to this owner.
-    last_commit_id: Number
+    last_commit_id: Number | str
     #: Estimated live chunk and embedding payload bytes across collections. Where
     #: available the engine uses the stored payload lengths.
-    live_bytes: Number
+    live_bytes: Number | str
     #: Estimate combining tombstone-based obsolete bytes with an allowance for index
     #: storage. Actual space reclaimed by compaction can differ.
-    pending_compaction_bytes: Number
+    pending_compaction_bytes: Number | str
     #: Number of deletion markers in the reported scope.
-    tombstone_count: Number
+    tombstone_count: Number | str
 
 
 class CollectionStats(TypedDict):
     """Counts, derived index statistics and storage estimates reported for one visible
-    collection.
+    collection. Byte counts and commit IDs above 2**53-1 use decimal strings.
     """
 
     #: Name of the collection to which this report applies.
@@ -526,73 +526,73 @@ class CollectionStats(TypedDict):
     #: Whether background compaction is enabled for this owner.
     background_compaction_enabled: bool
     #: Effective owner cache budget in MiB, shared across its collections.
-    cache_budget_mb: Number
+    cache_budget_mb: Number | str
     #: Number of visible documents in the reported scope.
-    document_count: Number
+    document_count: Number | str
     #: Number of visible chunks in the reported scope.
-    chunk_count: Number
+    chunk_count: Number | str
     #: Number of visible embeddings in the reported scope.
-    embedding_count: Number
+    embedding_count: Number | str
     #: Number of deletion markers in the reported scope.
-    tombstone_count: Number
+    tombstone_count: Number | str
     #: Alias for tombstone_count; counts deletion markers.
-    deleted_count: Number
+    deleted_count: Number | str
     # A usable checkpoint can contain terms that currently have no postings.
     # Collection statistics count terms with postings for this collection; the
     # database term count below includes retained empty keys.
     #: Distinct terms with postings in this collection's usable checkpoint. An
     #: unavailable checkpoint reports zero.
-    text_index_terms: Number
+    text_index_terms: Number | str
     #: Number of lexical index segments reported for the collection.
-    text_index_segments: Number
+    text_index_segments: Number | str
     #: Live embeddings in this collection, counted from the catalog even when the
     #: persisted index needs rebuilding.
-    vector_count: Number
+    vector_count: Number | str
     #: Size in bytes of the entire usable database checkpoint, repeated for each
     #: collection. Zero when unavailable.
-    index_size_bytes: Number
+    index_size_bytes: Number | str
     #: Alias for live_bytes, the estimated size of live data in bytes.
-    data_size_bytes: Number
+    data_size_bytes: Number | str
     #: Estimated live chunk and embedding payload bytes for this collection.
-    live_bytes: Number
+    live_bytes: Number | str
     #: Estimated bytes attributable to obsolete data.
-    dead_bytes_estimate: Number
+    dead_bytes_estimate: Number | str
     #: Identifier of the last committed batch visible to this owner.
-    last_commit_id: Number
+    last_commit_id: Number | str
     #: Collection's estimated obsolete bytes plus an allowance for the database-wide
     #: checkpoint. Adding this field across collections can count the same allowance
     #: repeatedly.
-    pending_compaction_bytes: Number
+    pending_compaction_bytes: Number | str
     #: On-disk format version of the database being reported.
-    format_version: Number
+    format_version: Number | str
 
 
 class IndexStats(TypedDict):
     """Database-wide derived index coverage and usage. Reading these counters does not
-    rebuild an index.
+    rebuild an index. Byte counts and commit IDs above 2**53-1 use decimal strings.
     """
 
     #: Encoded size in bytes of the usable database-wide index checkpoint, or zero
     #: when unavailable.
-    index_size_bytes: Number
+    index_size_bytes: Number | str
     #: Commit sequence number covered by the persisted index, or None when unavailable.
-    last_index_commit_id: Number | None
+    last_index_commit_id: Number | str | None
     #: Whether the engine reports that a persistent index still needs rebuilding.
     rebuild_needed: bool
     # The engine reports one text and one vector segment per visible collection
     # when checkpoint coverage is available. A rebuild-needed report can still show
     # live vectors from the catalog.
     #: Number of lexical index segments reported for the database.
-    text_segments: Number
+    text_segments: Number | str
     #: Distinct term keys across all collection dictionaries in the usable
     #: checkpoint, including keys with no postings. Zero when the checkpoint is
     #: unavailable.
-    text_terms: Number
+    text_terms: Number | str
     #: Live embeddings counted from the catalog, including when the derived index
     #: needs rebuilding.
-    vector_count: Number
+    vector_count: Number | str
     #: Number of vector index segments reported for the database.
-    vector_segments: Number
+    vector_segments: Number | str
 
 
 # These counts describe recall and retention, not the origin of every score on the
@@ -789,7 +789,7 @@ class CheckIndexSuffix(TypedDict):
     covered_last_commit_sequence_no: int | str
     #: Number of visible collections covered by this report.
     collection_count: int | str
-    #: Number of visible documents recorded by the checkpoint.
+    #: Number of distinct documents with at least one chunk in the checkpoint text segments.
     live_document_count: int | str
     #: Number of visible chunks recorded by the checkpoint.
     live_chunk_count: int | str
@@ -816,7 +816,7 @@ class CheckCounts(TypedDict):
     decimal strings.
     """
 
-    #: Visible documents counted by the scan.
+    #: All visible documents in committed data, including documents with no chunks.
     live_documents: int | str
     #: Visible chunks counted by the scan.
     live_chunks: int | str

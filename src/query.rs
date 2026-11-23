@@ -51,7 +51,7 @@ pub(crate) fn validate_search_top_k(top_k: usize) -> Result<()> {
 // and the evidence used to produce them.
 /// Builds a text, vector or hybrid search on one collection. Call [`execute`](Self::execute) to run it.
 ///
-/// See the [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.0/source/docs/rust.md) for a write, search and reopen example.
+/// See the [Rust programming guide](https://docs.rs/crate/cofferdb/0.2.1/source/docs/rust.md) for a write, search and reopen example.
 #[derive(Clone)]
 pub struct SearchBuilder {
     // Keeps the database handle and the collection ID together until execution

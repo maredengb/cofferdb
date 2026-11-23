@@ -76,7 +76,7 @@ class PublicTypesTests(unittest.TestCase):
         package = importlib.resources.files("cofferdb")
         self.assertTrue(package.joinpath("py.typed").is_file())
         stub = ast.parse(package.joinpath("__init__.pyi").read_text())
-        self.assertEqual(cofferdb.__version__, "0.2.0")
+        self.assertEqual(cofferdb.__version__, "0.2.1")
         self.assertIsInstance(cofferdb.engine_version, str)
         for name in cofferdb.__all__:
             self.assertTrue(hasattr(cofferdb, name), name)

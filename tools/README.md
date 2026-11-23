@@ -74,7 +74,7 @@ installing a package or loading its native extension:
 ```sh
 python3.12 -B tools/check_python_builder.py /tmp/cofferdb-builder-checks \
   --source /tmp/cofferdb-prepared \
-  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.2.0-cp312-cp312-macosx_15_0_arm64.whl \
+  --wheel /tmp/cofferdb-wheels/cp312/cofferdb-0.2.1-cp312-cp312-macosx_15_0_arm64.whl \
   --python /absolute/path/to/python3.12
 ```
 

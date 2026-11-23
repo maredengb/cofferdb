@@ -82,6 +82,20 @@ the marker itself and the suffix; its containing batch still needs a valid commi
 
 ## Rebuildable checkpoint suffix
 
+Version 0.2.1 stores and checks the combined length of the index record frames
+as a 64-bit byte count. The suffix adds a 105-byte header, 46 bytes per extent
+and a 10-byte completion marker. Actual file length, checked offsets, available
+disk space and the memory needed for directories and individual operations
+bound a usable checkpoint. Opening a database still verifies its index, and
+refreshing it after a write still rewrites the suffix. If preparing that index
+fails after a business commit, a returned error with `primary_effect=committed`
+identifies the visible batch in `last_valid_commit`. Do not replay that batch.
+
+The 0.2.0 reader accepts up to 536,870,912 bytes of index frames. This legacy
+threshold applies to the index records alone. A 0.2.1 reader can use a larger
+healthy checkpoint already present in a 0.2.0 file on its first read-only open.
+See the [maintenance guide](backup.md#using-020-and-021-on-the-same-file) when sharing files across versions.
+
 The suffix has a `CFIDXCHK` checkpoint header, index records, an extent table and
 a `CFOK` complete trailer. Index record envelopes use `CFIR`. Metadata records
 describe snapshot coverage; text and vector segments hold the corresponding
