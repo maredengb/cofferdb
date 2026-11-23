@@ -379,7 +379,10 @@ def build(source, output, pythons, maturin):
               f'--remap-path-prefix={cargo_home}=cargo-dependencies',
               f'--remap-path-prefix={sysroot}=rust-toolchain']
     if platform.system() == 'Darwin':
-        flags += ['-C',f'link-arg=-Wl,-oso_prefix,{target}/']
+        # The linker debug map can record absolute paths to Rust toolchain
+        # archives outside the Cargo target directory. Omit debug symbols
+        # from the distributed extension while preserving runtime symbols.
+        flags += ['-C', 'link-arg=-Wl,-S']
     env.pop('RUSTFLAGS',None)
     env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
     selectors = ('RUSTC','RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTUP_TOOLCHAIN',
